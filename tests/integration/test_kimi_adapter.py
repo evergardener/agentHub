@@ -28,8 +28,6 @@ async def test_kimi_research_task(tmp_path, monkeypatch):
     (ws / "logs").mkdir(parents=True)
     monkeypatch.setenv("AGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("NATS_URL", "nats://127.0.0.1:1")  # 离线 → spool
-    # kimi-k3 钱包充值前，临时用可用模型验证链路（ADR-0003 记录了选型过程）
-    monkeypatch.setenv("KIMI_MODEL", "teamrouter/gpt-5.4-mini")
 
     from adapters.kimi.server import create_app
 
@@ -70,7 +68,6 @@ async def test_kimi_then_codex_chain(tmp_path, monkeypatch):
     (ws / "logs").mkdir(parents=True)
     monkeypatch.setenv("AGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("NATS_URL", "nats://127.0.0.1:1")
-    monkeypatch.setenv("KIMI_MODEL", "teamrouter/gpt-5.4-mini")
 
     from orchestrator.task_manager import TaskManager
     from orchestrator import state_store

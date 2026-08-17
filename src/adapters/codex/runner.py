@@ -69,18 +69,18 @@ async def run(task: A2aTask, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> 
 
     env = dict(os.environ)
     env.setdefault("CI", "true")
-    # 9router 密钥注入（ADR-0003）：env 缺失时从 Keychain 读取
-    if "NINEROUTER_API_KEY" not in env:
+    # cliproxy 密钥注入：env 缺失时从 Keychain 读取
+    if "CLIPROXY_API_KEY" not in env:
         try:
             import subprocess
 
             key = subprocess.run(
                 ["security", "find-generic-password", "-s", "agent-system",
-                 "-a", "9router-api-key", "-w"],
+                 "-a", "cliproxy-api-key", "-w"],
                 capture_output=True, text=True, check=True,
             ).stdout.strip()
             if key:
-                env["NINEROUTER_API_KEY"] = key
+                env["CLIPROXY_API_KEY"] = key
         except Exception:
             pass  # 无 key 时让 codex 自己报错
 

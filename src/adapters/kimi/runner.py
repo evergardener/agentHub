@@ -1,10 +1,10 @@
 """Kimi 运行时 — 设计文档 §Phase 6：研究 / 长上下文 Worker。
 
-通过 OpenAI 兼容端点调用 Kimi 模型：
-  KIMI_API_BASE      默认 https://9router.evergardenviolet.top/v1
-  KIMI_MODEL         默认 teamrouter/kimi-k3（余额不足时可临时切其他模型）
-  NINEROUTER_API_KEY 缺省从 Keychain agent-system/9router-api-key 注入
-                     （刻意不读 KIMI_API_KEY：与 Kimi Work 桌面端注入的同名变量冲突）
+通过 OpenAI 兼容端点调用模型：
+  KIMI_API_BASE     默认 http://127.0.0.1:8317/v1（本地 cliproxy → siliconflow）
+  KIMI_MODEL        默认 deepseek-ai/DeepSeek-V4-Flash
+  CLIPROXY_API_KEY  缺省从 Keychain agent-system/cliproxy-api-key 注入
+                    （刻意不读 KIMI_API_KEY：与 Kimi Work 桌面端注入的同名变量冲突）
 
 权限边界（§13 Kimi）：shell/ssh denied —— 本 runner 只发 HTTP，不执行命令。
 """
@@ -20,8 +20,8 @@ import httpx
 
 from adapters.common import A2aTask, save_artifact
 
-DEFAULT_BASE = "https://9router.evergardenviolet.top/v1"
-DEFAULT_MODEL = "teamrouter/kimi-k3"
+DEFAULT_BASE = "http://127.0.0.1:8317/v1"
+DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash"
 
 
 class KimiFailed(RuntimeError):
@@ -30,14 +30,14 @@ class KimiFailed(RuntimeError):
 
 def _api_key() -> str:
     # 注意：不要读 KIMI_API_KEY —— Kimi Work 桌面端会注入同名变量（指向其自有
-    # 网关），会造成 401。这里只认 NINEROUTER_API_KEY，缺省回落到 Keychain。
-    key = os.environ.get("NINEROUTER_API_KEY")
+    # 网关），会造成 401。这里只认 CLIPROXY_API_KEY，缺省回落到 Keychain。
+    key = os.environ.get("CLIPROXY_API_KEY")
     if key:
         return key
     try:
         return subprocess.run(
             ["security", "find-generic-password", "-s", "agent-system",
-             "-a", "9router-api-key", "-w"],
+             "-a", "cliproxy-api-key", "-w"],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
     except Exception:
