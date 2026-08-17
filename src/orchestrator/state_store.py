@@ -126,6 +126,7 @@ def record_event(conn: sqlite3.Connection, event: dict) -> None:
         )
         conn.commit()
     except sqlite3.IntegrityError:
+        conn.rollback()  # 失败 INSERT 会留下持锁的开放事务，必须回滚
         raise DuplicateEvent(event["event_id"])
 
 

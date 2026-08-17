@@ -1,54 +1,8 @@
-# Agent Registry — 设计文档 §4
+# Worker 注册表（静态 MVP；动态发现见 §29）
 agents:
-  hermes:
-    id: hermes
-    role: orchestrator
-    enabled: true
-    endpoint: http://127.0.0.1:8100
-    protocol: a2a
-    max_concurrent_tasks: 4
-    skills:
-      - planning
-      - routing
-      - browser
-      - shell
-
   codex:
-    id: codex
-    role: worker
-    enabled: true
     endpoint: http://127.0.0.1:8201
-    protocol: a2a
-    max_concurrent_tasks: 1
-    on_lease_expired: requeue
-    skills:
-      - coding
-      - testing
-      - debugging
-      - git
-      - code_review
-
+    skills: [coding, testing, devops]
   kimi:
-    id: kimi
-    role: worker
-    enabled: false   # Phase 6 接入
     endpoint: http://127.0.0.1:8202
-    protocol: a2a
-    max_concurrent_tasks: 2
-    on_lease_expired: requeue
-    skills:
-      - research
-      - long_context
-      - document_analysis
-
-  fake:
-    id: fake
-    role: worker
-    enabled: true    # Phase 1 PoC 专用
-    endpoint: http://127.0.0.1:8299
-    protocol: a2a
-    max_concurrent_tasks: 1
-    on_lease_expired: requeue
-    skills:
-      - echo
-      - smoke_test
+    skills: [research, long_context, analysis]

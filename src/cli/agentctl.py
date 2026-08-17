@@ -203,6 +203,65 @@ def cmd_events(db_path: Path, follow: bool, interval: float,
         time.sleep(interval)
 
 
+def cmd_grant_list(db_path: Path, show_all: bool) -> int:
+    from hermes.policy import ApprovalPolicy
+
+    conn = _conn(db_path)
+    rows = ApprovalPolicy.list_grants(conn, active_only=not show_all)
+    if not rows:
+        print("(no grants)")
+        return 0
+    print(f"{'ID':<5} {'PATTERN':<16} {'BY':<8} {'CREATED':<26} REVOKED")
+    for r in rows:
+        print(f"{r['id']:<5} {r['pattern']:<16} {r['granted_by']:<8}"
+              f" {r['created_at']:<26} {r['revoked_at'] or '-'}")
+    return 0
+
+
+def cmd_grant_revoke(db_path: Path, grant_id: int) -> int:
+    from hermes.policy import ApprovalPolicy
+
+    conn = _conn(db_path)
+    if ApprovalPolicy.revoke(conn, grant_id):
+        print(f"grant #{grant_id} revoked")
+        return 0
+    print(f"grant #{grant_id} not found or already revoked")
+    return 1
+
+
+def cmd_chat(db_path: Path, one_shot: str | None) -> int:
+    """hermes 对话入口（Evolution v3 §6.1）。"""
+    import asyncio
+
+    from hermes.brain import Hermes
+    from orchestrator.task_manager import TaskManager
+
+    tm = TaskManager(db_path=db_path)
+    brain = Hermes(tm)
+
+    async def _once(text: str) -> None:
+        reply = await brain.chat(text)
+        print(f"hermes> {reply}")
+
+    if one_shot:
+        asyncio.run(_once(one_shot))
+        return 0
+
+    print("hermes chat — 输入 quit 退出")
+    while True:
+        try:
+            text = input("you> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if text in ("quit", "exit", ""):
+            return 0
+        try:
+            asyncio.run(_once(text))
+        except Exception as e:
+            print(f"hermes> [error] {type(e).__name__}: {e}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="agentctl")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -234,6 +293,17 @@ def main() -> int:
     p_ev.add_argument("--interval", type=float, default=1.0)
     p_ev.add_argument("--type", dest="event_type", default=None)
 
+    p_grant = sub.add_parser("grant")
+    grant_sub = p_grant.add_subparsers(dest="sub", required=True)
+    p_gl = grant_sub.add_parser("list")
+    p_gl.add_argument("--all", action="store_true")
+    p_gr = grant_sub.add_parser("revoke")
+    p_gr.add_argument("grant_id", type=int)
+
+    p_chat = sub.add_parser("chat")
+    p_chat.add_argument("message", nargs="?", default=None,
+                        help="one-shot 模式；缺省进入交互循环")
+
     args = parser.parse_args()
     if args.command == "status":
         return cmd_status(args.db)
@@ -253,6 +323,12 @@ def main() -> int:
         return cmd_task_reject(args.db, args.task_id, args.notes)
     if args.command == "events":
         return cmd_events(args.db, args.follow, args.interval, args.event_type)
+    if args.command == "grant" and args.sub == "list":
+        return cmd_grant_list(args.db, args.all)
+    if args.command == "grant" and args.sub == "revoke":
+        return cmd_grant_revoke(args.db, args.grant_id)
+    if args.command == "chat":
+        return cmd_chat(args.db, args.message)
     return 2
 
 

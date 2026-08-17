@@ -1,0 +1,221 @@
+"""Hermes 工具集 — brain 的工具调用循环分发到这里（Evolution v3 §6.1）。
+
+每个工具 = JSON schema（给 LLM）+ 异步实现（操作 TaskManager / policy）。
+审批语义：
+  delegate_task 先做策略判定——auto/granted 直接委派；
+  ask 则不动任务状态，返回 needs_approval，由 hermes 在对话里询问用户。
+  用户批准后由 approve_and_delegate 显式放行（对话即审批记录）。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from uuid import uuid4
+
+import yaml
+
+from hermes.policy import ApprovalPolicy
+from orchestrator.task_manager import TaskManager
+
+DEFAULT_AGENTS = Path(__file__).resolve().parents[2] / "config" / "agents.yaml"
+
+
+def load_agents(path: Path | None = None) -> dict:
+    p = path or DEFAULT_AGENTS
+    if not p.exists():
+        return {}
+    return (yaml.safe_load(p.read_text(encoding="utf-8")) or {}).get("agents", {})
+
+
+TOOL_SCHEMAS: list[dict] = [
+    {"type": "function", "function": {
+        "name": "create_task",
+        "description": "创建任务（可选父子/依赖关系）。返回 task_id。",
+        "parameters": {"type": "object", "properties": {
+            "objective": {"type": "string", "description": "任务目标"},
+            "project": {"type": "string"},
+            "depends_on": {"type": "array", "items": {"type": "string"},
+                           "description": "依赖的 task_id 列表"},
+        }, "required": ["objective"]}}},
+    {"type": "function", "function": {
+        "name": "delegate_task",
+        "description": "把任务委派给指定 agent（codex/kimi）。"
+                       "写操作会先经过审批策略；返回 needs_approval 时"
+                       "必须先询问用户，不得重复调用本工具。",
+        "parameters": {"type": "object", "properties": {
+            "task_id": {"type": "string"},
+            "agent_id": {"type": "string", "enum": ["codex", "kimi"]},
+        }, "required": ["task_id", "agent_id"]}}},
+    {"type": "function", "function": {
+        "name": "approve_and_delegate",
+        "description": "用户已在对话中批准后调用：记录批准并委派任务。",
+        "parameters": {"type": "object", "properties": {
+            "task_id": {"type": "string"},
+            "agent_id": {"type": "string", "enum": ["codex", "kimi"]},
+            "note": {"type": "string", "description": "用户批准备注"},
+        }, "required": ["task_id", "agent_id"]}}},
+    {"type": "function", "function": {
+        "name": "wait_task",
+        "description": "等待任务到达终态（completed/failed/cancelled）。"
+                       "长任务安全：轮询状态库，不占连接。",
+        "parameters": {"type": "object", "properties": {
+            "task_id": {"type": "string"},
+            "timeout_seconds": {"type": "integer", "default": 600},
+        }, "required": ["task_id"]}}},
+    {"type": "function", "function": {
+        "name": "review_task",
+        "description": "复审已完成任务：approved=true 验收（自动解锁依赖任务），"
+                       "false 返工。",
+        "parameters": {"type": "object", "properties": {
+            "task_id": {"type": "string"},
+            "approved": {"type": "boolean"},
+            "notes": {"type": "string"},
+        }, "required": ["task_id", "approved"]}}},
+    {"type": "function", "function": {
+        "name": "list_tasks",
+        "description": "列出任务（可按状态过滤）。",
+        "parameters": {"type": "object", "properties": {
+            "status": {"type": "string"},
+        }}}},
+    {"type": "function", "function": {
+        "name": "list_agents",
+        "description": "列出可用 worker 及其技能。",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "grant_operation",
+        "description": "用户说『以后某类操作自动批准』时调用：创建常驻授权。",
+        "parameters": {"type": "object", "properties": {
+            "pattern": {"type": "string",
+                        "description": "操作关键词，如 重启 / 部署"},
+            "note": {"type": "string"},
+        }, "required": ["pattern"]}}},
+    {"type": "function", "function": {
+        "name": "revoke_grant",
+        "description": "撤销常驻授权。",
+        "parameters": {"type": "object", "properties": {
+            "grant_id": {"type": "integer"},
+        }, "required": ["grant_id"]}}},
+]
+
+
+class HermesTools:
+    def __init__(self, tm: TaskManager, policy: ApprovalPolicy,
+                 agents_path: Path | None = None):
+        self.tm = tm
+        self.policy = policy
+        self.agents = load_agents(agents_path)
+
+    async def dispatch(self, name: str, args: dict) -> dict:
+        handler = getattr(self, f"_tool_{name}", None)
+        if handler is None:
+            return {"error": f"unknown tool: {name}"}
+        try:
+            return await handler(**args)
+        except Exception as e:  # 工具失败回报给 LLM 而非中断对话
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    # ---------- 任务 ----------
+
+    async def _tool_create_task(self, objective: str,
+                                project: str | None = None,
+                                depends_on: list[str] | None = None) -> dict:
+        task_id = self.tm.create_task(objective, project=project,
+                                      depends_on=depends_on)
+        return {"task_id": task_id, "status": "created",
+                "risk": self.policy.classify(objective)}
+
+    async def _tool_delegate_task(self, task_id: str, agent_id: str) -> dict:
+        row = self._task_or_error(task_id)
+        if "error" in row:
+            return row
+        if agent_id not in self.agents:
+            return {"error": f"unknown agent: {agent_id}",
+                    "known": sorted(self.agents)}
+        decision = self.policy.decide(self.tm.conn, row["objective"])
+        if decision.action == "ask":
+            return {"status": "needs_approval", "task_id": task_id,
+                    "risk": decision.risk, "reason": decision.reason,
+                    "hint": "请在对话中询问用户批准；用户同意后调用 "
+                            "approve_and_delegate。"}
+        if decision.action == "granted":
+            self._record_auto_approval(task_id, decision)
+        await self.tm.delegate_task(
+            task_id, self.agents[agent_id]["endpoint"], agent_id)
+        return {"status": "delegated", "task_id": task_id,
+                "agent": agent_id, "approval": decision.action}
+
+    async def _tool_approve_and_delegate(self, task_id: str, agent_id: str,
+                                         note: str = "") -> dict:
+        row = self._task_or_error(task_id)
+        if "error" in row:
+            return row
+        if agent_id not in self.agents:
+            return {"error": f"unknown agent: {agent_id}"}
+        # 对话即审批：记录批准事件后委派
+        from orchestrator import state_store
+        state_store.record_event(self.tm.conn, {
+            "event_id": f"approval-{task_id}-{uuid4().hex[:8]}",
+            "event_type": "task.approved", "task_id": task_id,
+            "payload": {"by": "user", "note": note},
+        })
+        await self.tm.delegate_task(
+            task_id, self.agents[agent_id]["endpoint"], agent_id)
+        return {"status": "delegated", "task_id": task_id,
+                "agent": agent_id, "approval": "user"}
+
+    async def _tool_wait_task(self, task_id: str,
+                              timeout_seconds: int = 600) -> dict:
+        status = await self.tm.wait_task(task_id, timeout=timeout_seconds)
+        row = self._task_or_error(task_id)
+        return {"task_id": task_id, "status": status,
+                "objective": row.get("objective")}
+
+    async def _tool_review_task(self, task_id: str, approved: bool,
+                                notes: str = "") -> dict:
+        new_status = self.tm.review_result(task_id, approved=approved,
+                                           notes=notes)
+        return {"task_id": task_id, "status": new_status}
+
+    async def _tool_list_tasks(self, status: str | None = None) -> dict:
+        from orchestrator.state_store import list_tasks
+        rows = list_tasks(self.tm.conn, status=status)
+        return {"tasks": [
+            {"id": r["id"], "status": r["status"],
+             "assigned_to": r["assigned_to"], "objective": r["objective"][:80]}
+            for r in rows]}
+
+    async def _tool_list_agents(self) -> dict:
+        return {"agents": [
+            {"id": k, "endpoint": v["endpoint"], "skills": v.get("skills", [])}
+            for k, v in self.agents.items()]}
+
+    # ---------- 常驻授权 ----------
+
+    async def _tool_grant_operation(self, pattern: str, note: str = "") -> dict:
+        if any(k in pattern for k in self.policy.never_grant):
+            return {"error": f"'{pattern}' 属高危类（never_grant），"
+                             "不允许常驻授权"}
+        gid = self.policy.grant(self.tm.conn, pattern, note=note)
+        return {"grant_id": gid, "pattern": pattern, "status": "granted"}
+
+    async def _tool_revoke_grant(self, grant_id: int) -> dict:
+        ok = self.policy.revoke(self.tm.conn, grant_id)
+        return {"grant_id": grant_id, "revoked": ok}
+
+    # ---------- 内部 ----------
+
+    def _task_or_error(self, task_id: str) -> dict:
+        from orchestrator import state_store
+        row = state_store.get_task(self.tm.conn, task_id)
+        if row is None:
+            return {"error": f"task not found: {task_id}"}
+        return dict(row)
+
+    def _record_auto_approval(self, task_id: str, decision) -> None:
+        from orchestrator import state_store
+        state_store.record_event(self.tm.conn, {
+            "event_id": f"auto-approval-{task_id}-{decision.grant_id}",
+            "event_type": "task.auto_approved", "task_id": task_id,
+            "payload": {"grant_id": decision.grant_id,
+                        "reason": decision.reason},
+        })

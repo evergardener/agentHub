@@ -1,46 +1,29 @@
-# 权限模型 — 设计文档 §13
-# Phase 1–4 依赖进程自觉 + 配置约束；强制隔离由 agentgateway（Phase 5）落地。
-permissions:
-  hermes:
-    filesystem: rw:workspace
-    shell: limited
-    browser: rw
-    nats: pub/sub
-    sqlite: rw-lifecycle-commands   # 仅限 §22.3 规定的生命周期命令
-    memory: rw
-    a2a: client
+# Hermes 审批策略 — Evolution v3 §6.2 / §6.2.1
+# 关键词匹配（包含即命中）。粒度后续可升级为结构化操作类型。
 
-  codex:
-    filesystem: rw:assigned-project
-    git: rw:assigned-repo
-    shell: sandbox:project-scope
-    nats: publish:task,artifact
-    sqlite: none
-    memory: none
-    ssh: denied
+auto_approve:        # 只读/查询类：hermes 直接批准
+  - 查询
+  - 读取
+  - 分析
+  - 检索
+  - 总结
+  - 列出
+  - 状态
+  - 调研
 
-  kimi:
-    filesystem: read:task-context
-    artifact: write:own-task
-    shell: denied
-    ssh: denied
-    nats: publish:task
-    memory: none
+require_user:        # 写操作：需批准（对话内 / Web UI / 常驻授权）
+  - 修改
+  - 写入
+  - 创建文件
+  - 部署
+  - 重启
+  - 安装
+  - 拉取
+  - 提交
+  - 推送
 
-  fake:
-    filesystem: rw:own-task-workspace
-    shell: denied
-    nats: publish:task
-    sqlite: none
-    memory: none
-
-# 危险操作 — 必须用户审批（设计文档 §18）
-approval_required:
-  - destructive_filesystem
-  - git_force_push
-  - production_ssh
-  - docker_prune
-  - database_ddl_delete
-  - credential_change
-  - external_publish
-  - payment
+never_grant:         # 高危：只允许用户逐次批准，禁止常驻授权
+  - 删除
+  - 发布
+  - 对外
+  - 生产
