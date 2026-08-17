@@ -1,109 +1,63 @@
-"""SQLite state store — 设计文档 §6。
+"""SQLite 连接与迁移 — 设计文档 §6 / §17.8。
 
-唯一事实源。写入规则见 §22.3（单一写者原则）。
-Phase 0 提供建库 + schema + counters；完整 State Writer 在 Phase 3。
+迁移机制：src/state/migrations/NNN_name.sql 按版本号顺序应用，
+已应用版本记录在 schema_migrations 表。
 """
 
 from __future__ import annotations
 
+import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS agents (
-    id TEXT PRIMARY KEY,
-    role TEXT NOT NULL,
-    endpoint TEXT,
-    protocol TEXT,
-    status TEXT NOT NULL DEFAULT 'offline',
-    skills_json TEXT,
-    max_concurrent_tasks INTEGER NOT NULL DEFAULT 1,
-    last_seen_at TEXT,
-    lease_expires_at TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
+CST = timezone(timedelta(hours=8))
+MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
-CREATE TABLE IF NOT EXISTS tasks (
-    id TEXT PRIMARY KEY,
-    schema_version INTEGER NOT NULL DEFAULT 1,
-    parent_id TEXT,
-    root_id TEXT,
-    project TEXT,
-    created_by TEXT,
-    assigned_to TEXT,
-    status TEXT NOT NULL,
-    priority TEXT,
-    objective TEXT NOT NULL,
-    depends_on_json TEXT,
-    constraints_json TEXT,
-    timeout_seconds INTEGER,
-    max_retries INTEGER NOT NULL DEFAULT 2,
-    idempotency_key TEXT UNIQUE,
-    result_summary TEXT,
-    error_message TEXT,
-    review_json TEXT,
-    retry_count INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    started_at TEXT,
-    completed_at TEXT,
-    updated_at TEXT NOT NULL
-);
 
-CREATE TABLE IF NOT EXISTS artifacts (
-    id TEXT PRIMARY KEY,
-    task_id TEXT NOT NULL,
-    agent_id TEXT,
-    type TEXT,
-    name TEXT,
-    path TEXT,
-    sha256 TEXT,
-    metadata_json TEXT,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS task_runs (
-    id TEXT PRIMARY KEY,
-    task_id TEXT NOT NULL,
-    agent_id TEXT NOT NULL,
-    attempt INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    started_at TEXT,
-    completed_at TEXT,
-    error_message TEXT,
-    trace_id TEXT
-);
-
-CREATE TABLE IF NOT EXISTS events (
-    id TEXT PRIMARY KEY,
-    subject TEXT NOT NULL,
-    task_id TEXT,
-    agent_id TEXT,
-    event_type TEXT NOT NULL,
-    payload_json TEXT,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS counters (
-    name TEXT PRIMARY KEY,
-    value INTEGER NOT NULL DEFAULT 0
-);
-"""
+def now_iso() -> str:
+    return datetime.now(CST).isoformat(timespec="seconds")
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
-    """打开数据库并启用 WAL（设计文档 §17.8）。"""
+    """打开数据库并启用 WAL（§17.8）。"""
     conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
     return conn
 
 
+def migrate(conn: sqlite3.Connection) -> list[int]:
+    """应用未执行的迁移，返回本次应用的版本列表。"""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_migrations ("
+        "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);"
+    )
+    applied = {
+        r[0] for r in conn.execute("SELECT version FROM schema_migrations;")
+    }
+    newly: list[int] = []
+    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        m = re.match(r"^(\d+)_", path.name)
+        if not m:
+            continue
+        version = int(m.group(1))
+        if version in applied:
+            continue
+        conn.executescript(path.read_text(encoding="utf-8"))
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?);",
+            (version, now_iso()),
+        )
+        conn.commit()
+        newly.append(version)
+    return newly
+
+
 def init_db(db_path: str | Path) -> sqlite3.Connection:
     conn = connect(db_path)
-    conn.executescript(SCHEMA)
-    conn.commit()
+    migrate(conn)
     return conn
 
 

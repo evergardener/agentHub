@@ -85,7 +85,7 @@ def build_app(
             return _rpc_error(rpc_id, -32602, "message has no text part")
 
         task = A2aTask(
-            id=temp_task_id(),
+            id=metadata.get("taskId") or temp_task_id(),  # Hermes 分配的 ID 优先
             status_state="submitted",
             objective=objective,
             idempotency_key=metadata.get("idempotencyKey"),
