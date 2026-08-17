@@ -1,0 +1,106 @@
+# agentHub 控制面 compose 栈（Evolution v3 M2）
+#
+# 拓扑：
+#   容器内：nats / state-writer / agentgateway（+ 可选 janitor、event-logger）
+#   宿主机：worker adapter（codex/kimi/pi...，用户自装），心跳注册进 agentHub
+#   宿主机 worker 配置：LAS_NATS_URL=nats://127.0.0.1:4222
+#                      LAS_AGENT_ENDPOINT=http://host.docker.internal:<port>
+# 用法：
+#   cp .env.example .env  # 填 LAS_LLM_API_KEY / LAS_GATEWAY_API_KEY
+#   docker compose up -d                 # 控制面
+#   docker compose run --rm agentctl chat   # 与 hermes 对话（交互 CLI）
+
+x-agenthub: &agenthub
+  image: agenthub:latest
+  build: .
+
+services:
+  nats:
+    image: nats:2.11-alpine
+    command: ["-js", "-sd", "/data"]
+    volumes:
+      - nats-data:/data
+    ports:
+      - "127.0.0.1:4222:4222"   # 宿主机 worker 经此接入
+    restart: unless-stopped
+
+  state-writer:
+    <<: *agenthub
+    environment:
+      LAS_NATS_URL: nats://nats:4222
+      LAS_WORKSPACE: /data/workspace
+    volumes:
+      - agent-data:/data
+    depends_on:
+      - nats
+    restart: unless-stopped
+
+  janitor:
+    <<: *agenthub
+    command: ["python", "-m", "state.janitor"]
+    environment:
+      LAS_NATS_URL: nats://nats:4222
+      LAS_WORKSPACE: /data/workspace
+    volumes:
+      - agent-data:/data
+    depends_on:
+      - state-writer
+    restart: unless-stopped
+
+  agentgateway:
+    <<: *agenthub
+    command: ["agentgateway", "-f", "/app/infra/agentgateway/config.docker.yaml"]
+    environment:
+      # 在 .env 里配置 LAS_GATEWAY_API_KEY；留空则 gateway 拒绝所有请求
+      GATEWAY_API_KEY: ${LAS_GATEWAY_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # 访问宿主机 worker
+    ports:
+      - "127.0.0.1:8300:8300"
+    depends_on:
+      - nats
+    restart: unless-stopped
+
+  # 交互式 CLI：docker compose run --rm agentctl chat
+  agentctl:
+    <<: *agenthub
+    profiles: ["cli"]
+    command: ["agentctl", "chat"]
+    stdin_open: true
+    tty: true
+    environment:
+      LAS_NATS_URL: nats://nats:4222
+      LAS_WORKSPACE: /data/workspace
+      LAS_GATEWAY_URL: http://agentgateway:8300
+      LAS_GATEWAY_API_KEY: ${LAS_GATEWAY_API_KEY:-}
+      LAS_LLM_BASE_URL: ${LAS_LLM_BASE_URL:-http://host.docker.internal:8317/v1}
+      LAS_LLM_API_KEY: ${LAS_LLM_API_KEY:-}
+      LAS_LLM_MODEL: ${LAS_LLM_MODEL:-deepseek-ai/DeepSeek-V4-Flash}
+      LAS_HINDSIGHT_URL: ${LAS_HINDSIGHT_URL:-http://host.docker.internal:18888}
+      LAS_HINDSIGHT_API_KEY: ${LAS_HINDSIGHT_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - agent-data:/data
+    depends_on:
+      - state-writer
+
+  # M3 备用：PostgreSQL 状态库（默认不启动；启用见 Evolution v3 §3）
+  postgres:
+    image: postgres:17-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: agenthub
+      # M3 启用前请改密码（.env: LAS_PG_PASSWORD）
+      POSTGRES_PASSWORD: ${LAS_PG_PASSWORD:-agenthub-dev-only}
+      POSTGRES_DB: agenthub
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    restart: unless-stopped
+
+volumes:
+  nats-data:
+  agent-data:
+  pg-data:

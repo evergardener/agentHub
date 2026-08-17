@@ -1,0 +1,59 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+# agentgateway 容器内配置（docker compose 栈，Evolution v3 M2）
+#
+# 与 config.yaml（宿主机版）的差异：backends 指向 host.docker.internal ——
+# worker adapter 由用户装在宿主机，容器经此回连宿主机。
+# 认证/ACL/超时策略与宿主机版一致；key 经 $GATEWAY_API_KEY 注入。
+
+gateways:
+  default:
+    port: 8300
+    apiKey:
+      mode: strict
+      keys:
+      - key: "$GATEWAY_API_KEY"
+        metadata:
+          user: hermes
+          role: orchestrator
+          agents: codex,kimi   # ACL：允许访问的 agent 列表
+
+routes:
+- name: agent-codex
+  matches:
+  - path:
+      pathPrefix: /agents/codex
+  policies:
+    urlRewrite:
+      path:
+        prefix: /            # 剥掉 /agents/codex 前缀
+    authorization:
+      rules:
+      - require: 'apiKey.agents.split(",").exists(a, a == "codex")'
+    timeout:
+      requestTimeout: 900s   # codex 任务可能很长
+    retry:
+      attempts: 2
+      backoff: 500ms
+      codes: [502, 503]
+  backends:
+  - host: host.docker.internal:8201
+
+- name: agent-kimi
+  matches:
+  - path:
+      pathPrefix: /agents/kimi
+  policies:
+    urlRewrite:
+      path:
+        prefix: /
+    authorization:
+      rules:
+      - require: 'apiKey.agents.split(",").exists(a, a == "kimi")'
+    timeout:
+      requestTimeout: 300s
+    retry:
+      attempts: 2
+      backoff: 500ms
+      codes: [502, 503]
+  backends:
+  - host: host.docker.internal:8202

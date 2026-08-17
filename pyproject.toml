@@ -10,7 +10,7 @@ dependencies = [
     "nats-py>=2.10",
     "pyyaml>=6",
     "fastmcp>=3.0",
-    "mcp>=2.0",
+    "mcp>=1.24,<2.0",
 ]
 
 [project.optional-dependencies]

@@ -23,6 +23,29 @@ pip install -e ".[dev]"
 pytest
 ```
 
+## Docker 部署（Evolution v3 M2）
+
+控制面一体化镜像（hermes-brain / state-writer / janitor / agentgateway / agentctl）。
+Worker agent（codex / kimi / pi ...）**不打包进镜像**——宿主机自装后经心跳注册，
+没注册就不可用（`agentctl agent list` 查看在线状态）。
+
+```bash
+cp .env.example .env     # 填 LAS_LLM_API_KEY / LAS_GATEWAY_API_KEY
+docker compose up -d     # nats + state-writer + janitor + agentgateway
+docker compose run --rm agentctl chat   # 与 hermes 对话
+```
+
+宿主机 worker 接入容器栈：
+
+```bash
+export LAS_NATS_URL=nats://127.0.0.1:4222
+export LAS_AGENT_ENDPOINT=http://host.docker.internal:<port>
+PYTHONPATH=src python -m adapters.<name>.server   # 或对应启动方式
+```
+
+PostgreSQL 状态库（M3，默认不启用）：`docker compose --profile postgres up -d`，
+以 `LAS_DATABASE_URL` 切换后端。
+
 ## 规范要点
 
 - Task 状态迁移只允许设计文档 §5.3 表中的迁移。

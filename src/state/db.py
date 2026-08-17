@@ -20,7 +20,8 @@ def now_iso() -> str:
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
-    """打开数据库并启用 WAL（§17.8）。"""
+    """打开数据库并启用 WAL（§17.8）；父目录不存在时自动创建。"""
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
