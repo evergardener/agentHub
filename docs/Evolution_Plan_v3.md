@@ -227,10 +227,24 @@ M2 的 codex CLI 镜像内分发风险在第一天验证，若不可行立即降
 
 ## 8. 实施后状态（2026-08-17 收尾）
 
-- 测试基线：`pytest` **110 passed, 10 skipped**（10 项 skip 为需要真实外部服务的集成用例）。
+- 测试基线：`pytest` **125 passed, 10 skipped**（10 项 skip 为需要真实外部服务的集成用例）。
 - 已实测的端到端链路：容器控制面 + 宿主机 fake worker，经心跳注册 → hermes 委派 → A2A 下发 → 执行回报 → hermes 复审，任务 `completed`；Jaeger 可见单 trace 全跨度。
-- 已知留白（后续按需推进，不阻塞当前使用）：
-  1. codex / kimi **真实 adapter** 尚未接入 compose 栈做过全栈冒烟（仅 fake worker 验证过）；gateway 路由表目前只静态映射 codex/kimi，动态 agent 名的委派需设 `LAS_GATEWAY_URL=` 直连或扩展 gateway 动态路由。
-  2. Web UI 为单页看板（任务/审批/事件流），hermes chat 尚未接入 Web UI，对话入口为 `docker compose run --rm agentctl chat`。
-  3. OTel 埋点覆盖 hermes / adapter / llm；gateway、state-writer、janitor 的 span 未埋。
-  4. 本机开发密钥仍在 macOS Keychain（`agent-system/cliproxy-api-key`），容器部署走 `LAS_LLM_API_KEY` 环境变量，两者互不影响。
+
+### 8.1 晚间加固轮（2026-08-17，M4 之后）
+
+- **真实 worker 全栈冒烟**：codex（T-20260817-0012）与 kimi（T-0017）均经 gateway 完成真实委派并 `accepted`；混合委派链 kimi→codex 依赖调度验证通过（T-0018→T-0020）。
+- **worker 常驻自启**：`scripts/agent-worker.sh` + `install-agent-autostart.sh`（launchd，RunAtLoad+KeepAlive），codex（8201）/ kimi（8202）均已安装。
+- **调用方鉴权**：`LAS_ADAPTER_TOKEN`（X-Agent-Token 头，直连/gateway 透传两路径）；缺失时 `common/envfile.ensure_key` 自动生成随机值 flock 原子落盘 `.env`（仅初始化打日志）。
+- **地址绑定**：`serve_adapter.py` 同进程多 socket，地址仅由 `LAS_ADAPTER_BIND`（.env）决定，代码兜底仅回环；单地址不可用自动降级。
+- **MCP 修复**：codex exec 非交互模式下无 `readOnlyHint` 的 MCP 调用被自动取消（openai/codex#24135）→ 三个 MCP 服务 8 个只读工具补注解 + `~/.codex/config.toml` 的 agent-* 服务配 `default_tools_approval_mode="approve"`。
+- **复审防谎报**（T-20260817-0020 事故：codex MCP 写被取消后谎报成功、hermes 凭文本验收）：`get_task_artifacts` 工具 + `review_task` 服务端 veto（声明创建文件但无产出 → 强制驳回返工）+ 复审历史落 `task.reviewed` 事件 + Web UI 任务详情展示复审记录。
+- **构建韧性**：移除 `# syntax` 联网依赖；`REGISTRY` / `PIP_INDEX_URL` 两个 build-arg 支持 Docker Hub / PyPI 不可达时走加速源（CI 默认零改动）。
+- **LLM 地址双视角**：`.env` 保持宿主机视角 `127.0.0.1:8317`；compose agentctl 固定容器视角 `host.docker.internal:8317`（宿主机无法解析该名字）。
+
+### 8.2 已知留白（后续按需推进，不阻塞当前使用）
+
+1. gateway 路由表只静态映射 codex/kimi，动态 agent 名的委派需设 `LAS_GATEWAY_URL=` 直连或扩展 gateway 动态路由。
+2. Web UI 为单页看板（任务/审批/事件流/复审记录），hermes chat 尚未接入 Web UI，对话入口为 `docker compose run --rm agentctl chat`。
+3. OTel 埋点覆盖 hermes / adapter / llm；gateway、state-writer、janitor 的 span 未埋。
+4. 本机开发密钥仍在 macOS Keychain（`agent-system/cliproxy-api-key`），容器部署走 `LAS_LLM_API_KEY` 环境变量，两者互不影响。
+5. agents 表 `status` 字段不随租约过期回写（hermes 在线判定按 `lease_expires_at` 动态计算，行为正确，仅 DB 观感陈旧）。
