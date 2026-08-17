@@ -1,0 +1,29 @@
+# NATS / JetStream — 设计文档 §7 / §8
+nats:
+  url: nats://127.0.0.1:4222
+  monitor: http://127.0.0.1:8222
+
+jetstream:
+  streams:
+    - name: AGENT_EVENTS
+      subjects:
+        - "agent.*.*"
+        - "task.*"
+        - "artifact.*"
+        - "system.*"
+      retention: limits
+      storage: file
+      max_age_days: 14        # 第一阶段 7~30 天；SQLite 才是事实源
+
+  durable_consumers:
+    - hermes-orchestrator
+    - state-writer
+    - janitor
+    - observer
+
+heartbeat:
+  interval_seconds: 30
+  lease_ttl_seconds: 90
+
+janitor:
+  sweep_interval_seconds: 60
