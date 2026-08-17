@@ -87,11 +87,12 @@ class ApprovalPolicy:
               granted_by: str = "user", note: str = "") -> int:
         cur = conn.execute(
             "INSERT INTO approval_grants (pattern, granted_by, note, created_at)"
-            " VALUES (?, ?, ?, ?);",
+            " VALUES (?, ?, ?, ?) RETURNING id;",
             (pattern, granted_by, note,
              datetime.now(timezone.utc).isoformat()))
+        grant_id = cur.fetchone()[0]
         conn.commit()
-        return cur.lastrowid
+        return grant_id
 
     @staticmethod
     def revoke(conn: sqlite3.Connection, grant_id: int) -> bool:

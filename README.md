@@ -43,8 +43,10 @@ export LAS_AGENT_ENDPOINT=http://host.docker.internal:<port>
 PYTHONPATH=src python -m adapters.<name>.server   # 或对应启动方式
 ```
 
-PostgreSQL 状态库（M3，默认不启用）：`docker compose --profile postgres up -d`，
-以 `LAS_DATABASE_URL` 切换后端。
+PostgreSQL 状态库（M3，compose 默认启用）：控制面默认使用
+`LAS_DATABASE_URL=postgresql://agenthub:***@postgres:5432/agenthub`；
+回退 SQLite 在 `.env` 设 `LAS_DATABASE_URL=sqlite:////data/workspace/runtime/agent-state.db`，
+外部 PG 直接改 URL 即可。
 
 ## 规范要点
 

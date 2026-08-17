@@ -28,7 +28,7 @@ SWEEP_INTERVAL = float(os.environ.get("JANITOR_INTERVAL", "60"))
 
 class Janitor:
     def __init__(self, db_path: str | Path | None = None):
-        self.conn: sqlite3.Connection = init_db(db_path or cfg.state_db())
+        self.conn: sqlite3.Connection = init_db(db_path)  # None → LAS_DATABASE_URL
         self.alerts: list[dict] = []
 
     def sweep(self) -> dict:

@@ -122,7 +122,7 @@ async def main() -> None:
     from common import config as cfg
 
     nats_url = cfg.nats_url()
-    db_path = cfg.state_db()
+    db_path = cfg.database_url()  # LAS_DATABASE_URL（pg/sqlite 双后端）
     writer = StateWriter(db_path)
     await ensure_stream(nats_url)
 

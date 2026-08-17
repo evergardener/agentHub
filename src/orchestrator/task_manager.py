@@ -26,7 +26,7 @@ class TaskManager:
     def __init__(self, db_path: str | Path | None = None,
                  workspace: Path | None = None,
                  memory: "MemoryService | None" = None):
-        self.conn: sqlite3.Connection = init_db(db_path or cfg.state_db())
+        self.conn: sqlite3.Connection = init_db(db_path)  # None → LAS_DATABASE_URL
         self.workspace = Path(workspace or cfg.workspace())
         # 长期记忆写方仅限 Hermes（§15.3）；None 时静默跳过。
         # best-effort：记忆服务故障不阻塞任务流。
@@ -103,9 +103,11 @@ class TaskManager:
         if row is None:
             raise KeyError(f"task not found: {task_id}")
         state_store.transition_task(self.conn, task_id, TaskStatus.ASSIGNED)
+        from state.db import now_iso
+
         self.conn.execute(
-            "UPDATE tasks SET assigned_to = ?, updated_at = datetime('now')"
-            " WHERE id = ?;", (agent_id, task_id),
+            "UPDATE tasks SET assigned_to = ?, updated_at = ?"
+            " WHERE id = ?;", (agent_id, now_iso(), task_id),
         )
         self.conn.commit()
 

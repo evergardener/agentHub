@@ -20,23 +20,28 @@ import sys
 import time
 from pathlib import Path
 
-def _default_db() -> Path:
+def _default_db():
+    """--db 缺省：LAS_DATABASE_URL（或派生的 sqlite:/// URL）。"""
     from common import config as cfg
 
-    return cfg.state_db()
+    return cfg.database_url()
 
 
-def _conn(db_path: Path):
+def _is_url(target) -> bool:
+    return "://" in str(target)
+
+
+def _conn(db_target):
     from state.db import connect
 
-    if not db_path.exists():
-        print(f"state db not found: {db_path}")
+    if not _is_url(db_target) and not Path(db_target).exists():
+        print(f"state db not found: {db_target}")
         sys.exit(1)
-    return connect(db_path)
+    return connect(db_target)
 
 
 def cmd_status(db_path: Path) -> int:
-    if not db_path.exists():
+    if not _is_url(db_path) and not Path(db_path).exists():
         print(f"state db not found: {db_path}")
         return 1
     conn = _conn(db_path)
@@ -188,11 +193,11 @@ def cmd_events(db_path: Path, follow: bool, interval: float,
     def fetch(after: int):
         if event_type:
             return conn.execute(
-                "SELECT rowid, * FROM events"
-                " WHERE event_type = ? AND rowid > ? ORDER BY rowid;",
+                "SELECT * FROM events"
+                " WHERE event_type = ? AND seq > ? ORDER BY seq;",
                 (event_type, after)).fetchall()
         return conn.execute(
-            "SELECT rowid, * FROM events WHERE rowid > ? ORDER BY rowid;",
+            "SELECT * FROM events WHERE seq > ? ORDER BY seq;",
             (after,)).fetchall()
 
     last = 0
@@ -200,7 +205,7 @@ def cmd_events(db_path: Path, follow: bool, interval: float,
         rows = fetch(last)
         for r in rows:
             _print_event(r)
-            last = r["rowid"]
+            last = r["seq"]
         if not follow:
             return 0
         time.sleep(interval)

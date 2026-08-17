@@ -1,10 +1,12 @@
-# agentHub 控制面 compose 栈（Evolution v3 M2）
+# agentHub 控制面 compose 栈（Evolution v3 M2/M3）
 #
 # 拓扑：
-#   容器内：nats / state-writer / agentgateway（+ 可选 janitor、event-logger）
+#   容器内：nats / postgres / state-writer / janitor / agentgateway
 #   宿主机：worker adapter（codex/kimi/pi...，用户自装），心跳注册进 agentHub
 #   宿主机 worker 配置：LAS_NATS_URL=nats://127.0.0.1:4222
 #                      LAS_AGENT_ENDPOINT=http://host.docker.internal:<port>
+# 状态库：默认 compose PostgreSQL；回退 SQLite 在 .env 设
+#   LAS_DATABASE_URL=sqlite:////data/workspace/runtime/agent-state.db
 # 用法：
 #   cp .env.example .env  # 填 LAS_LLM_API_KEY / LAS_GATEWAY_API_KEY
 #   docker compose up -d                 # 控制面
@@ -13,6 +15,11 @@
 x-agenthub: &agenthub
   image: agenthub:latest
   build: .
+
+x-agenthub-env: &agenthub-env
+  LAS_NATS_URL: nats://nats:4222
+  LAS_WORKSPACE: /data/workspace
+  LAS_DATABASE_URL: postgresql://agenthub:${LAS_PG_PASSWORD:-agenthub-dev-only}@postgres:5432/agenthub
 
 services:
   nats:
@@ -24,27 +31,44 @@ services:
       - "127.0.0.1:4222:4222"   # 宿主机 worker 经此接入
     restart: unless-stopped
 
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: agenthub
+      POSTGRES_PASSWORD: ${LAS_PG_PASSWORD:-agenthub-dev-only}  # 生产请改（.env）
+      POSTGRES_DB: agenthub
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"   # 宿主机工具/调试可直连
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agenthub -d agenthub"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+
   state-writer:
     <<: *agenthub
-    environment:
-      LAS_NATS_URL: nats://nats:4222
-      LAS_WORKSPACE: /data/workspace
+    environment: *agenthub-env
     volumes:
       - agent-data:/data
     depends_on:
-      - nats
+      nats:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   janitor:
     <<: *agenthub
     command: ["python", "-m", "state.janitor"]
-    environment:
-      LAS_NATS_URL: nats://nats:4222
-      LAS_WORKSPACE: /data/workspace
+    environment: *agenthub-env
     volumes:
       - agent-data:/data
     depends_on:
-      - state-writer
+      state-writer:
+        condition: service_started
     restart: unless-stopped
 
   agentgateway:
@@ -69,8 +93,7 @@ services:
     stdin_open: true
     tty: true
     environment:
-      LAS_NATS_URL: nats://nats:4222
-      LAS_WORKSPACE: /data/workspace
+      <<: *agenthub-env
       LAS_GATEWAY_URL: http://agentgateway:8300
       LAS_GATEWAY_API_KEY: ${LAS_GATEWAY_API_KEY:-}
       LAS_LLM_BASE_URL: ${LAS_LLM_BASE_URL:-http://host.docker.internal:8317/v1}
@@ -83,22 +106,8 @@ services:
     volumes:
       - agent-data:/data
     depends_on:
-      - state-writer
-
-  # M3 备用：PostgreSQL 状态库（默认不启动；启用见 Evolution v3 §3）
-  postgres:
-    image: postgres:17-alpine
-    profiles: ["postgres"]
-    environment:
-      POSTGRES_USER: agenthub
-      # M3 启用前请改密码（.env: LAS_PG_PASSWORD）
-      POSTGRES_PASSWORD: ${LAS_PG_PASSWORD:-agenthub-dev-only}
-      POSTGRES_DB: agenthub
-    volumes:
-      - pg-data:/var/lib/postgresql/data
-    ports:
-      - "127.0.0.1:5432:5432"
-    restart: unless-stopped
+      state-writer:
+        condition: service_started
 
 volumes:
   nats-data:

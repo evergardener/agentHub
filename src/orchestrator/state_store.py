@@ -114,20 +114,28 @@ def transition_task(conn: sqlite3.Connection, task_id: str,
 
 
 def record_event(conn: sqlite3.Connection, event: dict) -> None:
-    """登记事件；event_id 重复时抛 DuplicateEvent（§17.6 去重）。"""
+    """登记事件；event_id 重复时抛 DuplicateEvent（§17.6 去重）。
+
+    seq 为单调自增游标（v3 §4：替代 SQLite 专有 rowid，供 agentctl
+    events --follow 跨后端使用）。
+    """
     try:
         conn.execute(
-            "INSERT INTO events (id, subject, task_id, agent_id, event_type,"
-            " payload_json, created_at) VALUES (?,?,?,?,?,?,?);",
+            "INSERT INTO events (id, seq, subject, task_id, agent_id,"
+            " event_type, payload_json, created_at) VALUES (?,"
+            " (SELECT COALESCE(MAX(seq), 0) + 1 FROM events),?,?,?,?,?,?);",
             (event["event_id"], event["event_type"], event.get("task_id"),
              event.get("source"), event["event_type"],
              json.dumps(event.get("payload", {}), ensure_ascii=False),
              event.get("timestamp", now_iso())),
         )
         conn.commit()
-    except sqlite3.IntegrityError:
+    except Exception as e:  # 双后端唯一约束冲突 → DuplicateEvent
         conn.rollback()  # 失败 INSERT 会留下持锁的开放事务，必须回滚
-        raise DuplicateEvent(event["event_id"])
+        if isinstance(e, sqlite3.IntegrityError) or \
+                type(e).__name__ in ("UniqueViolation", "IntegrityError"):
+            raise DuplicateEvent(event["event_id"])
+        raise
 
 
 def add_task_run(conn: sqlite3.Connection, *, task_id: str, agent_id: str,

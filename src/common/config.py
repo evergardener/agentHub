@@ -7,6 +7,7 @@
   LAS_WORKSPACE         → AGENT_WORKSPACE      任务工作区根目录
   LAS_STATE_DB          → AGENT_STATE_DB       SQLite 状态库路径
   LAS_NATS_URL          → NATS_URL             NATS 地址
+  LAS_DATABASE_URL      （无别名）              postgresql://… 或 sqlite:///…
   LAS_GATEWAY_URL       → AGENT_GATEWAY_URL    agentgateway 地址（空=直连）
   LAS_GATEWAY_API_KEY   → GATEWAY_API_KEY      gateway Bearer key
   LAS_LLM_BASE_URL      → KIMI_API_BASE        OpenAI 兼容端点
@@ -49,6 +50,15 @@ def state_db() -> Path:
     if explicit:
         return Path(explicit)
     return workspace() / "runtime" / "agent-state.db"
+
+
+def database_url() -> str:
+    """统一数据库入口（v3 §4）：LAS_DATABASE_URL 优先；
+    未配置时由 workspace/state_db 派生 sqlite:/// URL。"""
+    url = _env("LAS_DATABASE_URL")
+    if url:
+        return url
+    return f"sqlite:///{state_db()}"
 
 
 def nats_url() -> str:
