@@ -36,6 +36,7 @@ class A2aClient:
         text: str,
         idempotency_key: str | None = None,
         trace_id: str | None = None,
+        task_id: str | None = None,
     ) -> dict:
         """发送任务消息，返回 A2A Task。"""
         metadata = {}
@@ -43,6 +44,8 @@ class A2aClient:
             metadata["idempotencyKey"] = idempotency_key
         if trace_id:
             metadata["traceId"] = trace_id
+        if task_id:
+            metadata["taskId"] = task_id
         payload = {
             "jsonrpc": "2.0",
             "id": str(uuid.uuid4()),

@@ -4,13 +4,17 @@
   GET  /.well-known/agent-card.json
   GET  /health
   POST /a2a   (JSON-RPC 2.0: message/send, tasks/get)
+  心跳：lifespan 后台循环发布 agent.<id>.heartbeat（§17.4）
 
 差异只在：agent_id、Agent Card、runner 实现、并发上限。
 """
 
 from __future__ import annotations
 
+import asyncio
+import os
 import uuid
+from contextlib import asynccontextmanager, suppress
 from typing import Awaitable, Callable
 
 from fastapi import FastAPI, Request
@@ -27,6 +31,18 @@ from common.ids import temp_task_id
 RunnerFn = Callable[[A2aTask], Awaitable[list[dict]]]
 CardFn = Callable[[str], dict]
 
+HEARTBEAT_INTERVAL = float(os.environ.get("AGENT_HEARTBEAT_INTERVAL", "30"))
+LEASE_TTL_SECONDS = int(os.environ.get("AGENT_LEASE_TTL", "90"))
+
+
+async def _heartbeat_loop(publisher: EventPublisher, agent_id: str) -> None:
+    while True:
+        await publisher.publish(
+            f"agent.{agent_id}.heartbeat", None,
+            {"lease_ttl_seconds": LEASE_TTL_SECONDS},
+        )
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
+
 
 def build_app(
     agent_id: str,
@@ -38,7 +54,17 @@ def build_app(
     publisher = EventPublisher(source=agent_id)
     executor = FifoExecutor(max_concurrent=max_concurrent)
 
-    app = FastAPI(title=f"{agent_id}-adapter", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        hb = asyncio.create_task(_heartbeat_loop(publisher, agent_id))
+        try:
+            yield
+        finally:
+            hb.cancel()
+            with suppress(asyncio.CancelledError):
+                await hb
+
+    app = FastAPI(title=f"{agent_id}-adapter", version="0.1.0", lifespan=lifespan)
     app.state.store = store
     app.state.publisher = publisher
 
