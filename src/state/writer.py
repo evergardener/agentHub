@@ -92,6 +92,8 @@ class StateWriter:
                 state_store.update_heartbeat(
                     self.conn, source,
                     lease_ttl_seconds=payload.get("lease_ttl_seconds", 90),
+                    endpoint=payload.get("endpoint"),
+                    skills=payload.get("skills"),
                 )
             else:
                 return "ignored"

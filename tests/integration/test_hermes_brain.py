@@ -317,3 +317,53 @@ async def test_tools_standing_grant_flow(tmp_path, monkeypatch):
         assert "error" in bad
     finally:
         await _stop_harness(nats_proc, srv, thread, writer_stop, writer_task)
+
+
+# ---------- 场景 D：动态发现注册（v3 M2） ----------
+
+
+@requires_nats
+async def test_dynamic_discovery_via_heartbeat(tmp_path, monkeypatch):
+    """fake adapter 心跳自注册（LAS_AGENT_ENDPOINT + skills）→ hermes
+    发现一个静态 yaml 里不存在的 agent 并成功委派。"""
+    monkeypatch.setenv("LAS_AGENT_ENDPOINT", ADAPTER_URL)
+    # 首条心跳可能早于 stream/consumer 就绪被 spool，缩小间隔快速补发
+    monkeypatch.setenv("LAS_HEARTBEAT_INTERVAL", "0.5")
+    tm, agents_path, nats_proc, srv, thread, db_path = _make_harness(
+        tmp_path, monkeypatch)
+    writer_stop, writer_task = await _start_writer(db_path)
+    try:
+        from hermes.policy import ApprovalPolicy
+        from hermes.tools import HermesTools
+
+        tools = HermesTools(tm, ApprovalPolicy(), agents_path)
+
+        # 等心跳经 NATS → StateWriter 落库（首次心跳立即发出）
+        deadline = time.monotonic() + 15
+        registered = None
+        while time.monotonic() < deadline:
+            registered = tm.conn.execute(
+                "SELECT * FROM agents WHERE id = 'fake';").fetchone()
+            if registered and registered["endpoint"]:
+                break
+            await asyncio.sleep(0.3)
+        assert registered and registered["endpoint"] == ADAPTER_URL
+        assert "echo" in json.loads(registered["skills_json"])
+
+        # list_agents：fake 在线；codex/kimi 为静态种子
+        out = await tools.dispatch("list_agents", {})
+        by_id = {a["id"]: a for a in out["agents"]}
+        assert by_id["fake"]["status"] == "online"
+        assert by_id["codex"]["status"] == "static"
+
+        # 委派给动态发现的 fake（静态 yaml 中没有它）
+        t = await tools.dispatch(
+            "create_task", {"objective": "分析注册链路连通性"})
+        d = await tools.dispatch(
+            "delegate_task", {"task_id": t["task_id"], "agent_id": "fake"})
+        assert d["status"] == "delegated", d
+        w = await tools.dispatch(
+            "wait_task", {"task_id": t["task_id"], "timeout_seconds": 30})
+        assert w["status"] == "completed"
+    finally:
+        await _stop_harness(nats_proc, srv, thread, writer_stop, writer_task)

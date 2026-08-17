@@ -169,8 +169,10 @@ def upsert_agent(conn: sqlite3.Connection, *, agent_id: str, role: str = "worker
 
 
 def update_heartbeat(conn: sqlite3.Connection, agent_id: str,
-                     lease_ttl_seconds: int = 90) -> None:
-    """更新心跳租约（§17.4）。"""
+                     lease_ttl_seconds: int = 90,
+                     endpoint: str | None = None,
+                     skills: list[str] | None = None) -> None:
+    """更新心跳租约（§17.4）；携带 endpoint/skills 时一并登记（v3 M2 发现注册）。"""
     from datetime import datetime, timedelta as td
 
     from state.db import CST
@@ -178,10 +180,17 @@ def update_heartbeat(conn: sqlite3.Connection, agent_id: str,
     now = datetime.now(CST)
     ts = now.isoformat(timespec="seconds")
     lease = (now + td(seconds=lease_ttl_seconds)).isoformat(timespec="seconds")
-    upsert_agent(conn, agent_id=agent_id)
+    upsert_agent(conn, agent_id=agent_id, endpoint=endpoint)
     conn.execute(
         "UPDATE agents SET last_seen_at = ?, lease_expires_at = ?,"
         " status = 'online', updated_at = ? WHERE id = ?;",
         (ts, lease, ts, agent_id),
     )
+    if endpoint:
+        conn.execute(
+            "UPDATE agents SET endpoint = ? WHERE id = ?;", (endpoint, agent_id))
+    if skills is not None:
+        conn.execute(
+            "UPDATE agents SET skills_json = ? WHERE id = ?;",
+            (json.dumps(skills, ensure_ascii=False), agent_id))
     conn.commit()

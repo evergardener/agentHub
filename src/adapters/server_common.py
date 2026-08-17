@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from contextlib import asynccontextmanager, suppress
 from typing import Awaitable, Callable
@@ -31,17 +32,29 @@ from common.ids import temp_task_id
 RunnerFn = Callable[[A2aTask], Awaitable[list[dict]]]
 CardFn = Callable[[str], dict]
 
-HEARTBEAT_INTERVAL = cfg.heartbeat_interval()
-LEASE_TTL_SECONDS = cfg.lease_ttl()
+
+def _card_skills(card_fn: CardFn) -> list[str]:
+    """从 Agent Card 提取 skill id 列表（注册用）。"""
+    try:
+        return [s["id"] for s in (card_fn("").get("skills") or []) if s.get("id")]
+    except Exception:
+        return []
 
 
-async def _heartbeat_loop(publisher: EventPublisher, agent_id: str) -> None:
+async def _heartbeat_loop(publisher: EventPublisher, agent_id: str,
+                          card_fn: CardFn) -> None:
+    # 发现注册（v3 M2）：心跳携带自声明 endpoint 与技能，
+    # StateWriter 落库 agents 表，hermes 按租约在线性发现 worker。
+    # interval/ttl 每轮动态读 env，便于测试与运维热调。
+    endpoint = os.environ.get("LAS_AGENT_ENDPOINT", "").strip()
+    skills = _card_skills(card_fn)
     while True:
-        await publisher.publish(
-            f"agent.{agent_id}.heartbeat", None,
-            {"lease_ttl_seconds": LEASE_TTL_SECONDS},
-        )
-        await asyncio.sleep(HEARTBEAT_INTERVAL)
+        payload: dict = {"lease_ttl_seconds": cfg.lease_ttl(),
+                         "skills": skills}
+        if endpoint:
+            payload["endpoint"] = endpoint
+        await publisher.publish(f"agent.{agent_id}.heartbeat", None, payload)
+        await asyncio.sleep(cfg.heartbeat_interval())
 
 
 def build_app(
@@ -56,7 +69,7 @@ def build_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        hb = asyncio.create_task(_heartbeat_loop(publisher, agent_id))
+        hb = asyncio.create_task(_heartbeat_loop(publisher, agent_id, card_fn))
         try:
             yield
         finally:

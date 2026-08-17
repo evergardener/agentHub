@@ -105,6 +105,49 @@ class HermesTools:
         self.policy = policy
         self.agents = load_agents(agents_path)
 
+    def _resolve_agents(self) -> dict:
+        """发现视图（v3 M2）：静态 agents.yaml 为种子，DB 中心跳注册的
+        agent 覆盖/补充；带 online 标记（lease 未过期）。
+
+        语义：worker 由用户自装、经心跳自注册；DB 中 lease 过期 = offline，
+        未注册的 agent 仅在静态 yaml 显式配置时可用（static）。
+        """
+        import json as _json
+        from datetime import datetime
+
+        from state.db import CST
+
+        now = datetime.now(CST).isoformat(timespec="seconds")
+        merged = {k: {**v, "online": None} for k, v in self.agents.items()}
+        for r in self.tm.conn.execute(
+                "SELECT id, endpoint, skills_json, lease_expires_at"
+                " FROM agents;").fetchall():
+            online = bool(r["lease_expires_at"] and r["lease_expires_at"] > now)
+            entry = merged.setdefault(r["id"], {"endpoint": "", "skills": []})
+            entry["online"] = online
+            if online:
+                if r["endpoint"]:
+                    entry["endpoint"] = r["endpoint"]
+                if r["skills_json"]:
+                    try:
+                        entry["skills"] = _json.loads(r["skills_json"])
+                    except (ValueError, TypeError):
+                        pass
+        return merged
+
+    def _agent_or_error(self, agent_id: str) -> dict:
+        """解析可委派的 agent；离线/未知返回 error dict。"""
+        agents = self._resolve_agents()
+        info = agents.get(agent_id)
+        if info is None:
+            return {"error": f"unknown agent: {agent_id}",
+                    "known": sorted(agents)}
+        if info["online"] is False:
+            return {"error": f"agent offline: {agent_id}（心跳租约已过期）"}
+        if not info.get("endpoint"):
+            return {"error": f"agent {agent_id} 无可用 endpoint（未注册）"}
+        return info
+
     async def dispatch(self, name: str, args: dict) -> dict:
         handler = getattr(self, f"_tool_{name}", None)
         if handler is None:
@@ -128,9 +171,9 @@ class HermesTools:
         row = self._task_or_error(task_id)
         if "error" in row:
             return row
-        if agent_id not in self.agents:
-            return {"error": f"unknown agent: {agent_id}",
-                    "known": sorted(self.agents)}
+        agent = self._agent_or_error(agent_id)
+        if "error" in agent:
+            return agent
         decision = self.policy.decide(self.tm.conn, row["objective"])
         if decision.action == "ask":
             return {"status": "needs_approval", "task_id": task_id,
@@ -139,8 +182,7 @@ class HermesTools:
                             "approve_and_delegate。"}
         if decision.action == "granted":
             self._record_auto_approval(task_id, decision)
-        await self.tm.delegate_task(
-            task_id, self.agents[agent_id]["endpoint"], agent_id)
+        await self.tm.delegate_task(task_id, agent["endpoint"], agent_id)
         return {"status": "delegated", "task_id": task_id,
                 "agent": agent_id, "approval": decision.action}
 
@@ -149,8 +191,9 @@ class HermesTools:
         row = self._task_or_error(task_id)
         if "error" in row:
             return row
-        if agent_id not in self.agents:
-            return {"error": f"unknown agent: {agent_id}"}
+        agent = self._agent_or_error(agent_id)
+        if "error" in agent:
+            return agent
         # 对话即审批：记录批准事件后委派
         from orchestrator import state_store
         state_store.record_event(self.tm.conn, {
@@ -158,8 +201,7 @@ class HermesTools:
             "event_type": "task.approved", "task_id": task_id,
             "payload": {"by": "user", "note": note},
         })
-        await self.tm.delegate_task(
-            task_id, self.agents[agent_id]["endpoint"], agent_id)
+        await self.tm.delegate_task(task_id, agent["endpoint"], agent_id)
         return {"status": "delegated", "task_id": task_id,
                 "agent": agent_id, "approval": "user"}
 
@@ -185,9 +227,12 @@ class HermesTools:
             for r in rows]}
 
     async def _tool_list_agents(self) -> dict:
-        return {"agents": [
-            {"id": k, "endpoint": v["endpoint"], "skills": v.get("skills", [])}
-            for k, v in self.agents.items()]}
+        out = []
+        for k, v in self._resolve_agents().items():
+            status = {True: "online", False: "offline", None: "static"}[v["online"]]
+            out.append({"id": k, "endpoint": v.get("endpoint", ""),
+                        "skills": v.get("skills", []), "status": status})
+        return {"agents": out}
 
     # ---------- 常驻授权 ----------
 
