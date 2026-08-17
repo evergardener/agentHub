@@ -29,8 +29,15 @@ case "$AGENT" in
   *)     DEFAULT_PORT=8290 ;;
 esac
 export LAS_ADAPTER_PORT="${LAS_ADAPTER_PORT:-$DEFAULT_PORT}"
-export LAS_ADAPTER_BIND="${LAS_ADAPTER_BIND:-127.0.0.1,192.168.7.10}"
-export LAS_AGENT_ENDPOINT="${LAS_AGENT_ENDPOINT:-http://host.docker.internal:$LAS_ADAPTER_PORT}"
 export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+
+# 绑定地址完全由环境变量决定（.env 里的 LAS_ADAPTER_BIND）；
+# 代码兜底仅回环（serve_adapter.py 缺省 127.0.0.1），不在脚本写死地址。
+# 鉴权 token：缺失时自动生成随机值落盘 .env（仅初始化时打日志），
+# 保证 adapter 与 hermes 双侧从同一文件读到同一值。
+export LAS_ADAPTER_TOKEN
+LAS_ADAPTER_TOKEN="$("$ROOT/.venv/bin/python" "$ROOT/scripts/ensure_config.py" LAS_ADAPTER_TOKEN "$ROOT/.env")"
+
+export LAS_AGENT_ENDPOINT="${LAS_AGENT_ENDPOINT:-http://host.docker.internal:$LAS_ADAPTER_PORT}"
 
 exec "$ROOT/.venv/bin/python" "$ROOT/scripts/serve_adapter.py" "$AGENT"
