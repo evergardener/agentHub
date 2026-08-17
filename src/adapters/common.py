@@ -87,9 +87,11 @@ class A2aTaskStore:
 class EventPublisher:
     """NATS 可用则发布；不可用则暂存到本地 JSONL，恢复后可重发（§17.7）。"""
 
-    def __init__(self, source: str, nats_url: str = "nats://127.0.0.1:4222"):
+    def __init__(self, source: str, nats_url: str | None = None):
         self.source = source
-        self.nats_url = nats_url
+        self.nats_url = (
+            nats_url or os.environ.get("NATS_URL") or "nats://127.0.0.1:4222"
+        )
         self.spool = workspace_root() / "logs" / "events-pending.jsonl"
 
     async def publish(self, event_type: str, task_id: str | None,
