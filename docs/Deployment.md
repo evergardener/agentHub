@@ -83,7 +83,12 @@ docker compose ps          # 全部 Up / healthy
 入口：
 - Web UI（看板/审批/事件流/复审记录）：http://127.0.0.1:18070
 - Jaeger：http://127.0.0.1:16686
-- 与 hermes 对话：`docker compose run --rm agentctl chat`
+- 与 hermes 对话（二选一）：
+  - 容器模式：`docker compose run --rm agentctl chat`
+  - **宿主机直连**：`./scripts/agentctl-host.sh chat`——hermes 就是本仓库的
+    Python 模块，不必须在容器里跑；基础设施已映射到 127.0.0.1，包装脚本
+    自动把 .env 翻译为宿主机视角（PG/gateway 地址改写）。前提是宿主机
+    已 `pip install -e .`（注册 `agentctl` 入口点）。
 
 ### 3.4 接入 worker（宿主机）
 
@@ -119,9 +124,9 @@ docker compose run --rm agentctl chat
 
 | 操作 | 命令 |
 |---|---|
-| 与 hermes 对话 | `docker compose run --rm agentctl chat` |
-| 一次性指令 | `docker compose run --rm agentctl chat "<需求>"` |
-| 任务/事件/agent 查询 | `agentctl status` / `agentctl task list` / `agentctl events` / `agentctl agent list`（均需 `docker compose run --rm -T agentctl` 前缀） |
+| 与 hermes 对话 | `./scripts/agentctl-host.sh chat`（宿主机直连）或 `docker compose run --rm agentctl chat`（容器） |
+| 一次性指令 | `./scripts/agentctl-host.sh chat "<需求>"` |
+| 任务/事件/agent 查询 | `./scripts/agentctl-host.sh status` / `task list` / `events` / `agent list` |
 | 审批（Web UI 之外） | `agentctl task approve <id>` / Web UI 审批中心 |
 | 常驻授权 | 对话中说"以后 X 类你自己批"；`agentctl grant list` 查看 |
 | worker 日志 | `~/Library/Logs/agenthub-<agent>.log`（macOS launchd） |
