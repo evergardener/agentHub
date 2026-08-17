@@ -84,6 +84,18 @@ def build_app(
     app.state.store = store
     app.state.publisher = publisher
 
+    # 调用方鉴权（v3 加固）：LAS_ADAPTER_TOKEN 非空时，除 /health 外
+    # 所有端点要求 X-Agent-Token 头匹配。直连与经 gateway 均生效
+    # （gateway 默认透传该头）。空串 = 关闭（仅本地开发）。
+    token = cfg.adapter_token()
+    if token:
+        @app.middleware("http")
+        async def _require_token(request: Request, call_next):
+            if request.url.path != "/health":
+                if request.headers.get("x-agent-token") != token:
+                    return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return await call_next(request)
+
     @app.get("/.well-known/agent-card.json")
     async def card(request: Request) -> dict:
         return card_fn(str(request.base_url).rstrip("/"))

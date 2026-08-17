@@ -47,7 +47,13 @@ class A2aClient:
                    timeout=timeout, auth_token=_gateway_key())
 
     def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.auth_token}"} if self.auth_token else {}
+        h = {"Authorization": f"Bearer {self.auth_token}"} if self.auth_token else {}
+        # adapter 侧鉴权（v3 加固）：与 gateway 的 Bearer 互不冲突；
+        # 走 gateway 时该头被透传到后端 adapter。
+        tok = cfg.adapter_token()
+        if tok:
+            h["X-Agent-Token"] = tok
+        return h
 
     async def get_agent_card(self) -> dict:
         async with httpx.AsyncClient(timeout=self.timeout) as client:

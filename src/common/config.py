@@ -74,6 +74,15 @@ def gateway_api_key() -> str:
     return _env("LAS_GATEWAY_API_KEY", "GATEWAY_API_KEY")
 
 
+def adapter_token() -> str:
+    """Worker adapter 的调用方鉴权 token（X-Agent-Token 头）。
+
+    空串 = 不启用鉴权（本地开发默认值）；生产/常驻部署必须配置。
+    直连与经 gateway 两种路径都会携带该头（gateway 默认透传）。
+    """
+    return _env("LAS_ADAPTER_TOKEN")
+
+
 def llm_base_url() -> str:
     return _env("LAS_LLM_BASE_URL", "KIMI_API_BASE",
                 default=DEFAULT_LLM_BASE).rstrip("/")
