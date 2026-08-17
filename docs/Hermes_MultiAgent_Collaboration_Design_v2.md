@@ -1970,25 +1970,25 @@ Implement contract test suite; run against fake worker and Codex adapter.
 
 # 28. MVP 完成标准
 
-满足以下条件即可认为 MVP 完成：
+满足以下条件即可认为 MVP 完成（2026-08-17 盘点，证据见括号）：
 
-- [ ] Hermes 能看到至少两个 Agent。
-- [ ] Hermes 可以创建 Task（ID 并发安全）。
-- [ ] Hermes 可以通过 A2A 委派 Codex。
-- [ ] Codex 可以执行真实开发任务。
-- [ ] Codex 可以返回 Artifact。
-- [ ] NATS 可看到任务状态事件。
-- [ ] JetStream 可恢复未消费事件。
-- [ ] SQLite 可查询当前 Task 状态，且是唯一事实源。
-- [ ] Hermes 重启后仍可恢复未完成任务（§17.2）。
-- [ ] Codex 重启后不导致 Task 永久丢失。
-- [ ] Worker 失联后租约过期，Janitor 按策略处理（§17.4 / §17.5）。
-- [ ] 非法状态迁移被拒绝并留 audit 记录（§5.3 / §22.3）。
-- [ ] 重复事件 / 重复请求不产生重复执行（§22.5）。
-- [ ] Artifact 可以追溯到 Task / Agent。
-- [ ] 危险操作存在审批机制（blocked → input-required → 用户决策）。
-- [ ] 不需要人工复制粘贴 Agent 输出。
-- [ ] 契约测试同时对 Fake Worker 与 Codex Adapter 通过。
+- [x] Hermes 能看到至少两个 Agent。（registry + codex/kimi/fake 三个 Adapter，test_orchestrator_flow）
+- [x] Hermes 可以创建 Task（ID 并发安全）。（counters 表原子自增，test_db 并发用例）
+- [x] Hermes 可以通过 A2A 委派 Codex。（a2a_client + task_manager.delegate_task，Phase 2 验收）
+- [x] Codex 可以执行真实开发任务。（test_codex_adapter，cliproxy/deepseek-v4-flash 真实通过）
+- [x] Codex 可以返回 Artifact。（save_artifact 含 sha256 + workspace 文件收集）
+- [x] NATS 可看到任务状态事件。（EventPublisher + JetStream AGENT_EVENTS，test_nats_events）
+- [x] JetStream 可恢复未消费事件。（event_consumer + events-pending.jsonl spool 重发）
+- [x] SQLite 可查询当前 Task 状态，且是唯一事实源。（StateWriter 唯一写者，agentctl 查询）
+- [x] Hermes 重启后仍可恢复未完成任务（§17.2）。（recovery.py + 单测）
+- [x] Codex 重启后不导致 Task 永久丢失。（状态在 SQLite；retry_task 重新入队）
+- [x] Worker 失联后租约过期，Janitor 按策略处理（§17.4 / §17.5）。（janitor.py + 心跳租约，Phase 4）
+- [x] 非法状态迁移被拒绝并留 audit 记录（§5.3 / §22.3）。（is_legal_transition 强制校验，test_state_store）
+- [x] 重复事件 / 重复请求不产生重复执行（§22.5）。（A2aTaskStore 幂等键去重）
+- [x] Artifact 可以追溯到 Task / Agent。（artifacts 表 task_id + sha256 + path）
+- [x] 危险操作存在审批机制（blocked → input-required → 用户决策）。（approve_task/reject_task + agentctl task approve/reject）
+- [x] 不需要人工复制粘贴 Agent 输出。（test_full_collaboration：kimi→codex depends_on 全自动链，§21 场景通过）
+- [x] 契约测试同时对 Fake Worker 与 Codex Adapter 通过。（test_fake_worker_e2e 常驻；test_codex_adapter 门控通过）
 
 ---
 

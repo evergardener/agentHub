@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 
 from common.ids import idempotency_key as make_idem_key
+from common.memory import MemoryService
 from common.models import TaskStatus
 from orchestrator import state_store
 from orchestrator.a2a_client import A2aClient
@@ -30,9 +31,13 @@ WORKSPACE = Path(os.environ.get("AGENT_WORKSPACE", Path.home() / "AgentWorkspace
 
 class TaskManager:
     def __init__(self, db_path: str | Path = DEFAULT_DB,
-                 workspace: Path = WORKSPACE):
+                 workspace: Path = WORKSPACE,
+                 memory: "MemoryService | None" = None):
         self.conn: sqlite3.Connection = init_db(db_path)
         self.workspace = Path(workspace)
+        # 长期记忆写方仅限 Hermes（§15.3）；None 时静默跳过。
+        # best-effort：记忆服务故障不阻塞任务流。
+        self.memory = memory
 
     # ---------- 创建 ----------
 
@@ -206,9 +211,59 @@ class TaskManager:
         if approved:
             state_store.transition_task(self.conn, task_id, TaskStatus.ACCEPTED)
             self.promote_dependents(task_id)  # 解锁依赖本任务的后续任务
+            self._retain_outcome(task_id, notes)
             return "accepted"
         state_store.transition_task(self.conn, task_id, TaskStatus.WORKING)
         return "working"  # 返工：调用方应重新 delegate（attempt+1）
+
+    # ---------- 审批（§5.4 input-required 闭环） ----------
+
+    def approve_task(self, task_id: str, *, notes: str = "") -> str:
+        """blocked（A2A input-required）→ working：用户批准继续。"""
+        row = state_store.get_task(self.conn, task_id)
+        if row is None:
+            raise KeyError(f"task not found: {task_id}")
+        if row["status"] != TaskStatus.BLOCKED.value:
+            raise state_store.IllegalTransition(
+                task_id, row["status"], TaskStatus.WORKING.value)
+        state_store.transition_task(self.conn, task_id, TaskStatus.WORKING,
+                                    review={"reviewer": "user",
+                                            "verdict": "approved",
+                                            "notes": notes})
+        return "working"
+
+    def reject_task(self, task_id: str, *, notes: str = "") -> str:
+        """blocked → cancelled：用户拒绝，级联取消后代。"""
+        row = state_store.get_task(self.conn, task_id)
+        if row is None:
+            raise KeyError(f"task not found: {task_id}")
+        if row["status"] != TaskStatus.BLOCKED.value:
+            raise state_store.IllegalTransition(
+                task_id, row["status"], TaskStatus.CANCELLED.value)
+        self.cancel_task(task_id)
+        return "cancelled"
+
+    # ---------- 长期记忆（Hermes 唯一写方，§15.3） ----------
+
+    def _retain_outcome(self, task_id: str, notes: str) -> None:
+        """任务被接受后把结果摘要写入长期记忆；失败静默（best-effort）。"""
+        if self.memory is None:
+            return
+        row = state_store.get_task(self.conn, task_id)
+        if row is None:
+            return
+        scope = f"project:{row['project']}" if row["project"] else "system"
+        content = (
+            f"任务 {task_id} 已完成并验收。\n"
+            f"目标：{row['objective']}\n"
+            f"执行者：{row['assigned_to'] or '-'}\n"
+            + (f"评审备注：{notes}\n" if notes else "")
+        )
+        try:
+            self.memory.retain(content, scope,
+                               {"task_id": task_id, "kind": "task_outcome"})
+        except Exception:
+            pass  # 记忆服务不可用不阻塞任务流
 
     # ---------- 重试 / 取消 ----------
 

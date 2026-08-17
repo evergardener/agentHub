@@ -7,6 +7,8 @@
   agentctl task show <id>         任务详情（含 runs / artifacts）
   agentctl task retry <id>        失败任务重试（failed → queued）
   agentctl task cancel <id>       取消任务（级联取消后代）
+  agentctl task approve <id>      审批通过（blocked → working）
+  agentctl task reject <id>       审批拒绝（blocked → cancelled，级联）
   agentctl events [--follow]      事件流（SQLite 单一事实源，--follow 轮询追加）
 """
 
@@ -139,6 +141,34 @@ def cmd_task_cancel(db_path: Path, task_id: str) -> int:
     return 0
 
 
+def cmd_task_approve(db_path: Path, task_id: str, notes: str) -> int:
+    from orchestrator.task_manager import TaskManager
+    from orchestrator import state_store
+
+    tm = TaskManager(db_path=db_path)
+    try:
+        tm.approve_task(task_id, notes=notes)
+    except (KeyError, state_store.IllegalTransition) as e:
+        print(f"approve failed: {e}")
+        return 1
+    print(f"{task_id}: blocked → working (approved by user)")
+    return 0
+
+
+def cmd_task_reject(db_path: Path, task_id: str, notes: str) -> int:
+    from orchestrator.task_manager import TaskManager
+    from orchestrator import state_store
+
+    tm = TaskManager(db_path=db_path)
+    try:
+        tm.reject_task(task_id, notes=notes)
+    except (KeyError, state_store.IllegalTransition) as e:
+        print(f"reject failed: {e}")
+        return 1
+    print(f"{task_id}: blocked → cancelled (rejected by user)")
+    return 0
+
+
 def _print_event(row) -> None:
     payload = row["payload_json"] or ""
     if len(payload) > 200:
@@ -192,6 +222,12 @@ def main() -> int:
     p_tr.add_argument("task_id")
     p_tc = task_sub.add_parser("cancel")
     p_tc.add_argument("task_id")
+    p_ta = task_sub.add_parser("approve")
+    p_ta.add_argument("task_id")
+    p_ta.add_argument("--notes", default="")
+    p_tj = task_sub.add_parser("reject")
+    p_tj.add_argument("task_id")
+    p_tj.add_argument("--notes", default="")
 
     p_ev = sub.add_parser("events")
     p_ev.add_argument("--follow", action="store_true")
@@ -211,6 +247,10 @@ def main() -> int:
         return cmd_task_retry(args.db, args.task_id)
     if args.command == "task" and args.sub == "cancel":
         return cmd_task_cancel(args.db, args.task_id)
+    if args.command == "task" and args.sub == "approve":
+        return cmd_task_approve(args.db, args.task_id, args.notes)
+    if args.command == "task" and args.sub == "reject":
+        return cmd_task_reject(args.db, args.task_id, args.notes)
     if args.command == "events":
         return cmd_events(args.db, args.follow, args.interval, args.event_type)
     return 2

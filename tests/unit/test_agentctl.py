@@ -80,3 +80,92 @@ def test_task_cancel_terminal_is_noop(env, capsys):
         state_store.transition_task(tm.conn, t1, dst)
     assert run_cli("task", "cancel", t1) == 1
     assert "nothing to cancel" in capsys.readouterr().out
+
+
+# ---------- 审批闭环（blocked → input-required → 用户决策） ----------
+
+def _to_blocked(tm, task_id: str) -> None:
+    for dst in (TaskStatus.QUEUED, TaskStatus.ASSIGNED,
+                TaskStatus.WORKING, TaskStatus.BLOCKED):
+        state_store.transition_task(tm.conn, task_id, dst)
+
+
+def test_task_approve_resumes(env, capsys):
+    tm, run_cli = env
+    t1 = tm.create_task("dangerous op")
+    _to_blocked(tm, t1)
+    assert run_cli("task", "approve", t1, "--notes", "looks safe") == 0
+    assert state_store.get_task(tm.conn, t1)["status"] == "working"
+    assert "approved by user" in capsys.readouterr().out
+
+
+def test_task_reject_cancels(env, capsys):
+    tm, run_cli = env
+    t1 = tm.create_task("dangerous op")
+    _to_blocked(tm, t1)
+    assert run_cli("task", "reject", t1) == 0
+    assert state_store.get_task(tm.conn, t1)["status"] == "cancelled"
+    assert "rejected by user" in capsys.readouterr().out
+
+
+def test_task_approve_rejects_non_blocked(env, capsys):
+    tm, run_cli = env
+    t1 = tm.create_task("fresh")
+    assert run_cli("task", "approve", t1) == 1
+    assert "approve failed" in capsys.readouterr().out
+
+
+# ---------- 长期记忆挂钩（Hermes 唯一写方） ----------
+
+class FakeMemory:
+    def __init__(self):
+        self.retained: list[dict] = []
+
+    def retain(self, content, scope, metadata):
+        self.retained.append(
+            {"content": content, "scope": scope, "metadata": metadata})
+        return "mem-1"
+
+
+def test_accept_retains_outcome(env):
+    tm, _ = env
+    mem = FakeMemory()
+    tm.memory = mem
+    t1 = tm.create_task("fix the bug", project="demo")
+    for dst in (TaskStatus.QUEUED, TaskStatus.ASSIGNED, TaskStatus.WORKING,
+                TaskStatus.COMPLETED):
+        state_store.transition_task(tm.conn, t1, dst)
+    tm.review_result(t1, approved=True, notes="LGTM")
+    assert len(mem.retained) == 1
+    entry = mem.retained[0]
+    assert entry["scope"] == "project:demo"
+    assert "fix the bug" in entry["content"]
+    assert entry["metadata"]["task_id"] == t1
+
+
+def test_reject_does_not_retain(env):
+    tm, _ = env
+    mem = FakeMemory()
+    tm.memory = mem
+    t1 = tm.create_task("bad work")
+    for dst in (TaskStatus.QUEUED, TaskStatus.ASSIGNED, TaskStatus.WORKING,
+                TaskStatus.COMPLETED):
+        state_store.transition_task(tm.conn, t1, dst)
+    tm.review_result(t1, approved=False)
+    assert mem.retained == []
+
+
+def test_memory_failure_does_not_block(env):
+    tm, _ = env
+
+    class BrokenMemory:
+        def retain(self, *a, **k):
+            raise ConnectionError("hindsight down")
+
+    tm.memory = BrokenMemory()
+    t1 = tm.create_task("task")
+    for dst in (TaskStatus.QUEUED, TaskStatus.ASSIGNED, TaskStatus.WORKING,
+                TaskStatus.COMPLETED):
+        state_store.transition_task(tm.conn, t1, dst)
+    # 记忆服务故障不影响验收
+    assert tm.review_result(t1, approved=True) == "accepted"
