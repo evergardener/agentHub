@@ -6,17 +6,15 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
-DEFAULT_CONFIG = (
-    Path(os.environ.get("AGENT_WORKSPACE", Path.home() / "AgentWorkspace"))
-    / "config" / "agents.yaml"
-)
+from common import config as cfg
+
+DEFAULT_CONFIG = cfg.workspace() / "config" / "agents.yaml"
 
 
 @dataclass

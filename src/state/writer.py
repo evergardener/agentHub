@@ -11,12 +11,10 @@
 from __future__ import annotations
 
 import asyncio
-import os
-from pathlib import Path
 
 from common.models import TaskStatus
 from orchestrator import state_store
-from orchestrator.nats_client import DEFAULT_URL, durable_consume, ensure_stream
+from orchestrator.nats_client import durable_consume, ensure_stream
 from state.db import init_db
 
 DURABLE = "state-writer"
@@ -119,12 +117,10 @@ class StateWriter:
 
 
 async def main() -> None:
-    nats_url = os.environ.get("NATS_URL", DEFAULT_URL)
-    db_path = Path(
-        os.environ.get("AGENT_STATE_DB")
-        or Path(os.environ.get("AGENT_WORKSPACE", Path.home() / "AgentWorkspace"))
-        / "runtime" / "agent-state.db"
-    )
+    from common import config as cfg
+
+    nats_url = cfg.nats_url()
+    db_path = cfg.state_db()
     writer = StateWriter(db_path)
     await ensure_stream(nats_url)
 

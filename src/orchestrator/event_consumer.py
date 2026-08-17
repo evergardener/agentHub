@@ -12,17 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-from pathlib import Path
 
-from orchestrator.nats_client import DEFAULT_URL, durable_consume, ensure_stream
+from common import config as cfg
+from orchestrator.nats_client import durable_consume, ensure_stream
 
 DURABLE = "hermes-orchestrator"
 
 
 def _event_log() -> Path:
-    ws = Path(os.environ.get("AGENT_WORKSPACE", Path.home() / "AgentWorkspace"))
-    path = ws / "logs" / "hermes-events.jsonl"
+    path = cfg.workspace() / "logs" / "hermes-events.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -33,7 +31,7 @@ async def log_handler(event: dict) -> None:
 
 
 async def main() -> None:
-    nats_url = os.environ.get("NATS_URL", DEFAULT_URL)
+    nats_url = cfg.nats_url()
     await ensure_stream(nats_url)
     await durable_consume(DURABLE, log_handler, nats_url)
 

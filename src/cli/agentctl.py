@@ -20,7 +20,10 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULT_DB = Path.home() / "AgentWorkspace" / "runtime" / "agent-state.db"
+def _default_db() -> Path:
+    from common import config as cfg
+
+    return cfg.state_db()
 
 
 def _conn(db_path: Path):
@@ -264,7 +267,7 @@ def cmd_chat(db_path: Path, one_shot: str | None) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="agentctl")
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument("--db", type=Path, default=None)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
 
@@ -305,6 +308,7 @@ def main() -> int:
                         help="one-shot 模式；缺省进入交互循环")
 
     args = parser.parse_args()
+    args.db = args.db or _default_db()
     if args.command == "status":
         return cmd_status(args.db)
     if args.command == "agent" and args.sub == "list":

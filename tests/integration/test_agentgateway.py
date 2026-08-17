@@ -42,11 +42,12 @@ GW_BASE = f"http://127.0.0.1:{GW_PORT}"
 
 
 def _gateway_key() -> str:
-    return subprocess.run(
-        ["security", "find-generic-password", "-s", "agent-system",
-         "-a", "gateway-api-key", "-w"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
+    from common import config as cfg
+
+    key = cfg.gateway_api_key()
+    if not key:
+        pytest.skip("LAS_GATEWAY_API_KEY/GATEWAY_API_KEY not set")
+    return key
 
 
 @pytest.fixture(scope="module")

@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sqlite3
 import uuid
 from pathlib import Path
 
+from common import config as cfg
 from common.ids import idempotency_key as make_idem_key
 from common.memory import MemoryService
 from common.models import TaskStatus
@@ -21,20 +21,13 @@ from orchestrator import state_store
 from orchestrator.a2a_client import A2aClient
 from state.db import init_db, next_task_id
 
-DEFAULT_DB = Path(
-    os.environ.get("AGENT_STATE_DB")
-    or Path(os.environ.get("AGENT_WORKSPACE", Path.home() / "AgentWorkspace"))
-    / "runtime" / "agent-state.db"
-)
-WORKSPACE = Path(os.environ.get("AGENT_WORKSPACE", Path.home() / "AgentWorkspace"))
-
 
 class TaskManager:
-    def __init__(self, db_path: str | Path = DEFAULT_DB,
-                 workspace: Path = WORKSPACE,
+    def __init__(self, db_path: str | Path | None = None,
+                 workspace: Path | None = None,
                  memory: "MemoryService | None" = None):
-        self.conn: sqlite3.Connection = init_db(db_path)
-        self.workspace = Path(workspace)
+        self.conn: sqlite3.Connection = init_db(db_path or cfg.state_db())
+        self.workspace = Path(workspace or cfg.workspace())
         # 长期记忆写方仅限 Hermes（§15.3）；None 时静默跳过。
         # best-effort：记忆服务故障不阻塞任务流。
         self.memory = memory
@@ -151,7 +144,7 @@ class TaskManager:
             row = state_store.get_task(self.conn, task_id)
             return row["status"] if row else None
 
-        url = nats_url or os.environ.get("NATS_URL")
+        url = nats_url or cfg.nats_url()
         if url:
             try:
                 return await self._wait_via_nats(task_id, url, terminal, timeout)

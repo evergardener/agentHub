@@ -18,21 +18,17 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+from common import config as cfg
 from common.models import TaskStatus
 from orchestrator import state_store
 from state.db import CST, init_db
 
-DEFAULT_DB = Path(
-    os.environ.get("AGENT_STATE_DB")
-    or Path(os.environ.get("AGENT_WORKSPACE", Path.home() / "AgentWorkspace"))
-    / "runtime" / "agent-state.db"
-)
 SWEEP_INTERVAL = float(os.environ.get("JANITOR_INTERVAL", "60"))
 
 
 class Janitor:
-    def __init__(self, db_path: str | Path = DEFAULT_DB):
-        self.conn: sqlite3.Connection = init_db(db_path)
+    def __init__(self, db_path: str | Path | None = None):
+        self.conn: sqlite3.Connection = init_db(db_path or cfg.state_db())
         self.alerts: list[dict] = []
 
     def sweep(self) -> dict:

@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import uuid
 from contextlib import asynccontextmanager, suppress
 from typing import Awaitable, Callable
@@ -26,13 +25,14 @@ from adapters.common import (
     EventPublisher,
     FifoExecutor,
 )
+from common import config as cfg
 from common.ids import temp_task_id
 
 RunnerFn = Callable[[A2aTask], Awaitable[list[dict]]]
 CardFn = Callable[[str], dict]
 
-HEARTBEAT_INTERVAL = float(os.environ.get("AGENT_HEARTBEAT_INTERVAL", "30"))
-LEASE_TTL_SECONDS = int(os.environ.get("AGENT_LEASE_TTL", "90"))
+HEARTBEAT_INTERVAL = cfg.heartbeat_interval()
+LEASE_TTL_SECONDS = cfg.lease_ttl()
 
 
 async def _heartbeat_loop(publisher: EventPublisher, agent_id: str) -> None:

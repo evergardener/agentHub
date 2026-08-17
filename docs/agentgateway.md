@@ -22,11 +22,11 @@ gateway 地址（`AGENT_GATEWAY_URL`）。
 ## 启动
 
 ```bash
-GATEWAY_API_KEY=$(security find-generic-password -s agent-system -a gateway-api-key -w) \
-  infra/agentgateway/bin/agentgateway -f infra/agentgateway/config.yaml
+export LAS_GATEWAY_API_KEY=<gateway-key>   # 或旧名 GATEWAY_API_KEY
+infra/agentgateway/bin/agentgateway -f infra/agentgateway/config.yaml
 ```
 
-key 存于 Keychain `agent-system/gateway-api-key`，经环境变量注入，
+key 只经环境变量注入（M2 起 env-only，不再使用 macOS Keychain），
 配置文件里只写 `"$GATEWAY_API_KEY"`，不落明文。
 
 ## 治理行为

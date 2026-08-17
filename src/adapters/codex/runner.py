@@ -69,20 +69,14 @@ async def run(task: A2aTask, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> 
 
     env = dict(os.environ)
     env.setdefault("CI", "true")
-    # cliproxy 密钥注入：env 缺失时从 Keychain 读取
+    # codex CLI 的 config.toml 以 CLIPROXY_API_KEY 为 env_key；
+    # 系统统一配置是 LAS_LLM_API_KEY（common.config），这里做映射注入。
     if "CLIPROXY_API_KEY" not in env:
-        try:
-            import subprocess
+        from common import config as cfg
 
-            key = subprocess.run(
-                ["security", "find-generic-password", "-s", "agent-system",
-                 "-a", "cliproxy-api-key", "-w"],
-                capture_output=True, text=True, check=True,
-            ).stdout.strip()
-            if key:
-                env["CLIPROXY_API_KEY"] = key
-        except Exception:
-            pass  # 无 key 时让 codex 自己报错
+        key = cfg.llm_api_key()
+        if key:
+            env["CLIPROXY_API_KEY"] = key
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,

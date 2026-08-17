@@ -1,0 +1,61 @@
+"""common.config 单元测试：LAS_* 正式名优先、旧别名兜底、默认值。"""
+
+from __future__ import annotations
+
+import pytest
+
+from common import config as cfg
+
+ALL_KEYS = [
+    "LAS_WORKSPACE", "AGENT_WORKSPACE",
+    "LAS_STATE_DB", "AGENT_STATE_DB",
+    "LAS_NATS_URL", "NATS_URL",
+    "LAS_GATEWAY_URL", "AGENT_GATEWAY_URL",
+    "LAS_GATEWAY_API_KEY", "GATEWAY_API_KEY",
+    "LAS_LLM_BASE_URL", "KIMI_API_BASE",
+    "LAS_LLM_API_KEY", "CLIPROXY_API_KEY",
+    "LAS_LLM_MODEL", "KIMI_MODEL",
+    "LAS_HINDSIGHT_URL", "HINDSIGHT_API_URL",
+    "LAS_HINDSIGHT_API_KEY", "HINDSIGHT_API_KEY",
+]
+
+
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch):
+    for k in ALL_KEYS:
+        monkeypatch.delenv(k, raising=False)
+
+
+def test_primary_wins_over_alias(monkeypatch):
+    monkeypatch.setenv("LAS_LLM_API_KEY", "new-key")
+    monkeypatch.setenv("CLIPROXY_API_KEY", "old-key")
+    assert cfg.llm_api_key() == "new-key"
+
+
+def test_alias_fallback(monkeypatch):
+    monkeypatch.setenv("CLIPROXY_API_KEY", "old-key")
+    assert cfg.llm_api_key() == "old-key"
+
+
+def test_defaults():
+    assert cfg.llm_base_url() == "http://127.0.0.1:8317/v1"
+    assert cfg.llm_model() == "deepseek-ai/DeepSeek-V4-Flash"
+    assert cfg.nats_url() == "nats://127.0.0.1:4222"
+    assert cfg.gateway_url() == ""
+    assert cfg.llm_api_key() == ""
+
+
+def test_state_db_derived_from_workspace(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path))
+    assert cfg.state_db() == tmp_path / "runtime" / "agent-state.db"
+
+
+def test_state_db_explicit(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAS_STATE_DB", str(tmp_path / "x.db"))
+    assert cfg.state_db() == tmp_path / "x.db"
+
+
+def test_kimi_api_key_never_read(monkeypatch):
+    # Kimi Work 桌面端注入的 KIMI_API_KEY 不得被当作 LLM 密钥
+    monkeypatch.setenv("KIMI_API_KEY", "should-not-be-used")
+    assert cfg.llm_api_key() == ""

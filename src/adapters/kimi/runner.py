@@ -1,10 +1,10 @@
 """Kimi 运行时 — 设计文档 §Phase 6：研究 / 长上下文 Worker。
 
-通过 OpenAI 兼容端点调用模型：
-  KIMI_API_BASE     默认 http://127.0.0.1:8317/v1（本地 cliproxy → siliconflow）
-  KIMI_MODEL        默认 deepseek-ai/DeepSeek-V4-Flash
-  CLIPROXY_API_KEY  缺省从 Keychain agent-system/cliproxy-api-key 注入
-                    （刻意不读 KIMI_API_KEY：与 Kimi Work 桌面端注入的同名变量冲突）
+通过 OpenAI 兼容端点调用模型，配置统一走 common.config（env-only）：
+  LAS_LLM_BASE_URL  默认 http://127.0.0.1:8317/v1（本地 cliproxy → siliconflow）
+  LAS_LLM_MODEL     默认 deepseek-ai/DeepSeek-V4-Flash
+  LAS_LLM_API_KEY   端点密钥（刻意不读 KIMI_API_KEY：与 Kimi Work 桌面端
+                    注入的同名变量冲突，会 401）
 
 权限边界（§13 Kimi）：shell/ssh denied —— 本 runner 只发 HTTP，不执行命令。
 """
@@ -13,15 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import subprocess
 
 import httpx
 
 from adapters.common import A2aTask, save_artifact
+from common import config as cfg
 
-DEFAULT_BASE = "http://127.0.0.1:8317/v1"
-DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash"
+DEFAULT_BASE = cfg.DEFAULT_LLM_BASE
+DEFAULT_MODEL = cfg.DEFAULT_LLM_MODEL
 
 
 class KimiFailed(RuntimeError):
@@ -29,19 +28,7 @@ class KimiFailed(RuntimeError):
 
 
 def _api_key() -> str:
-    # 注意：不要读 KIMI_API_KEY —— Kimi Work 桌面端会注入同名变量（指向其自有
-    # 网关），会造成 401。这里只认 CLIPROXY_API_KEY，缺省回落到 Keychain。
-    key = os.environ.get("CLIPROXY_API_KEY")
-    if key:
-        return key
-    try:
-        return subprocess.run(
-            ["security", "find-generic-password", "-s", "agent-system",
-             "-a", "cliproxy-api-key", "-w"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-    except Exception:
-        return ""
+    return cfg.llm_api_key()
 
 
 def _extract_content(resp: httpx.Response) -> str:
@@ -74,8 +61,8 @@ def _extract_content(resp: httpx.Response) -> str:
 
 
 async def run(task: A2aTask) -> list[dict]:
-    base = os.environ.get("KIMI_API_BASE", DEFAULT_BASE)
-    model = os.environ.get("KIMI_MODEL", DEFAULT_MODEL)
+    base = cfg.llm_base_url()
+    model = cfg.llm_model()
     prompt = (
         "你是一名研究助手。请针对以下任务给出结构化分析"
         "（要点、风险、建议），用中文回答：\n\n" + task.objective

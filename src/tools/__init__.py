@@ -15,7 +15,9 @@ class PathEscapeError(PermissionError):
 
 
 def workspace_root() -> Path:
-    return Path(os.environ.get("AGENT_WORKSPACE", "~/AgentWorkspace")).expanduser()
+    from common import config as cfg
+
+    return cfg.workspace()
 
 
 def resolve_under_root(rel_path: str, root: Path | None = None) -> Path:

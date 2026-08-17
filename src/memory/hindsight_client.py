@@ -3,10 +3,9 @@
 目标实例：用户本机已有 Hindsight 0.8.3（docker compose 部署）。
   API: http://127.0.0.1:18888（容器 hindsight-api，已启用 API Key 鉴权）
 
-配置（Secrets 规则见设计文档 §14，密钥不入库不入仓）：
-  HINDSIGHT_API_URL  默认 http://127.0.0.1:18888
-  HINDSIGHT_API_KEY  从环境变量读取；建议经 macOS Keychain 注入：
-                     keychain://agent-system/hindsight-api-key
+配置（Secrets 规则见设计文档 §14，密钥只从环境变量读取，env-only）：
+  LAS_HINDSIGHT_URL      默认 http://127.0.0.1:18888（别名 HINDSIGHT_API_URL）
+  LAS_HINDSIGHT_API_KEY  API Key（别名 HINDSIGHT_API_KEY）
 
 scope → bank_id 映射：
   user            -> las-user
@@ -17,7 +16,6 @@ scope → bank_id 映射：
 from __future__ import annotations
 
 import json
-import os
 import urllib.request
 import urllib.error
 
@@ -43,10 +41,10 @@ class HindsightMemoryService:
     """MemoryService 的 Hindsight 实现（仅 Hermes 侧使用）。"""
 
     def __init__(self, base_url: str | None = None, api_key: str | None = None):
-        self.base_url = (
-            base_url or os.environ.get("HINDSIGHT_API_URL") or DEFAULT_BASE_URL
-        ).rstrip("/")
-        self.api_key = api_key or os.environ.get("HINDSIGHT_API_KEY", "")
+        from common import config as cfg
+
+        self.base_url = (base_url or cfg.hindsight_url()).rstrip("/")
+        self.api_key = api_key if api_key is not None else cfg.hindsight_api_key()
 
     # ---- MemoryService 接口 ----
 

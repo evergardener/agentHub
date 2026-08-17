@@ -3,8 +3,8 @@
 #
 # 拓扑：Hermes → gateway(127.0.0.1:8300) → adapters(127.0.0.1:8201/8202)
 # - 所有端口 loopback only
-# - 统一 API key 认证（strict）：key 经环境变量 $GATEWAY_API_KEY 注入，
-#   实际值存 macOS Keychain（agent-system/gateway-api-key），不入库
+# - 统一 API key 认证（strict）：key 经环境变量 $GATEWAY_API_KEY 注入
+#   （env-only，不入库不落盘；M2 起不再使用 macOS Keychain）
 # - ACL：路由级 authorization 规则按 apiKey metadata 的 agents 列表放行；
 #   要禁用某 Agent，把它的名字从该 key 的 agents 中移除即可（热加载生效）
 # - timeout/retry：路由级策略（retry 仅对连接失败与 502/503 重试一次）

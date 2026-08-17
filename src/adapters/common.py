@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -28,7 +27,9 @@ def now_iso() -> str:
 
 
 def workspace_root() -> Path:
-    return Path(os.environ.get("AGENT_WORKSPACE", Path.home() / "AgentWorkspace"))
+    from common import config as cfg
+
+    return cfg.workspace()
 
 
 # ---------- A2A 数据结构（Phase 1 最小子集） ----------
@@ -88,10 +89,10 @@ class EventPublisher:
     """NATS 可用则发布；不可用则暂存到本地 JSONL，恢复后可重发（§17.7）。"""
 
     def __init__(self, source: str, nats_url: str | None = None):
+        from common import config as cfg
+
         self.source = source
-        self.nats_url = (
-            nats_url or os.environ.get("NATS_URL") or "nats://127.0.0.1:4222"
-        )
+        self.nats_url = nats_url or cfg.nats_url()
         self.spool = workspace_root() / "logs" / "events-pending.jsonl"
 
     async def publish(self, event_type: str, task_id: str | None,

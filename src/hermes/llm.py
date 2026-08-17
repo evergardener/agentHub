@@ -1,6 +1,6 @@
 """Hermes LLM 客户端 — OpenAI 兼容端点 + 工具调用（Evolution v3 §1）。
 
-配置（全部环境变量，不入库不入仓）：
+配置统一走 common.config（env-only，LAS_LLM_*）：
   LAS_LLM_BASE_URL  默认 http://127.0.0.1:8317/v1（本地 cliproxy）
   LAS_LLM_API_KEY   端点密钥
   LAS_LLM_MODEL     默认 deepseek-ai/DeepSeek-V4-Flash
@@ -9,13 +9,14 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 
 import httpx
 
-DEFAULT_BASE = "http://127.0.0.1:8317/v1"
-DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash"
+from common import config as cfg
+
+DEFAULT_BASE = cfg.DEFAULT_LLM_BASE
+DEFAULT_MODEL = cfg.DEFAULT_LLM_MODEL
 
 
 class LLMFailed(RuntimeError):
@@ -78,12 +79,9 @@ def _extract_message(resp: httpx.Response) -> dict:
 class HermesLLM:
     def __init__(self, base_url: str | None = None, model: str | None = None,
                  api_key: str | None = None):
-        self.base_url = (
-            base_url or os.environ.get("LAS_LLM_BASE_URL") or DEFAULT_BASE
-        ).rstrip("/")
-        self.model = model or os.environ.get("LAS_LLM_MODEL") or DEFAULT_MODEL
-        self.api_key = api_key if api_key is not None else os.environ.get(
-            "LAS_LLM_API_KEY", "")
+        self.base_url = (base_url or cfg.llm_base_url()).rstrip("/")
+        self.model = model or cfg.llm_model()
+        self.api_key = api_key if api_key is not None else cfg.llm_api_key()
 
     async def chat(self, messages: list[dict],
                    tools: list[dict] | None = None,

@@ -2,18 +2,18 @@
 
 Phase 1 范围：Agent Card 获取、message/send、tasks/get。
 Phase 5：支持经 agentgateway 访问（§3.4）——
-  for_agent() 按 AGENT_GATEWAY_URL 决定直连还是走 gateway；
-  走 gateway 时自动拼 /agents/<name> 前缀并注入 Bearer key
-  （Keychain agent-system/gateway-api-key，env GATEWAY_API_KEY 优先）。
+  for_agent() 按 LAS_GATEWAY_URL（别名 AGENT_GATEWAY_URL）决定直连还是走
+  gateway；走 gateway 时自动拼 /agents/<name> 前缀并注入 Bearer key
+  （LAS_GATEWAY_API_KEY，common.config 统一读取）。
 """
 
 from __future__ import annotations
 
-import os
-import subprocess
 import uuid
 
 import httpx
+
+from common import config as cfg
 
 
 class A2aError(RuntimeError):
@@ -21,17 +21,7 @@ class A2aError(RuntimeError):
 
 
 def _gateway_key() -> str:
-    key = os.environ.get("GATEWAY_API_KEY")
-    if key:
-        return key
-    try:
-        return subprocess.run(
-            ["security", "find-generic-password", "-s", "agent-system",
-             "-a", "gateway-api-key", "-w"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-    except Exception:
-        return ""
+    return cfg.gateway_api_key()
 
 
 class A2aClient:
@@ -46,11 +36,11 @@ class A2aClient:
                   timeout: float = 30.0) -> "A2aClient":
         """按环境决定直连 adapter 还是经 agentgateway（Phase 5）。
 
-        AGENT_GATEWAY_URL 非空（如 http://127.0.0.1:8300）时：
+        LAS_GATEWAY_URL 非空（如 http://127.0.0.1:8300）时：
         Hermes → gateway/agents/<name>，带 Bearer key；
         否则保持 Phase 1-4 行为：直连 direct_endpoint。
         """
-        gw = os.environ.get("AGENT_GATEWAY_URL", "").strip()
+        gw = cfg.gateway_url()
         if not gw:
             return cls(direct_endpoint, timeout=timeout)
         return cls(f"{gw.rstrip('/')}/agents/{agent_name}",
