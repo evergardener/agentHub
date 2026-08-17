@@ -147,8 +147,8 @@ def save_artifact(task_id: str, name: str, content: bytes,
                   artifact_type: str = "file") -> dict:
     """写入 tasks/<id>/artifacts/，返回带 sha256 的 artifact 描述（§22.4）。"""
     out_dir = workspace_root() / "tasks" / task_id / "artifacts"
-    out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / name
+    path.parent.mkdir(parents=True, exist_ok=True)  # name 可含子路径，如 workspace/hello.py
     path.write_bytes(content)
     return {
         "name": name,

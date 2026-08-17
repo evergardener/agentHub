@@ -21,7 +21,7 @@
    - reflect: `POST /v1/default/banks/{bank_id}/reflect`
 4. 镜像 `ghcr.io/vectorize-io/hindsight:latest` 已拉取备用（如需独立实例）。
 5. 附带发现：官方有 Codex 集成（`hindsight-integrations/codex`，hooks 机制）；本机另有一套自研 `agent-memory-*` 服务（127.0.0.1:7810）。两者均不改变本决策，记录备查。
-6. **LLM 配置修复（2026-08-17）**：原配置模型 `ocg/qwen3.7-plus` 的路由（9router → opencode-go provider）无有效凭据，导致 retain 的事实抽取 100% 失败（实例健康检查只查数据库，故长期未暴露）。已改配 `HINDSIGHT_API_LLM_MODEL=ds/deepseek-v4-flash`（9router 直连 deepseek 线路），retain/recall 端到端验证通过（含实体抽取与 metadata 透传）。如需更换模型，改 compose 目录 `.env` 后 `docker compose up -d` 即可。
+6. **LLM 配置修复（2026-08-17，后更新）**：原配置模型 `ocg/qwen3.7-plus` 的路由（9router → opencode-go provider）无有效凭据，导致 retain 的事实抽取 100% 失败（实例健康检查只查数据库，故长期未暴露）。当日下午 9router 侧生产 key 被停用后，按用户指示统一改用 **beta 测试 key + `teamrouter/gpt-5.4-mini`**（详见 ADR-0003），retain/recall 端到端验证通过。如需更换模型，改 compose 目录 `.env` 后 `docker compose up -d` 即可。
 
 ## 决策
 
