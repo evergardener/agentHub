@@ -9,3 +9,4 @@ runtime/
 *.db-shm
 .DS_Store
 infra/agentgateway/bin/
+.env
