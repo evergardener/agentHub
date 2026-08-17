@@ -3,10 +3,16 @@ name = "local-agent-system"
 version = "0.1.0"
 description = "Hermes-orchestrated local multi-agent collaboration system"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "httpx>=0.27",
+    "nats-py>=2.10",
+    "pyyaml>=6",
+]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "anyio>=4"]
 
 [project.scripts]
 agentctl = "cli.agentctl:main"
