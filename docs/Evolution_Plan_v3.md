@@ -215,12 +215,22 @@ hermes wait_task → 订阅事件 / 轮询 SQLite      # 不再挂 HTTP
 
 ## 7. 里程碑与验收
 
-| 里程碑 | 内容 | 验收 |
-|---|---|---|
-| M1 | A2A 异步化 + hermes-brain 最小可用（CLI chat + 审批策略 + 常驻授权） | 长任务（>20min 模拟）不中断；你的 ghcr 部署例子端到端走通；对话内批准/拒绝/常驻授权三态生效 |
-| M2 | env 统一 + 去 Keychain + Dockerfile + compose + 推 agentHub 仓库 + GH workflow 推 ghcr | 干净机器 `docker compose up` 起全系统；ghcr 有镜像 |
-| M3 | PostgreSQL 双后端 | 离线套件对 SQLite 与 PG 双绿 |
-| M4 | OTel + Web UI | Jaeger 见全链路 trace；Web UI 完成看板/审批/事件流 |
+| 里程碑 | 内容 | 验收 | 状态 |
+|---|---|---|---|
+| M1 | A2A 异步化 + hermes-brain 最小可用（CLI chat + 审批策略 + 常驻授权） | 长任务（>20min 模拟）不中断；你的 ghcr 部署例子端到端走通；对话内批准/拒绝/常驻授权三态生效 | ✅ 已完成（`f2005ec` + `49b191f`） |
+| M2 | env 统一 + 去 Keychain + Dockerfile + compose + 推 agentHub 仓库 + GH workflow 推 ghcr | 干净机器 `docker compose up` 起全系统；ghcr 有镜像 | ✅ 已完成（`a7351c7`–`847a3e4`；ghcr 多架构镜像流水线两次构建成功） |
+| M3 | PostgreSQL 双后端 | 离线套件对 SQLite 与 PG 双绿 | ✅ 已完成（`b09e821`；`LAS_DATABASE_URL` 切换，双迁移目录） |
+| M4 | OTel + Web UI | Jaeger 见全链路 trace；Web UI 完成看板/审批/事件流 | ✅ 已完成（`27cf691`；Jaeger 单 trace 含 hermes 三跨度 + adapter 跨度） |
 
 M2 的 codex CLI 镜像内分发风险在第一天验证，若不可行立即降级为
-混合拓扑并回报。
+混合拓扑并回报。→ 已按决策落地：worker agent **不打包进镜像**，宿主机自装后经心跳注册（M2-2）。
+
+## 8. 实施后状态（2026-08-17 收尾）
+
+- 测试基线：`pytest` **110 passed, 10 skipped**（10 项 skip 为需要真实外部服务的集成用例）。
+- 已实测的端到端链路：容器控制面 + 宿主机 fake worker，经心跳注册 → hermes 委派 → A2A 下发 → 执行回报 → hermes 复审，任务 `completed`；Jaeger 可见单 trace 全跨度。
+- 已知留白（后续按需推进，不阻塞当前使用）：
+  1. codex / kimi **真实 adapter** 尚未接入 compose 栈做过全栈冒烟（仅 fake worker 验证过）；gateway 路由表目前只静态映射 codex/kimi，动态 agent 名的委派需设 `LAS_GATEWAY_URL=` 直连或扩展 gateway 动态路由。
+  2. Web UI 为单页看板（任务/审批/事件流），hermes chat 尚未接入 Web UI，对话入口为 `docker compose run --rm agentctl chat`。
+  3. OTel 埋点覆盖 hermes / adapter / llm；gateway、state-writer、janitor 的 span 未埋。
+  4. 本机开发密钥仍在 macOS Keychain（`agent-system/cliproxy-api-key`），容器部署走 `LAS_LLM_API_KEY` 环境变量，两者互不影响。
