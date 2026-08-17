@@ -1509,19 +1509,20 @@ agentctl agent list
 
 目标：加入统一通信治理。
 
-任务：
+任务（2026-08-17 完成，详见 docs/agentgateway.md）：
 
-- [ ] 部署 agentgateway。
-- [ ] Hermes 只访问 gateway。
-- [ ] Worker 不直接向公网暴露。
-- [ ] 加入 auth。
-- [ ] 加入 ACL。
-- [ ] 加入 timeout/retry。
-- [ ] 加入 tracing。
+- [x] 部署 agentgateway。（v1.4.1 darwin-arm64，sha256 校验，infra/agentgateway/）
+- [x] Hermes 只访问 gateway。（A2aClient.for_agent：AGENT_GATEWAY_URL 非空时走 gateway + Bearer key）
+- [x] Worker 不直接向公网暴露。（全部 loopback；gateway 是唯一认证入口）
+- [x] 加入 auth。（gateway 级 apiKey strict，key 存 Keychain 经 env 注入）
+- [x] 加入 ACL。（路由级 CEL authorization，按 key 元数据 agents 列表放行，热加载）
+- [x] 加入 timeout/retry。（路由级 requestTimeout + retry attempts=2）
+- [ ] 加入 tracing。（OTel 后置，见 §29）
 
 验收：
 
-禁用某 Agent 权限后，gateway 可以阻止不允许的请求。
+- [x] 禁用某 Agent 权限后，gateway 可以阻止不允许的请求。
+  （test_agentgateway.py：无 key 401 / 经 gateway 委派成功 / 禁用后 403）
 
 ---
 

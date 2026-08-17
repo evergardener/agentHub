@@ -116,7 +116,7 @@ class TaskManager:
         )
         self.conn.commit()
 
-        client = A2aClient(endpoint, timeout=3600)
+        client = A2aClient.for_agent(agent_id, endpoint, timeout=3600)
 
         async def _call() -> None:
             try:

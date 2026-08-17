@@ -44,7 +44,8 @@ async def recover(conn: sqlite3.Connection, endpoints: dict[str, str],
             continue
 
         try:
-            remote = await A2aClient(endpoint, timeout=5).get_task(task_id)
+            remote = await A2aClient.for_agent(
+                agent_id or "", endpoint, timeout=5).get_task(task_id)
         except (A2aError, Exception):  # Worker 不可达
             if _lease_expired(conn, agent_id):
                 _resolve_dead_worker(conn, task_id, on_lease_expired, stats)

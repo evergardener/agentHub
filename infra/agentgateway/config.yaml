@@ -1,0 +1,63 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+# agentgateway 配置 — 设计文档 §3.4 / Phase 5（通信治理层）
+#
+# 拓扑：Hermes → gateway(127.0.0.1:8300) → adapters(127.0.0.1:8201/8202)
+# - 所有端口 loopback only
+# - 统一 API key 认证（strict）：key 经环境变量 $GATEWAY_API_KEY 注入，
+#   实际值存 macOS Keychain（agent-system/gateway-api-key），不入库
+# - ACL：路由级 authorization 规则按 apiKey metadata 的 agents 列表放行；
+#   要禁用某 Agent，把它的名字从该 key 的 agents 中移除即可（热加载生效）
+# - timeout/retry：路由级策略（retry 仅对连接失败与 502/503 重试一次）
+
+gateways:
+  default:
+    port: 8300
+    apiKey:
+      mode: strict
+      keys:
+      - key: "$GATEWAY_API_KEY"
+        metadata:
+          user: hermes
+          role: orchestrator
+          agents: codex,kimi   # ACL：允许访问的 agent 列表
+
+routes:
+- name: agent-codex
+  matches:
+  - path:
+      pathPrefix: /agents/codex
+  policies:
+    urlRewrite:
+      path:
+        prefix: /            # 剥掉 /agents/codex 前缀
+    authorization:
+      rules:
+      - require: 'apiKey.agents.split(",").exists(a, a == "codex")'
+    timeout:
+      requestTimeout: 900s   # codex 任务可能很长
+    retry:
+      attempts: 2
+      backoff: 500ms
+      codes: [502, 503]
+  backends:
+  - host: 127.0.0.1:8201
+
+- name: agent-kimi
+  matches:
+  - path:
+      pathPrefix: /agents/kimi
+  policies:
+    urlRewrite:
+      path:
+        prefix: /
+    authorization:
+      rules:
+      - require: 'apiKey.agents.split(",").exists(a, a == "kimi")'
+    timeout:
+      requestTimeout: 300s
+    retry:
+      attempts: 2
+      backoff: 500ms
+      codes: [502, 503]
+  backends:
+  - host: 127.0.0.1:8202
