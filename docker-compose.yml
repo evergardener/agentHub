@@ -123,7 +123,9 @@ services:
       LAS_GATEWAY_URL: http://agentgateway:8300
       LAS_GATEWAY_API_KEY: ${LAS_GATEWAY_API_KEY:-}
       LAS_ADAPTER_TOKEN: ${LAS_ADAPTER_TOKEN:-}   # 经 gateway 透传给宿主机 adapter
-      LAS_LLM_BASE_URL: ${LAS_LLM_BASE_URL:-http://host.docker.internal:8317/v1}
+      # 容器内访问宿主机 cliproxy 的固定写法（宿主机进程的 127.0.0.1 视角
+      # 在 .env；此处是容器视角，不随 .env 覆盖）
+      LAS_LLM_BASE_URL: http://host.docker.internal:8317/v1
       LAS_LLM_API_KEY: ${LAS_LLM_API_KEY:-}
       LAS_LLM_MODEL: ${LAS_LLM_MODEL:-deepseek-ai/DeepSeek-V4-Flash}
       LAS_HINDSIGHT_URL: ${LAS_HINDSIGHT_URL:-http://host.docker.internal:18888}
