@@ -65,12 +65,21 @@ TOOL_SCHEMAS: list[dict] = [
     {"type": "function", "function": {
         "name": "review_task",
         "description": "复审已完成任务：approved=true 验收（自动解锁依赖任务），"
-                       "false 返工。",
+                       "false 返工。验收前必须先用 get_task_artifacts 核对产物；"
+                       "目标声明创建文件但产物清单无对应文件时，服务端会强制"
+                       "驳回（veto），不得绕过。",
         "parameters": {"type": "object", "properties": {
             "task_id": {"type": "string"},
             "approved": {"type": "boolean"},
             "notes": {"type": "string"},
         }, "required": ["task_id", "approved"]}}},
+    {"type": "function", "function": {
+        "name": "get_task_artifacts",
+        "description": "列出任务的实际产物清单（名称/类型/大小）。"
+                       "复审前必查：worker 汇报声称创建的文件必须在此清单中。",
+        "parameters": {"type": "object", "properties": {
+            "task_id": {"type": "string"},
+        }, "required": ["task_id"]}}},
     {"type": "function", "function": {
         "name": "list_tasks",
         "description": "列出任务（可按状态过滤）。",
@@ -210,10 +219,33 @@ class HermesTools:
         status = await self.tm.wait_task(task_id, timeout=timeout_seconds)
         row = self._task_or_error(task_id)
         return {"task_id": task_id, "status": status,
-                "objective": row.get("objective")}
+                "objective": row.get("objective"),
+                "artifacts": self._artifacts_summary(task_id)}
+
+    async def _tool_get_task_artifacts(self, task_id: str) -> dict:
+        row = self._task_or_error(task_id)
+        if "error" in row:
+            return row
+        return {"task_id": task_id,
+                "artifacts": self._artifacts_summary(task_id)}
 
     async def _tool_review_task(self, task_id: str, approved: bool,
                                 notes: str = "") -> dict:
+        # 产物核验（防谎报，2026-08-17 T-20260817-0020 事故）：
+        # 目标声明创建文件但产物清单无任何产出文件时，服务端强制驳回，
+        # 不信任 LLM/worker 的文本汇报。
+        if approved:
+            row = self._task_or_error(task_id)
+            if "error" in row:
+                return row
+            veto = self._artifact_veto_reason(row["objective"], task_id)
+            if veto:
+                new_status = self.tm.review_result(
+                    task_id, approved=False, notes=veto)
+                return {"task_id": task_id, "status": new_status,
+                        "veto": veto,
+                        "hint": "产物核验未通过，已按返工处理；请核实执行情况"
+                                "后重新委派。"}
         new_status = self.tm.review_result(task_id, approved=approved,
                                            notes=notes)
         return {"task_id": task_id, "status": new_status}
@@ -248,6 +280,34 @@ class HermesTools:
         return {"grant_id": grant_id, "revoked": ok}
 
     # ---------- 内部 ----------
+
+    # 运行日志/最终汇报不算"产出文件"
+    _NON_PRODUCT_ARTIFACTS = {"codex.log", "last-message.md"}
+
+    def _artifacts_summary(self, task_id: str) -> list[dict]:
+        from orchestrator import state_store
+        return [{"name": a["name"], "type": a["type"]}
+                for a in state_store.list_artifacts(self.tm.conn, task_id)]
+
+    def _artifact_veto_reason(self, objective: str, task_id: str) -> str | None:
+        """目标声明创建文件但无实际产出时返回驳回理由，否则 None。"""
+        import re
+        claims_file = (
+            re.search(r"(创建|新建|写入|生成|保存|产出).{0,24}?"
+                      r"(文件|\.md|\.txt|\.py|\.json|\.ya?ml|\.toml|\.csv)",
+                      objective)
+            or re.search(r"(创建|新建|写入|生成|保存)\s*[~\w./-]+\.\w{1,6}",
+                         objective)
+        )
+        if not claims_file:
+            return None
+        produced = [a for a in self._artifacts_summary(task_id)
+                    if a["name"] not in self._NON_PRODUCT_ARTIFACTS]
+        if produced:
+            return None
+        return ("产物核验驳回：任务目标声明创建文件，但产物清单中没有"
+                "任何产出文件（仅有运行日志/汇报）——疑似执行失败或"
+                "worker 谎报完成。")
 
     def _task_or_error(self, task_id: str) -> dict:
         from orchestrator import state_store

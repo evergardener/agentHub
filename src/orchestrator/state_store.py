@@ -55,6 +55,13 @@ def get_task(conn: sqlite3.Connection, task_id: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM tasks WHERE id = ?;", (task_id,)).fetchone()
 
 
+def list_artifacts(conn: sqlite3.Connection, task_id: str) -> list[sqlite3.Row]:
+    """任务产物清单（复审核验用）。"""
+    return conn.execute(
+        "SELECT * FROM artifacts WHERE task_id = ? ORDER BY created_at;",
+        (task_id,)).fetchall()
+
+
 def list_tasks(conn: sqlite3.Connection, status: str | None = None,
                limit: int = 50) -> list[sqlite3.Row]:
     if status:
