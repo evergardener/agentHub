@@ -63,19 +63,19 @@ def git_commit(repo: str, message: str, paths: list[str]) -> str:
     return _git(repo, "commit", "-m", message)
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 def status(repo: str) -> str:
     """查看仓库状态（分支 + 变更清单）。"""
     return git_status(repo)
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 def diff(repo: str, ref: str = "", staged: bool = False) -> str:
     """查看差异；staged=true 看暂存区，ref 指定对比对象。"""
     return git_diff(repo, ref, staged)
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 def log(repo: str, limit: int = 20) -> str:
     """查看最近提交（oneline）。"""
     return git_log(repo, limit)

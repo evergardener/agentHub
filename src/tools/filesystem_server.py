@@ -62,7 +62,7 @@ def fs_search(pattern: str, path: str = ".", max_results: int = 50) -> list[str]
     return hits
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 def read_file(path: str) -> str:
     """读取工作区内文本文件（相对 $AGENT_WORKSPACE）。"""
     return fs_read_file(path)
@@ -74,13 +74,13 @@ def write_file(path: str, content: str) -> str:
     return fs_write_file(path, content)
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 def list_dir(path: str = ".") -> list[str]:
     """列工作区内目录；目录名带 / 后缀。"""
     return fs_list_dir(path)
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 def search(pattern: str, path: str = ".", max_results: int = 50) -> list[str]:
     """在工作区内按子串搜索文件内容，返回 文件:行号: 内容。"""
     return fs_search(pattern, path, max_results)

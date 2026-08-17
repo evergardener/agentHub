@@ -99,13 +99,13 @@ def fetch_links(url: str) -> list[str]:
     return list(dict.fromkeys(ex.links))[:200]
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 def text(url: str) -> str:
     """抓取 URL 并返回纯文本（HTML 去标签）。"""
     return fetch_text(url)
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 def links(url: str) -> list[str]:
     """抓取 URL 并提取页面中的链接（绝对化、去重）。"""
     return fetch_links(url)
