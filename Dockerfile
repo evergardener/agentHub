@@ -32,7 +32,10 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY src ./src
 COPY config ./config
-RUN pip install --no-cache-dir . && mkdir -p /data/workspace
+# PyPI 不可达/不稳定时：--build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_INDEX_URL=""
+RUN pip install --no-cache-dir ${PIP_INDEX_URL:+--index-url "$PIP_INDEX_URL"} . \
+ && mkdir -p /data/workspace
 
 COPY infra/agentgateway/config.docker.yaml ./infra/agentgateway/config.docker.yaml
 COPY --from=agw /usr/local/bin/agentgateway /usr/local/bin/agentgateway

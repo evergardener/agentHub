@@ -232,6 +232,13 @@ class TaskManager:
                       "notes": notes}
             state_store.transition_task(self.conn, task_id, TaskStatus.REVIEWED,
                                         review=review)
+            # 复审历史落事件流（Web UI 可追溯 veto/驳回原因；
+            # tasks.review_json 只留最新一次）
+            state_store.record_event(self.conn, {
+                "event_id": f"review-{task_id}-{uuid.uuid4().hex[:8]}",
+                "event_type": "task.reviewed", "task_id": task_id,
+                "payload": review,
+            })
             if approved:
                 state_store.transition_task(self.conn, task_id,
                                             TaskStatus.ACCEPTED)

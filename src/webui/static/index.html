@@ -40,6 +40,8 @@
   button.ok { color:#fff; background:var(--ok); border-color:var(--ok); }
   button.no { color:#fff; background:var(--bad); border-color:var(--bad); }
   button:disabled { opacity:.5; cursor:default; }
+  .okv { color:var(--ok); font-weight:600; }
+  .veto { color:var(--bad); font-weight:600; }
   input { font:inherit; padding:4px 8px; border:1px solid var(--line);
           border-radius:6px; }
   .chips { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; }
@@ -157,8 +159,21 @@ async function showDetail(id) {
     `  📄 ${esc(a.name)}  ${esc(a.path)}`).join("\n");
   const evs = d.events.map(e =>
     `  #${e.seq} ${esc(e.event_type)}  ${esc(e.created_at)}`).join("\n");
+  // 复审记录：tasks.review_json 为最近一次复审；历史复审见事件流 task.reviewed
+  let reviewHtml = "";
+  if (d.task.review_json) {
+    try {
+      const rv = JSON.parse(d.task.review_json);
+      const rejected = rv.verdict !== "approved";
+      reviewHtml =
+        `<h2>最近复审</h2><div class="tl">` +
+        `<span class="${rejected ? "veto" : "okv"}">${rejected ? "✗ 驳回" : "✓ 验收"}</span>` +
+        `  by ${esc(rv.reviewer || "")}<br>${esc(rv.notes || "")}</div>`;
+    } catch (e) { /* review_json 非 JSON 时跳过 */ }
+  }
   $("#d-body").innerHTML =
     `<p>${esc(d.task.objective)}</p>
+     ${reviewHtml}
      <h2>事件时间线</h2><div class="tl">${esc(evs) || "（无）"}</div>
      <h2>Runs</h2><div class="tl">${esc(runs) || "（无）"}</div>
      <h2>Artifacts</h2><div class="tl">${esc(arts) || "（无）"}</div>`;
