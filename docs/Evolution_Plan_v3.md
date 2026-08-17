@@ -167,6 +167,33 @@ require_user:        # 写操作：进 blocked，等你批准
 任务进 `blocked` 后你在 Web UI 审批中心或 CLI 一键放行
 （§Phase 8 已实现 approve/reject 机制，正好接上）。
 
+### 6.2.1 对话内审批与常驻授权（2026-08-17 补充）
+
+审批不只发生在 Web UI——**hermes 在对话里直接问你**，三种应答：
+
+```text
+hermes: 任务 T-xxx 需要重启服务 nginx，是否批准？
+你:     批准            → 本次放行（blocked → working）
+你:     拒绝            → 取消（blocked → cancelled，级联）
+你:     以后重启类你自己批 → 常驻授权（standing grant）
+```
+
+**常驻授权（standing grant）**：
+
+- 授权对象按「操作类型」而非单个任务（如：重启服务、容器起停、
+  日志清理），粒度继承 `permissions.yaml` 的风险分级。
+- 存储：状态库新增 `approval_grants` 表
+  （pattern / granted_by / granted_at / note / revoked_at），
+  可审计、可撤销；不用静态配置文件，因为授权是运行时行为。
+- 判定顺序：`auto_approve` 规则 → `approval_grants`（未撤销）→
+  都不命中才升级问你。
+- 每次 grant 命中自动放行都写事件（`task.auto_approved`，
+  带 grant_id），Web UI 审批中心可见、可一键撤销
+  （`agentctl grant list / revoke`）。
+- 安全约束：grant 只能由你本人在对话/Web UI 中创建，Worker 和
+  hermes 自身无权写入；删除/外部发布类操作**永不进入 grant 白名单**
+  （在 permissions.yaml 里标 `never_grant`）。
+
 ### 6.3 超时问题：担心成立，必须先做 A2A 异步化
 
 **现状**：`server_common.py` 里 `message/send` 是**同步阻塞到任务完成**
@@ -190,7 +217,7 @@ hermes wait_task → 订阅事件 / 轮询 SQLite      # 不再挂 HTTP
 
 | 里程碑 | 内容 | 验收 |
 |---|---|---|
-| M1 | A2A 异步化 + hermes-brain 最小可用（CLI chat + 审批策略） | 长任务（>20min 模拟）不中断；你的 ghcr 部署例子端到端走通 |
+| M1 | A2A 异步化 + hermes-brain 最小可用（CLI chat + 审批策略 + 常驻授权） | 长任务（>20min 模拟）不中断；你的 ghcr 部署例子端到端走通；对话内批准/拒绝/常驻授权三态生效 |
 | M2 | env 统一 + 去 Keychain + Dockerfile + compose + 推 agentHub 仓库 + GH workflow 推 ghcr | 干净机器 `docker compose up` 起全系统；ghcr 有镜像 |
 | M3 | PostgreSQL 双后端 | 离线套件对 SQLite 与 PG 双绿 |
 | M4 | OTel + Web UI | Jaeger 见全链路 trace；Web UI 完成看板/审批/事件流 |
