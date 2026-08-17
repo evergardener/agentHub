@@ -83,6 +83,9 @@ docker compose ps          # 全部 Up / healthy
 入口：
 - Web UI（看板/审批/事件流/复审记录）：http://127.0.0.1:18070
 - Jaeger：http://127.0.0.1:16686
+- **外部总控 A2A 端点**（自建 hermes 接入）：http://127.0.0.1:8310，
+  契约见 [docs/orchestrator-a2a.md](orchestrator-a2a.md)，鉴权头
+  `X-Agent-Token`（`LAS_API_TOKEN`，回退 `LAS_ADAPTER_TOKEN`）
 - 与 hermes 对话（二选一）：
   - 容器模式：`docker compose run --rm agentctl chat`
   - **宿主机直连**：`./scripts/agentctl-host.sh chat`——hermes 就是本仓库的

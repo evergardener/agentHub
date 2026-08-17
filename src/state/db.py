@@ -107,9 +107,14 @@ class PgConnection:
 
 
 def _connect_sqlite(path: Path) -> sqlite3.Connection:
-    """打开数据库并启用 WAL（§17.8）；父目录不存在时自动创建。"""
+    """打开数据库并启用 WAL（§17.8）；父目录不存在时自动创建。
+
+    check_same_thread=False：ASGI 服务（webui / orchestrator-a2a）的连接
+    在请求处理线程使用，与建连线程不同；并发写安全由 busy_timeout +
+    单写者纪律（§22.3）保障。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")

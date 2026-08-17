@@ -83,6 +83,15 @@ def adapter_token() -> str:
     return _env("LAS_ADAPTER_TOKEN")
 
 
+def api_token() -> str:
+    """orchestrator A2A 端点的调用方鉴权 token（X-Agent-Token 头）。
+
+    面向外部总控（如用户自建的 hermes）。LAS_API_TOKEN 优先，
+    回退 LAS_ADAPTER_TOKEN（单租户可共用）；均空 = 关闭（仅开发）。
+    """
+    return _env("LAS_API_TOKEN") or adapter_token()
+
+
 def llm_base_url() -> str:
     return _env("LAS_LLM_BASE_URL", "KIMI_API_BASE",
                 default=DEFAULT_LLM_BASE).rstrip("/")
