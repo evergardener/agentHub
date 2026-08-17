@@ -116,7 +116,8 @@ class TaskManager:
         )
         self.conn.commit()
 
-        client = A2aClient.for_agent(agent_id, endpoint, timeout=3600)
+        # 异步 A2A：send 立即返回，60s 足够；结果经事件/轮询对齐（v3 M1）
+        client = A2aClient.for_agent(agent_id, endpoint, timeout=60)
 
         async def _call() -> None:
             try:

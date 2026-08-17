@@ -54,6 +54,9 @@ async def test_codex_real_task(tmp_path, monkeypatch):
             }},
         })
         task = r.json()["result"]
+        # 异步 A2A（v3 M1）：轮询至终态
+        from .poll import wait_terminal
+        task = await wait_terminal(c, task["id"])
 
     assert task["status"]["state"] == "completed", task.get("error")
     names = {a["name"] for a in task["artifacts"]}

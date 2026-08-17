@@ -108,7 +108,7 @@ async def test_hermes_delegates_via_gateway(stack, monkeypatch):
     card = await client.get_agent_card()
     assert card["name"] == "fake-worker"
 
-    task = await client.send_message(
+    task = await client.send_and_wait(
         "gateway acceptance task",
         idempotency_key="T-P5-GW:1",
     )

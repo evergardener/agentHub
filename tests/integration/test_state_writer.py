@@ -112,6 +112,8 @@ async def test_state_plane_end_to_end(tmp_path, monkeypatch):
                 }},
             })
             a2a_task = r.json()["result"]
+            from .poll import wait_terminal
+            a2a_task = await wait_terminal(c, a2a_task["id"])
         assert a2a_task["id"] == task_id
         assert a2a_task["status"]["state"] == "completed"
 

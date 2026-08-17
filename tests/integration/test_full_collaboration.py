@@ -51,7 +51,9 @@ async def _run_on(app_factory, objective: str, task_id: str) -> dict:
                              "idempotencyKey": f"{task_id}:1"},
             }},
         })
-        return r.json()["result"]
+        task = r.json()["result"]
+        from .poll import wait_terminal
+        return await wait_terminal(c, task["id"])
 
 
 async def test_analyze_and_fix_project(tmp_path, monkeypatch):

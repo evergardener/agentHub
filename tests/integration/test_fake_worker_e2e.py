@@ -58,8 +58,8 @@ async def test_phase1_acceptance(server):
     card = await client.get_agent_card()
     assert card["name"] == "fake-worker"
 
-    # 2. Hermes 委派任务（带幂等键与 trace_id）
-    task = await client.send_message(
+    # 2. Hermes 委派任务（带幂等键与 trace_id）；异步 A2A：轮询到终态
+    task = await client.send_and_wait(
         "Create hello.py and add a unit test.",
         idempotency_key="T-P1-ACCEPTANCE:1",
         trace_id="trace-phase1-acceptance",

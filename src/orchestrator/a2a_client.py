@@ -111,6 +111,35 @@ class A2aClient:
         }
         return await self._rpc(payload)
 
+    async def send_and_wait(
+        self,
+        text: str,
+        idempotency_key: str | None = None,
+        trace_id: str | None = None,
+        task_id: str | None = None,
+        timeout: float = 1800.0,
+        poll_interval: float = 0.5,
+    ) -> dict:
+        """send 后轮询 tasks/get 直到终态（v3 异步 A2A）。
+
+        单次 HTTP 调用都是秒级；任务本身可以跑任意时长。
+        """
+        import asyncio
+        import time
+
+        task = await self.send_message(
+            text, idempotency_key=idempotency_key,
+            trace_id=trace_id, task_id=task_id,
+        )
+        terminal = {"completed", "failed", "canceled", "rejected"}
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if task["status"]["state"] in terminal:
+                return task
+            await asyncio.sleep(poll_interval)
+            task = await self.get_task(task["id"])
+        raise TimeoutError(f"send_and_wait {task['id']} exceeded {timeout}s")
+
     async def _rpc(self, payload: dict) -> dict:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             r = await client.post(f"{self.base_url}/a2a", json=payload,

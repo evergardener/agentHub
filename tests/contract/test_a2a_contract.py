@@ -64,6 +64,25 @@ async def _send(client: httpx.AsyncClient, text: str, rpc_id: str = "1",
     return r.json()
 
 
+async def _wait_terminal(client: httpx.AsyncClient, task_id: str,
+                         timeout: float = 30.0) -> dict:
+    """异步 A2A（v3 M1）：轮询 tasks/get 直到终态。"""
+    import time
+
+    terminal = {"completed", "failed", "canceled", "rejected"}
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        r = await client.post("/a2a", json={
+            "jsonrpc": "2.0", "id": "poll", "method": "tasks/get",
+            "params": {"id": task_id},
+        })
+        task = r.json()["result"]
+        if task["status"]["state"] in terminal:
+            return task
+        await asyncio.sleep(0.2)
+    raise TimeoutError(f"task {task_id} not terminal within {timeout}s")
+
+
 # ---------- 契约条款 ----------
 
 
@@ -85,7 +104,9 @@ async def test_health(client):
 async def test_task_completes_with_artifacts(client, workspace):
     resp = await _send(client, "contract: basic task", rpc_id="c1")
     task = resp["result"]
+    # 异步 A2A：send 立即返回非终态，终态经轮询到达
     assert task["status"]["state"] in A2A_STATES
+    task = await _wait_terminal(client, task["id"])
     assert task["status"]["state"] == "completed"
     assert task["artifacts"], "completed task must produce artifacts"
     # Artifact 完整性：sha256 可验证（§22.4）
@@ -129,14 +150,24 @@ async def test_unknown_method_rejected(client):
 
 
 async def test_fifo_serial_execution(client):
-    """单并发 Adapter：两个并发任务总耗时应 >= 2 倍单任务时延（§9.1）。"""
+    """单并发 Adapter：两个任务全部完成的总耗时 >= 2 倍单任务时延（§9.1）。
+
+    异步 A2A 下 send 都立即返回，串行性体现在终态到达的总时长上。
+    """
     import time
 
     start = time.monotonic()
-    results = await asyncio.gather(
+    r1, r2 = await asyncio.gather(
         _send(client, "contract: fifo-1", rpc_id="c8"),
         _send(client, "contract: fifo-2", rpc_id="c9"),
     )
+    send_elapsed = time.monotonic() - start
+    assert send_elapsed < 1.0, f"send must return immediately, took {send_elapsed:.2f}s"
+    t1, t2 = await asyncio.gather(
+        _wait_terminal(client, r1["result"]["id"]),
+        _wait_terminal(client, r2["result"]["id"]),
+    )
     elapsed = time.monotonic() - start
-    assert all(r["result"]["status"]["state"] == "completed" for r in results)
+    assert t1["status"]["state"] == "completed"
+    assert t2["status"]["state"] == "completed"
     assert elapsed >= 1.8, f"expected serial execution (>=2s), got {elapsed:.2f}s"

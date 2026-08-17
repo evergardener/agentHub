@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -81,7 +82,9 @@ async def _run_fake_task(objective: str) -> dict:
                 "role": "user", "parts": [{"kind": "text", "text": objective}],
             }},
         })
-        return r.json()["result"]
+        task = r.json()["result"]
+        from .poll import wait_terminal
+        return await wait_terminal(c, task["id"])
 
 
 @requires_nats
@@ -113,8 +116,17 @@ async def test_nats_interruption_and_replay(tmp_path, monkeypatch):
     spool = ws / "logs" / "events-pending.jsonl"
     task2 = await _run_fake_task("phase2: offline task")
     assert task2["status"]["state"] == "completed"  # A2A 调用不受 NATS 影响
+    # 异步 A2A：终态可见时完成事件的 spool 写入可能仍在进行，稍等其落盘
+    spooled: list[dict] = []
+    for _ in range(50):
+        await asyncio.sleep(0.2)
+        if spool.exists():
+            spooled = [json.loads(line)
+                       for line in spool.read_text().splitlines() if line]
+            if {e["event_type"] for e in spooled} >= {"task.started",
+                                                      "task.completed"}:
+                break
     assert spool.exists()
-    spooled = [json.loads(line) for line in spool.read_text().splitlines() if line]
     assert {e["event_type"] for e in spooled} >= {"task.started", "task.completed"}
     assert all(e["task_id"] == task2["id"] for e in spooled)
 

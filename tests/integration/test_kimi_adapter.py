@@ -50,6 +50,8 @@ async def test_kimi_research_task(tmp_path, monkeypatch):
             }},
         })
         task = r.json()["result"]
+        from .poll import wait_terminal
+        task = await wait_terminal(c, task["id"])
 
     assert task["status"]["state"] == "completed", task.get("error")
     artifact = task["artifacts"][0]
@@ -91,7 +93,9 @@ async def test_kimi_then_codex_chain(tmp_path, monkeypatch):
                                  "idempotencyKey": f"{task_id}:1"},
                 }},
             })
-            return r.json()["result"]
+            task = r.json()["result"]
+            from .poll import wait_terminal
+            return await wait_terminal(c, task["id"])
 
     # T1: Kimi 调研
     t1 = tm.create_task("用一句话说明 Python 的 GIL 是什么")

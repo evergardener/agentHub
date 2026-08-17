@@ -156,8 +156,10 @@ def build_app(
                     trace_id=trace_id,
                 )
 
-        # FIFO 串行执行（§9.1）；message/send 阻塞至完成（PoC 简化）
-        await executor.run(execute())
+        # A2A 异步化（v3 M1）：send 立即返回，执行在后台。
+        # 结果经 NATS 事件 → StateWriter 落库；调用方用 tasks/get 轮询
+        # 或订阅事件。长任务不再占用 HTTP 连接（§Evolution v3 §6.3）。
+        asyncio.create_task(executor.run(execute()))
         return _rpc_result(rpc_id, store.get(task.id).to_a2a())
 
     def _tasks_get(body: dict, rpc_id) -> JSONResponse:
