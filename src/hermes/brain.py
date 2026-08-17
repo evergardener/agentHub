@@ -47,6 +47,16 @@ class Hermes:
             {"role": "system", "content": SYSTEM_PROMPT}]
 
     async def chat(self, user_text: str) -> str:
+        from common import tracing
+
+        tracing.init_tracing("hermes-brain")
+        tracer = tracing.get_tracer("hermes")
+        with tracer.start_as_current_span(
+                "hermes.chat",
+                attributes={"chat.len": len(user_text)}):
+            return await self._chat_loop(user_text)
+
+    async def _chat_loop(self, user_text: str) -> str:
         self.messages.append({"role": "user", "content": user_text})
         for _ in range(MAX_TOOL_ROUNDS):
             reply = await self.llm.chat(self.messages, tools=TOOL_SCHEMAS)

@@ -47,14 +47,22 @@ class TaskManager:
             parent = state_store.get_task(self.conn, parent_id)
             if parent:
                 root_id = parent["root_id"]
-        state_store.create_task(
-            self.conn, task_id=task_id, objective=objective,
-            created_by="hermes", project=project, parent_id=parent_id,
-            root_id=root_id, priority=priority, depends_on=depends_on,
-            timeout_seconds=timeout_seconds, max_retries=max_retries,
-            idempotency_key=make_idem_key(task_id, 1),
-            status=TaskStatus.CREATED,
-        )
+        from common import tracing
+
+        tracer = tracing.get_tracer("hermes")
+        with tracer.start_as_current_span(
+                "task.create",
+                context=tracing.task_context(f"trace-{root_id}"),
+                attributes={"task.id": task_id, "task.root": root_id,
+                            "task.project": project or ""}):
+            state_store.create_task(
+                self.conn, task_id=task_id, objective=objective,
+                created_by="hermes", project=project, parent_id=parent_id,
+                root_id=root_id, priority=priority, depends_on=depends_on,
+                timeout_seconds=timeout_seconds, max_retries=max_retries,
+                idempotency_key=make_idem_key(task_id, 1),
+                status=TaskStatus.CREATED,
+            )
         # Task Workspace（§3.8）
         tdir = self.workspace / "tasks" / task_id
         (tdir / "input").mkdir(parents=True, exist_ok=True)
@@ -110,6 +118,16 @@ class TaskManager:
             " WHERE id = ?;", (agent_id, now_iso(), task_id),
         )
         self.conn.commit()
+
+        from common import tracing
+
+        tracer = tracing.get_tracer("hermes")
+        with tracer.start_as_current_span(
+                "task.delegate",
+                context=tracing.task_context(f"trace-{row['root_id']}"),
+                attributes={"task.id": task_id, "agent.id": agent_id,
+                            "agent.endpoint": endpoint}):
+            pass  # span 仅记录委派时点；A2A 调用在后台进行
 
         # 异步 A2A：send 立即返回，60s 足够；结果经事件/轮询对齐（v3 M1）
         client = A2aClient.for_agent(agent_id, endpoint, timeout=60)
@@ -199,18 +217,29 @@ class TaskManager:
     def review_result(self, task_id: str, *, approved: bool,
                       notes: str = "", reviewer: str = "hermes") -> str:
         """completed → reviewed → accepted / working(返工)。返回新状态。"""
-        review = {"reviewer": reviewer,
-                  "verdict": "approved" if approved else "rejected",
-                  "notes": notes}
-        state_store.transition_task(self.conn, task_id, TaskStatus.REVIEWED,
-                                    review=review)
-        if approved:
-            state_store.transition_task(self.conn, task_id, TaskStatus.ACCEPTED)
-            self.promote_dependents(task_id)  # 解锁依赖本任务的后续任务
-            self._retain_outcome(task_id, notes)
-            return "accepted"
-        state_store.transition_task(self.conn, task_id, TaskStatus.WORKING)
-        return "working"  # 返工：调用方应重新 delegate（attempt+1）
+        row0 = state_store.get_task(self.conn, task_id)
+        root_id = row0["root_id"] if row0 else task_id
+        from common import tracing
+
+        tracer = tracing.get_tracer("hermes")
+        with tracer.start_as_current_span(
+                "task.review",
+                context=tracing.task_context(f"trace-{root_id}"),
+                attributes={"task.id": task_id, "review.approved": approved,
+                            "review.reviewer": reviewer}):
+            review = {"reviewer": reviewer,
+                      "verdict": "approved" if approved else "rejected",
+                      "notes": notes}
+            state_store.transition_task(self.conn, task_id, TaskStatus.REVIEWED,
+                                        review=review)
+            if approved:
+                state_store.transition_task(self.conn, task_id,
+                                            TaskStatus.ACCEPTED)
+                self.promote_dependents(task_id)  # 解锁依赖本任务的后续任务
+                self._retain_outcome(task_id, notes)
+                return "accepted"
+            state_store.transition_task(self.conn, task_id, TaskStatus.WORKING)
+            return "working"  # 返工：调用方应重新 delegate（attempt+1）
 
     # ---------- 审批（§5.4 input-required 闭环） ----------
 

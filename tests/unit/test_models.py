@@ -27,6 +27,11 @@ def test_retry_loop():
     assert is_legal_transition(TaskStatus.RETRY_PENDING, TaskStatus.QUEUED)
 
 
+def test_assigned_dispatch_failure():
+    # A2A 下发失败（adapter 不可达/gateway 无路由）时允许 assigned → failed
+    assert is_legal_transition(TaskStatus.ASSIGNED, TaskStatus.FAILED)
+
+
 def test_rejected_rework():
     assert is_legal_transition(TaskStatus.REVIEWED, TaskStatus.WORKING)
 

@@ -120,7 +120,9 @@ class StateWriter:
 
 async def main() -> None:
     from common import config as cfg
+    from common import tracing
 
+    tracing.init_tracing("state-writer")
     nats_url = cfg.nats_url()
     db_path = cfg.database_url()  # LAS_DATABASE_URL（pg/sqlite 双后端）
     writer = StateWriter(db_path)

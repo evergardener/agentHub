@@ -86,15 +86,23 @@ class HermesLLM:
     async def chat(self, messages: list[dict],
                    tools: list[dict] | None = None,
                    timeout: float = 300) -> LLMReply:
+        from common import tracing
+
         body: dict = {"model": self.model, "messages": messages}
         if tools:
             body["tools"] = tools
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=body,
-            )
+        tracer = tracing.get_tracer("hermes")
+        with tracer.start_as_current_span(
+                "llm.call",
+                attributes={"llm.model": self.model,
+                            "llm.base_url": self.base_url,
+                            "llm.messages": len(messages)}):
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json=body,
+                )
         if resp.status_code != 200:
             raise LLMFailed(f"llm {resp.status_code}: {resp.text[:300]}")
         message = _extract_message(resp)

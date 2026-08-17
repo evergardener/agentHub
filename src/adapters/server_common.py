@@ -69,6 +69,9 @@ def build_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        from common import tracing
+
+        tracing.init_tracing(f"adapter-{agent_id}")
         hb = asyncio.create_task(_heartbeat_loop(publisher, agent_id, card_fn))
         try:
             yield
@@ -143,7 +146,15 @@ def build_app(
                 trace_id=trace_id,
             )
             try:
-                artifacts = await runner_fn(task)
+                from common import tracing
+
+                tracer = tracing.get_tracer(f"adapter.{agent_id}")
+                with tracer.start_as_current_span(
+                        "adapter.execute",
+                        context=tracing.task_context(trace_id),
+                        attributes={"agent.id": agent_id,
+                                    "task.id": task.id}):
+                    artifacts = await runner_fn(task)
                 task.artifacts = artifacts
                 store.update_state(task.id, "completed")
                 for a in artifacts:

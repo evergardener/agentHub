@@ -31,9 +31,13 @@ Worker agent（codex / kimi / pi ...）**不打包进镜像**——宿主机自�
 
 ```bash
 cp .env.example .env     # 填 LAS_LLM_API_KEY / LAS_GATEWAY_API_KEY
-docker compose up -d     # nats + state-writer + janitor + agentgateway
+docker compose up -d     # nats + postgres + state-writer + janitor + agentgateway + webui + jaeger
 docker compose run --rm agentctl chat   # 与 hermes 对话
 ```
+
+- Web UI（看板 / 任务详情 / 事件流 / 审批中心）：http://127.0.0.1:18070
+- Jaeger（OTel trace 查询）：http://127.0.0.1:16686
+  （`LAS_OTEL_ENDPOINT` 置空即关闭 tracing，默认 NoOp 零开销）
 
 宿主机 worker 接入容器栈：
 

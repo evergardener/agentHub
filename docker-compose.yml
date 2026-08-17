@@ -20,6 +20,7 @@ x-agenthub-env: &agenthub-env
   LAS_NATS_URL: nats://nats:4222
   LAS_WORKSPACE: /data/workspace
   LAS_DATABASE_URL: postgresql://agenthub:${LAS_PG_PASSWORD:-agenthub-dev-only}@postgres:5432/agenthub
+  LAS_OTEL_ENDPOINT: http://jaeger:4318   # 置空即关闭 tracing
 
 services:
   nats:
@@ -83,6 +84,31 @@ services:
       - "127.0.0.1:8300:8300"
     depends_on:
       - nats
+    restart: unless-stopped
+
+  # Web UI（Evolution v3 §5.2）：看板 / 任务详情 / 事件流 / 审批中心
+  webui:
+    <<: *agenthub
+    command: ["python", "-m", "webui.server"]
+    environment:
+      <<: *agenthub-env
+      LAS_WEBUI_HOST: 0.0.0.0
+      LAS_WEBUI_PORT: "8080"
+    volumes:
+      - agent-data:/data
+    ports:
+      - "127.0.0.1:18070:8080"  # loopback only，无账号体系
+    depends_on:
+      state-writer:
+        condition: service_started
+    restart: unless-stopped
+
+  # OTel 收集 + 查询界面（Evolution v3 §5.1）；应用经 LAS_OTEL_ENDPOINT 上报
+  jaeger:
+    image: jaegertracing/jaeger:2.20.0
+    ports:
+      - "127.0.0.1:16686:16686"  # 查询 UI
+      - "4318:4318"              # OTLP HTTP（宿主机进程也可上报）
     restart: unless-stopped
 
   # 交互式 CLI：docker compose run --rm agentctl chat

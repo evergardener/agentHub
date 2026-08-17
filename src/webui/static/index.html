@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agentHub 控制台</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --fg:#1f2328; --mut:#6a737d;
+          --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e; --acc:#0969da; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,"PingFang SC","Segoe UI",sans-serif;
+         background:var(--bg); color:var(--fg); }
+  header { padding:12px 20px; background:var(--card); border-bottom:1px solid var(--line);
+           display:flex; gap:16px; align-items:baseline; position:sticky; top:0; z-index:5; }
+  header h1 { font-size:16px; margin:0; }
+  header .mut { color:var(--mut); font-size:12px; }
+  main { padding:16px 20px; display:grid; gap:16px;
+         grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px;
+          padding:12px 14px; min-width:0; }
+  .card h2 { font-size:13px; margin:0 0 10px; color:var(--mut);
+             text-transform:uppercase; letter-spacing:.04em; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line);
+          vertical-align:top; }
+  th { color:var(--mut); font-weight:500; white-space:nowrap; }
+  tr[data-task] { cursor:pointer; }
+  tr[data-task]:hover { background:#f0f4fa; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px;
+          border:1px solid var(--line); white-space:nowrap; }
+  .pill.online,.pill.completed,.pill.accepted { color:var(--ok); border-color:var(--ok); }
+  .pill.working,.pill.assigned,.pill.queued { color:var(--acc); border-color:var(--acc); }
+  .pill.blocked { color:var(--warn); border-color:var(--warn); }
+  .pill.failed,.pill.cancelled,.pill.offline { color:var(--bad); border-color:var(--bad); }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%;
+         margin-right:6px; background:var(--bad); }
+  .dot.on { background:var(--ok); }
+  button { font:inherit; padding:3px 12px; border-radius:6px; cursor:pointer;
+           border:1px solid var(--line); background:#fff; }
+  button.ok { color:#fff; background:var(--ok); border-color:var(--ok); }
+  button.no { color:#fff; background:var(--bad); border-color:var(--bad); }
+  button:disabled { opacity:.5; cursor:default; }
+  input { font:inherit; padding:4px 8px; border:1px solid var(--line);
+          border-radius:6px; }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; }
+  .chips button.on { background:var(--acc); color:#fff; border-color:var(--acc); }
+  #events { max-height:260px; overflow:auto; font:12px/1.6 ui-monospace,monospace;
+            white-space:pre-wrap; }
+  #detail { grid-column:1/-1; display:none; }
+  .tl { font:12px/1.7 ui-monospace,monospace; white-space:pre-wrap;
+        max-height:220px; overflow:auto; }
+  .mut { color:var(--mut); }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>agentHub 控制台</h1>
+  <span class="mut" id="clock"></span>
+  <span class="mut" id="stream-state">事件流：连接中…</span>
+</header>
+<main>
+  <section class="card" id="card-agents">
+    <h2>Agents</h2>
+    <table id="agents"><tbody></tbody></table>
+  </section>
+
+  <section class="card">
+    <h2>任务</h2>
+    <div class="chips" id="status-chips"></div>
+    <table id="tasks"><tbody></tbody></table>
+  </section>
+
+  <section class="card">
+    <h2>审批中心（blocked）</h2>
+    <table id="blocked"><tbody></tbody></table>
+    <h2 style="margin-top:14px">常驻授权</h2>
+    <div class="row" style="margin-bottom:8px">
+      <input id="grant-pattern" placeholder="操作关键词，如：重启">
+      <button onclick="addGrant()">授权</button>
+    </div>
+    <table id="grants"><tbody></tbody></table>
+  </section>
+
+  <section class="card">
+    <h2>事件流</h2>
+    <div id="events"></div>
+  </section>
+
+  <section class="card" id="detail">
+    <h2>任务详情 <span class="mut" id="d-id"></span></h2>
+    <div id="d-body"></div>
+  </section>
+</main>
+
+<script>
+let lastSeq = 0, statusFilter = null;
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pill = (s) => `<span class="pill ${esc(s)}">${esc(s)}</span>`;
+
+async function j(url, opt) {
+  const r = await fetch(url, opt);
+  return r.json();
+}
+
+async function refresh() {
+  const ov = await j("/api/overview");
+  $("#agents tbody").innerHTML = ov.agents.map(a => {
+    const on = a.lease_expires_at && a.lease_expires_at > new Date().toISOString();
+    return `<tr><td><span class="dot ${on ? "on" : ""}"></span>${esc(a.id)}</td>
+      <td class="mut">${esc(a.endpoint || "-")}</td>
+      <td class="mut">${esc(a.lease_expires_at || "")}</td></tr>`;
+  }).join("") || `<tr><td class="mut">（无注册 agent）</td></tr>`;
+
+  $("#grants tbody").innerHTML = ov.grants.map(g =>
+    `<tr><td>#${g.id} ${esc(g.pattern)}</td><td class="mut">${esc(g.note || "")}</td>
+     <td><button onclick="revokeGrant(${g.id})">撤销</button></td></tr>`
+  ).join("") || `<tr><td class="mut">（无常驻授权）</td></tr>`;
+
+  const counts = ov.task_counts || {};
+  const states = ["queued","assigned","working","blocked","completed",
+                  "accepted","failed","cancelled"];
+  $("#status-chips").innerHTML =
+    `<button class="${!statusFilter ? "on" : ""}" onclick="setFilter(null)">全部</button>` +
+    states.filter(s => counts[s]).map(s =>
+      `<button class="${statusFilter === s ? "on" : ""}"
+        onclick="setFilter('${s}')">${s} ${counts[s]}</button>`).join("");
+
+  const t = await j("/api/tasks" + (statusFilter ? "?status=" + statusFilter : ""));
+  $("#tasks tbody").innerHTML = t.tasks.map(x =>
+    `<tr data-task="${esc(x.id)}"><td>${esc(x.id)}</td><td>${pill(x.status)}</td>
+     <td>${esc((x.objective || "").slice(0, 42))}</td>
+     <td class="mut">${esc(x.assigned_to || "-")}</td></tr>`
+  ).join("") || `<tr><td class="mut">（无任务）</td></tr>`;
+  document.querySelectorAll("[data-task]").forEach(tr =>
+    tr.onclick = () => showDetail(tr.dataset.task));
+
+  const b = await j("/api/tasks?status=blocked");
+  $("#blocked tbody").innerHTML = b.tasks.map(x =>
+    `<tr><td>${esc(x.id)}</td><td>${esc((x.objective || "").slice(0, 30))}</td>
+     <td><button class="ok" onclick="decide('${x.id}','approve')">批准</button>
+     <button class="no" onclick="decide('${x.id}','reject')">拒绝</button></td></tr>`
+  ).join("") || `<tr><td class="mut">（无待审批任务）</td></tr>`;
+}
+
+function setFilter(s) { statusFilter = s; refresh(); }
+
+async function showDetail(id) {
+  const d = await j("/api/tasks/" + id);
+  $("#detail").style.display = "block";
+  $("#d-id").textContent = d.task.id + " · " + d.task.status;
+  const runs = d.runs.map(r =>
+    `  run ${esc(r.status)} agent=${esc(r.agent_id)} @${esc(r.started_at || "")}`).join("\n");
+  const arts = d.artifacts.map(a =>
+    `  📄 ${esc(a.name)}  ${esc(a.path)}`).join("\n");
+  const evs = d.events.map(e =>
+    `  #${e.seq} ${esc(e.event_type)}  ${esc(e.created_at)}`).join("\n");
+  $("#d-body").innerHTML =
+    `<p>${esc(d.task.objective)}</p>
+     <h2>事件时间线</h2><div class="tl">${esc(evs) || "（无）"}</div>
+     <h2>Runs</h2><div class="tl">${esc(runs) || "（无）"}</div>
+     <h2>Artifacts</h2><div class="tl">${esc(arts) || "（无）"}</div>`;
+}
+
+async function decide(id, how) {
+  const notes = how === "approve" ? "webui 批准" : "webui 拒绝";
+  const r = await j(`/api/tasks/${id}/${how}`, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({notes})});
+  if (r.error) alert(r.error);
+  refresh();
+}
+
+async function addGrant() {
+  const pattern = $("#grant-pattern").value.trim();
+  if (!pattern) return;
+  const r = await j("/api/grants", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({pattern, note: "webui"})});
+  if (r.error) alert(r.error);
+  $("#grant-pattern").value = "";
+  refresh();
+}
+
+async function revokeGrant(id) {
+  await j(`/api/grants/${id}/revoke`, {method: "POST"});
+  refresh();
+}
+
+function startStream() {
+  const es = new EventSource("/api/events/stream?after=" + lastSeq);
+  es.onopen = () => $("#stream-state").textContent = "事件流：已连接";
+  es.onerror = () => $("#stream-state").textContent = "事件流：重连中…";
+  es.onmessage = (m) => {
+    const e = JSON.parse(m.data);
+    lastSeq = Math.max(lastSeq, e.seq);
+    const el = $("#events");
+    el.innerHTML += `#${e.seq} ${esc(e.event_type)} task=${esc(e.task_id || "-")} ${esc(e.created_at)}\n`;
+    el.scrollTop = el.scrollHeight;
+  };
+}
+
+refresh();
+startStream();
+setInterval(refresh, 5000);
+setInterval(() => $("#clock").textContent = new Date().toLocaleString(), 1000);
+</script>
+</body>
+</html>
