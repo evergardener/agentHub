@@ -5,6 +5,9 @@
   agentctl agent list             Agent 列表
   agentctl task list [--status]   任务列表
   agentctl task show <id>         任务详情（含 runs / artifacts）
+  agentctl task retry <id>        失败任务重试（failed → queued）
+  agentctl task cancel <id>       取消任务（级联取消后代）
+  agentctl events [--follow]      事件流（SQLite 单一事实源，--follow 轮询追加）
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 DEFAULT_DB = Path.home() / "AgentWorkspace" / "runtime" / "agent-state.db"
@@ -104,6 +108,71 @@ def cmd_task_show(db_path: Path, task_id: str) -> int:
     return 0
 
 
+def cmd_task_retry(db_path: Path, task_id: str) -> int:
+    from orchestrator.task_manager import TaskManager
+    from orchestrator import state_store
+
+    tm = TaskManager(db_path=db_path)
+    try:
+        tm.retry_task(task_id)
+    except (KeyError, state_store.IllegalTransition, RuntimeError) as e:
+        print(f"retry failed: {e}")
+        return 1
+    print(f"{task_id}: failed → queued")
+    return 0
+
+
+def cmd_task_cancel(db_path: Path, task_id: str) -> int:
+    from orchestrator.task_manager import TaskManager
+    from orchestrator import state_store
+
+    tm = TaskManager(db_path=db_path)
+    try:
+        n = tm.cancel_task(task_id)
+    except (KeyError, state_store.IllegalTransition) as e:
+        print(f"cancel failed: {e}")
+        return 1
+    if n == 0:
+        print(f"{task_id}: nothing to cancel (already terminal)")
+        return 1
+    print(f"{task_id}: cancelled ({n} task(s) including descendants)")
+    return 0
+
+
+def _print_event(row) -> None:
+    payload = row["payload_json"] or ""
+    if len(payload) > 200:
+        payload = payload[:200] + "…"
+    print(f"{row['created_at']}  {row['event_type']:<24}"
+          f" task={row['task_id'] or '-':<22} agent={row['agent_id'] or '-':<10}"
+          f" {payload}")
+
+
+def cmd_events(db_path: Path, follow: bool, interval: float,
+               event_type: str | None) -> int:
+    conn = _conn(db_path)
+
+    def fetch(after: int):
+        if event_type:
+            return conn.execute(
+                "SELECT rowid, * FROM events"
+                " WHERE event_type = ? AND rowid > ? ORDER BY rowid;",
+                (event_type, after)).fetchall()
+        return conn.execute(
+            "SELECT rowid, * FROM events WHERE rowid > ? ORDER BY rowid;",
+            (after,)).fetchall()
+
+    last = 0
+    while True:
+        rows = fetch(last)
+        for r in rows:
+            _print_event(r)
+            last = r["rowid"]
+        if not follow:
+            return 0
+        time.sleep(interval)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="agentctl")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -119,6 +188,15 @@ def main() -> int:
     p_tl.add_argument("--status", default=None)
     p_ts = task_sub.add_parser("show")
     p_ts.add_argument("task_id")
+    p_tr = task_sub.add_parser("retry")
+    p_tr.add_argument("task_id")
+    p_tc = task_sub.add_parser("cancel")
+    p_tc.add_argument("task_id")
+
+    p_ev = sub.add_parser("events")
+    p_ev.add_argument("--follow", action="store_true")
+    p_ev.add_argument("--interval", type=float, default=1.0)
+    p_ev.add_argument("--type", dest="event_type", default=None)
 
     args = parser.parse_args()
     if args.command == "status":
@@ -129,6 +207,12 @@ def main() -> int:
         return cmd_task_list(args.db, args.status)
     if args.command == "task" and args.sub == "show":
         return cmd_task_show(args.db, args.task_id)
+    if args.command == "task" and args.sub == "retry":
+        return cmd_task_retry(args.db, args.task_id)
+    if args.command == "task" and args.sub == "cancel":
+        return cmd_task_cancel(args.db, args.task_id)
+    if args.command == "events":
+        return cmd_events(args.db, args.follow, args.interval, args.event_type)
     return 2
 
 
