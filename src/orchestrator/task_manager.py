@@ -69,8 +69,32 @@ class TaskManager:
         )
         (tdir / "context.md").write_text(context or f"# Task {task_id}\n\n{objective}\n",
                                          encoding="utf-8")
-        state_store.transition_task(self.conn, task_id, TaskStatus.QUEUED)
+        # depends_on 门控（§5.3）：前置任务全部 accepted 才可 queued
+        if depends_on and not self._deps_satisfied(depends_on):
+            pass  # 保持 created，等待 promote_dependents
+        else:
+            state_store.transition_task(self.conn, task_id, TaskStatus.QUEUED)
         return task_id
+
+    def _deps_satisfied(self, depends_on: list[str]) -> bool:
+        for dep in depends_on:
+            row = state_store.get_task(self.conn, dep)
+            if row is None or row["status"] != "accepted":
+                return False
+        return True
+
+    def promote_dependents(self, accepted_task_id: str) -> list[str]:
+        """某任务 accepted 后，把依赖已满足的 created 子任务推进 queued。"""
+        promoted = []
+        rows = self.conn.execute(
+            "SELECT id, depends_on_json FROM tasks WHERE status = 'created';"
+        ).fetchall()
+        for r in rows:
+            deps = json.loads(r["depends_on_json"] or "[]")
+            if deps and self._deps_satisfied(deps):
+                state_store.transition_task(self.conn, r["id"], TaskStatus.QUEUED)
+                promoted.append(r["id"])
+        return promoted
 
     # ---------- 委派 ----------
 
@@ -181,6 +205,7 @@ class TaskManager:
                                     review=review)
         if approved:
             state_store.transition_task(self.conn, task_id, TaskStatus.ACCEPTED)
+            self.promote_dependents(task_id)  # 解锁依赖本任务的后续任务
             return "accepted"
         state_store.transition_task(self.conn, task_id, TaskStatus.WORKING)
         return "working"  # 返工：调用方应重新 delegate（attempt+1）
