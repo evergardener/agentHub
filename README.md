@@ -42,10 +42,18 @@ docker compose run --rm agentctl chat   # 与 hermes 对话
 宿主机 worker 接入容器栈：
 
 ```bash
-export LAS_NATS_URL=nats://127.0.0.1:4222
-export LAS_AGENT_ENDPOINT=http://host.docker.internal:<port>
-PYTHONPATH=src python -m adapters.<name>.server   # 或对应启动方式
+# 手动启动（开发调试）
+./scripts/agent-worker.sh codex
+
+# 开机/登录自启（launchd，崩溃自动重启）
+./scripts/install-agent-autostart.sh codex           # 安装并启动
+./scripts/install-agent-autostart.sh codex uninstall # 移除
 ```
+
+- 监听地址：`LAS_ADAPTER_BIND`（默认 `127.0.0.1,192.168.7.10`，单地址不可用自动降级）
+- 调用方鉴权：`LAS_ADAPTER_TOKEN` 非空时，除 `/health` 外一律要求 `X-Agent-Token` 头；
+  hermes 直连/经 gateway 都会自动携带（gateway 透传）。生产/常驻部署必须配置。
+- 日志：`~/Library/Logs/agenthub-<agent>.log`
 
 PostgreSQL 状态库（M3，compose 默认启用）：控制面默认使用
 `LAS_DATABASE_URL=postgresql://agenthub:***@postgres:5432/agenthub`；
