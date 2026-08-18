@@ -207,7 +207,10 @@ def create_app(tm: TaskManager | None = None,
             "version": "0.2.0",
             "url": base,
             "supportedInterfaces": [
-                {"url": base, "protocolBinding": "JSONRPC",
+                # A2A clients select this URL and POST JSON-RPC to it verbatim.
+                # Keep the card's top-level URL as the agent base, but advertise
+                # the actual JSON-RPC route here.
+                {"url": f"{base}/a2a", "protocolBinding": "JSONRPC",
                  "protocolVersion": "1.0"},
             ],
             "capabilities": {"streaming": False},

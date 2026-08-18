@@ -142,8 +142,9 @@ def test_same_value_double_header_accepted(env):
     assert r.status_code == 200
 
 
-def test_agent_card_supported_interfaces(env):
-    _, client, _ = env
+def test_agent_card_advertises_callable_v1_rpc_interface(env):
+    """Hermes selects supportedInterfaces.url and POSTs that URL verbatim."""
+    _, client, delegated = env
     r = client.get("/.well-known/agent-card.json",
                    headers=_bearer(KIMI_TOKEN))
     card = r.json()
@@ -151,7 +152,13 @@ def test_agent_card_supported_interfaces(env):
     iface = card["supportedInterfaces"][0]
     assert iface["protocolBinding"] == "JSONRPC"
     assert iface["protocolVersion"] == "1.0"
-    assert iface["url"] == card["url"]
+    assert iface["url"] == f"{card['url']}/a2a"
+
+    # Model Hermes native _rpc_url(card): select interface URL, then POST it.
+    rpc = client.post(iface["url"], json=_send_v1("查询当前任务列表"),
+                      headers=_bearer(KIMI_TOKEN))
+    assert rpc.status_code == 200
+    assert delegated and delegated[0][1] == "kimi"
 
 
 # ---------- peer 固定路由 ----------
