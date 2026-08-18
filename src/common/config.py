@@ -17,6 +17,7 @@
   LAS_HINDSIGHT_API_KEY → HINDSIGHT_API_KEY    Hindsight 密钥
   LAS_HEARTBEAT_INTERVAL → AGENT_HEARTBEAT_INTERVAL  心跳间隔秒
   LAS_LEASE_TTL         → AGENT_LEASE_TTL      agent 租约秒
+  LAS_A2A_PEERS         （无别名）              orchestrator A2A peer 映射（JSON）
 """
 
 from __future__ import annotations
@@ -90,6 +91,48 @@ def api_token() -> str:
     回退 LAS_ADAPTER_TOKEN（单租户可共用）；均空 = 关闭（仅开发）。
     """
     return _env("LAS_API_TOKEN") or adapter_token()
+
+
+# peer→worker 固定映射允许的 worker 白名单（Hermes 接入约定，
+# 新增 worker 需在此显式放行，防止外部总控 fan-out 到未约定的执行体）。
+ALLOWED_PEER_WORKERS = frozenset({"codex", "kimi"})
+
+
+def a2a_peers() -> dict[str, dict[str, str]]:
+    """orchestrator A2A v1.0 Bearer peer 映射：token → {peer, worker}。
+
+    LAS_A2A_PEERS 为单行 JSON：
+      {"<token>": {"peer": "qishuo-codex", "worker": "codex"}, ...}
+
+    每个 token 代表一个外部总控（hermes）注册的逻辑 peer，服务端依据
+    认证 identity 固定路由到指定 worker——不信任请求体自称的
+    metadata.agent。worker 仅允许 ALLOWED_PEER_WORKERS 内的值。
+    空 = 未配置任何 peer（此时仅 legacy X-Agent-Token 可用）。
+    配置畸形直接抛 ValueError：安全相关配置必须启动即失败，不静默降级。
+    """
+    import json
+
+    raw = _env("LAS_A2A_PEERS").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"LAS_A2A_PEERS 不是合法 JSON: {e}") from e
+    if not isinstance(data, dict):
+        raise ValueError("LAS_A2A_PEERS 必须是 {token: {peer, worker}} 字典")
+    peers: dict[str, dict[str, str]] = {}
+    for token, meta in data.items():
+        if not token or not isinstance(meta, dict):
+            raise ValueError("LAS_A2A_PEERS 每项必须是 token: {peer, worker}")
+        peer, worker = str(meta.get("peer", "")).strip(), str(
+            meta.get("worker", "")).strip()
+        if not peer or worker not in ALLOWED_PEER_WORKERS:
+            raise ValueError(
+                f"LAS_A2A_PEERS 项 {peer or token[:6] + '…'} 非法："
+                f"peer 必填，worker 仅允许 {sorted(ALLOWED_PEER_WORKERS)}")
+        peers[token] = {"peer": peer, "worker": worker}
+    return peers
 
 
 def llm_base_url() -> str:

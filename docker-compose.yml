@@ -96,6 +96,7 @@ services:
       LAS_GATEWAY_API_KEY: ${LAS_GATEWAY_API_KEY:-}
       LAS_API_TOKEN: ${LAS_API_TOKEN:-}
       LAS_ADAPTER_TOKEN: ${LAS_ADAPTER_TOKEN:-}
+      LAS_A2A_PEERS: ${LAS_A2A_PEERS:-}   # hermes peer token→worker 映射（JSON）
       LAS_ORCH_BIND: 0.0.0.0   # 容器内监听；宿主映射收 loopback
     ports:
       - "127.0.0.1:8310:8310"

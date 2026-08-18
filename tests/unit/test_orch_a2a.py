@@ -22,6 +22,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_WORKSPACE", str(tmp_path / "ws"))
     monkeypatch.delenv("LAS_API_TOKEN", raising=False)
     monkeypatch.delenv("LAS_ADAPTER_TOKEN", raising=False)
+    monkeypatch.delenv("LAS_A2A_PEERS", raising=False)
     tm = TaskManager(db_path=tmp_path / "state.db",
                      workspace=tmp_path / "ws")
     # 注册在线 worker

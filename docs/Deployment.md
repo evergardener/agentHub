@@ -84,8 +84,10 @@ docker compose ps          # 全部 Up / healthy
 - Web UI（看板/审批/事件流/复审记录）：http://127.0.0.1:18070
 - Jaeger：http://127.0.0.1:16686
 - **外部总控 A2A 端点**（自建 hermes 接入）：http://127.0.0.1:8310，
-  契约见 [docs/orchestrator-a2a.md](orchestrator-a2a.md)，鉴权头
-  `X-Agent-Token`（`LAS_API_TOKEN`，回退 `LAS_ADAPTER_TOKEN`）
+  契约见 [docs/orchestrator-a2a.md](orchestrator-a2a.md)。支持 A2A v1.0
+  `SendMessage`（Bearer peer token，`LAS_A2A_PEERS` 配置 peer→worker
+  固定映射）与 legacy `message/send`（`X-Agent-Token`，`LAS_API_TOKEN`
+  回退 `LAS_ADAPTER_TOKEN`）；审批走 `tasks/approve` / `tasks/reject`
 - 与 hermes 对话（二选一）：
   - 容器模式：`docker compose run --rm agentctl chat`
   - **宿主机直连**：`./scripts/agentctl-host.sh chat`——hermes 就是本仓库的
