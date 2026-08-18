@@ -117,7 +117,7 @@ async def test_run_invokes_headless_cli(cli_env):
     assert "kimi.jsonl" in names and "kimi-stderr.log" in names
     assert "last-message.md" in names
     cmd = calls[0]["cmd"]
-    assert cmd[:4] == ["/fake/kimi", "-p", "--output-format", "stream-json"]
+    assert cmd[:3] == ["/fake/kimi", "--output-format=stream-json", "-p"]
     assert "分析仓库结构" in cmd[-1]
     assert calls[0]["kwargs"]["stdin"] is asyncio.subprocess.DEVNULL
 

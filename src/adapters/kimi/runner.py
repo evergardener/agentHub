@@ -111,7 +111,9 @@ async def run(task: A2aTask,
     prompt = (f"{task.objective}\n\n"
               "工作完成后，把结果摘要写入最后一轮回复。")
 
-    cmd = [kimi, "-p", "--output-format", "stream-json", prompt]
+    # 注意两个 0.37.1 实测怪癖：--output-format 必须 = 形式；且必须放在
+    # -p 之前（-p 会把紧随其后的任何 token 吞为 prompt 值）
+    cmd = [kimi, "--output-format=stream-json", "-p", prompt]
     model = os.environ.get("LAS_KIMI_CLI_MODEL", "").strip()
     if model:
         cmd[1:1] = ["-m", model]

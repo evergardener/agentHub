@@ -171,3 +171,13 @@ accepted → `completed`；failed → `failed`；cancelled → `canceled`。
 
 （codex peer 任务已确认送达 adapter 并拉起 `codex exec`；当日 codex CLI
 本身执行缓慢属 worker 侧环境，与兼容层无关。）
+
+2026-08-18 深夜（kimi worker 切换真实 Kimi Code CLI 后）：
+
+| 任务 | 路径 | 结果 |
+|---|---|---|
+| T-20260818-0011 | SendMessage（qishuo-kimi peer）→ kimi adapter → `kimi -p`（Kimi Code CLI 0.37.1，OAuth 登录）→ Kimi 模型 | completed + last-message.md，约 5 分钟 |
+
+注：kimi CLI 0.37.1 有两个参数解析怪癖已在 runner 中规避——
+`--output-format` 必须用 `=` 形式，且必须放在 `-p` 之前
+（`-p` 会把紧随其后的任何 token 吞为 prompt 值）。
