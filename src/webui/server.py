@@ -16,7 +16,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import (FileResponse, JSONResponse,
                                StreamingResponse)
 
@@ -114,10 +114,13 @@ def create_app() -> FastAPI:
             conn.close()
 
     @app.get("/api/events/stream")
-    async def events_stream(after: int = 0):
+    async def events_stream(request: Request, after: int = 0):
         async def gen():
             last = after
             while True:
+                # 客户端断开即退出，避免孤儿生成器每 3s 空转查库
+                if await request.is_disconnected():
+                    break
                 conn = _conn()
                 try:
                     rows = _rows(conn.execute(
@@ -129,7 +132,10 @@ def create_app() -> FastAPI:
                 for r in rows:
                     last = r["seq"]
                     yield f"data: {json.dumps(r, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(2)
+                # 无新事件时发注释保活帧，代理/浏览器不断连
+                if not rows:
+                    yield ": keepalive\n\n"
+                await asyncio.sleep(3)
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
