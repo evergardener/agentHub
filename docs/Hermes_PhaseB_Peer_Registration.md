@@ -78,7 +78,8 @@ a2a_agents:
 ## 4. 已知特性与边界
 
 - codex worker 是真实 `codex exec` CLI，单并发 FIFO，单任务可能 5–15 分钟；
-  kimi worker 走 OpenAI 兼容端点，通常 1–3 分钟。timeout 60s 只覆盖
+  kimi worker 自 2026-08-18 起同为真实 CLI（Kimi Code CLI `kimi -p`，
+  并发 2），时长与 codex 同级、分钟计。timeout 60s 只覆盖
   send 的秒回，任务结果靠轮询。
 - peer token 与 worker 绑定是服务端强制的：用 `agenthub-codex` 的 token
   不可能投递到 kimi，反之亦然。

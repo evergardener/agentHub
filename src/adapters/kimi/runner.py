@@ -1,92 +1,166 @@
-"""Kimi 运行时 — 设计文档 §Phase 6：研究 / 长上下文 Worker。
+"""Kimi 运行时 — 真实本地 Kimi Code CLI（`kimi -p` 无头模式）。
 
-通过 OpenAI 兼容端点调用模型，配置统一走 common.config（env-only）：
-  LAS_LLM_BASE_URL  默认 http://127.0.0.1:8317/v1（本地 cliproxy → siliconflow）
-  LAS_LLM_MODEL     默认 deepseek-ai/DeepSeek-V4-Flash
-  LAS_LLM_API_KEY   端点密钥（刻意不读 KIMI_API_KEY：与 Kimi Work 桌面端
-                    注入的同名变量冲突，会 401）
+执行方式（对齐 codex runner 的形态）：
+  kimi -p --output-format stream-json <prompt>     # cwd = 任务工作区
 
-权限边界（§13 Kimi）：shell/ssh denied —— 本 runner 只发 HTTP，不执行命令。
+设计约束：
+  - CLI 为官方单二进制（默认 ~/.kimi-code/bin/kimi，install.sh 安装）。
+    找不到时显式抛 KimiNotAvailable——**不回退到 HTTP 模型调用**，
+    本 worker 必须是真的本地 kimi（2026-08-18 起，替代原 cliproxy
+    HTTP runner；原 HTTP 路径是 codex 额度用尽时的临时替身）。
+  - 认证：`kimi login`（OAuth device-code）或 Moonshot API key，
+    一次性交互配置，token 持久化于 ~/.kimi-code，launchd 常驻可用。
+  - 权限边界变化（§13 修订）：-p 无头模式不请求人工批准，常规工具
+    调用按 auto 权限策略执行（静态 deny 规则仍生效）——kimi worker
+    从「仅发 HTTP 的研究助手」变为「与 codex 同级的工作区内 agent」。
+    写操作的事前门禁不变：orchestrator 审批策略（policy.ask）+
+    tasks/approve 是唯一放行通道。
+  - 可选 LAS_KIMI_CLI_MODEL 指定模型别名（`kimi -m`），缺省用 CLI
+    配置的 default_model。
+  - 超时看门狗：task 级 timeout（§17.3），默认 1800s。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
+from pathlib import Path
 
-import httpx
+from adapters.common import A2aTask, save_artifact, workspace_root
 
-from adapters.common import A2aTask, save_artifact
-from common import config as cfg
+DEFAULT_TIMEOUT_SECONDS = 1800
+_BUNDLED_CLI = Path.home() / ".kimi-code" / "bin" / "kimi"
 
-DEFAULT_BASE = cfg.DEFAULT_LLM_BASE
-DEFAULT_MODEL = cfg.DEFAULT_LLM_MODEL
+
+class KimiNotAvailable(RuntimeError):
+    pass
+
+
+class KimiTimeout(RuntimeError):
+    pass
 
 
 class KimiFailed(RuntimeError):
     pass
 
 
-def _api_key() -> str:
-    return cfg.llm_api_key()
+def _find_kimi() -> str:
+    """定位 kimi CLI：PATH 优先，其次官方安装的固定路径。"""
+    found = shutil.which("kimi")
+    if found:
+        return found
+    if _BUNDLED_CLI.exists():
+        return str(_BUNDLED_CLI)
+    raise KimiNotAvailable(
+        "kimi CLI 未安装（curl -fsSL https://code.kimi.com/kimi-code/"
+        "install.sh | bash），kimi worker 拒绝回退到 HTTP 模型调用")
 
 
-def _extract_content(resp: httpx.Response) -> str:
-    """从响应中提取文本；兼容 9router 的 SSE 怪癖。
+def _extract_assistant_text(jsonl: str) -> str:
+    """从 stream-json 输出中提取 assistant 文本（容忍字段形状差异）。"""
+    parts: list[str] = []
 
-    9router 即使未请求 stream 也可能返回 text/event-stream，且 chunk 之间
-    偶尔缺少 \n\n 分隔（`...}data: {...}`），因此先规范化再逐段解析。
-    """
-    if resp.headers.get("content-type", "").startswith("text/event-stream"):
-        parts: list[str] = []
-        normalized = resp.text.replace("data: ", "\ndata: ")
-        for line in normalized.splitlines():
-            if not line.startswith("data: "):
-                continue
-            data = line[6:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data)
-            except json.JSONDecodeError:
-                continue  # 与前后 chunk 粘连的残段，跳过
-            choice = (chunk.get("choices") or [{}])[0]
-            parts.append(
-                choice.get("delta", {}).get("content")
-                or choice.get("message", {}).get("content")
-                or ""
-            )
-        return "".join(parts)
-    return resp.json()["choices"][0]["message"]["content"]
+    def _text_from_content(content) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                b.get("text", "") for b in content
+                if isinstance(b, dict) and b.get("type") in (None, "text"))
+        return ""
+
+    for line in jsonl.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        role = obj.get("role") or obj.get("type")
+        if role != "assistant":
+            continue
+        text = _text_from_content(obj.get("content"))
+        if not text:
+            msg = obj.get("message")
+            if isinstance(msg, dict):
+                text = _text_from_content(msg.get("content"))
+        if text.strip():
+            parts.append(text)
+    return "\n".join(parts)
 
 
-async def run(task: A2aTask) -> list[dict]:
-    base = cfg.llm_base_url()
-    model = cfg.llm_model()
-    prompt = (
-        "你是一名研究助手。请针对以下任务给出结构化分析"
-        "（要点、风险、建议），用中文回答：\n\n" + task.objective
+def _task_workspace(task_id: str) -> Path:
+    ws = workspace_root() / "tasks" / task_id
+    (ws / "input").mkdir(parents=True, exist_ok=True)
+    (ws / "logs").mkdir(parents=True, exist_ok=True)
+    return ws
+
+
+async def run(task: A2aTask,
+              timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> list[dict]:
+    kimi = _find_kimi()
+
+    ws = _task_workspace(task.id)
+    (ws / "context.md").write_text(
+        f"# Task {task.id}\n\n## Objective\n\n{task.objective}\n",
+        encoding="utf-8",
     )
-    async with httpx.AsyncClient(timeout=300) as client:
-        resp = await client.post(
-            f"{base}/chat/completions",
-            headers={"Authorization": f"Bearer {_api_key()}"},
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-        )
-    if resp.status_code != 200:
-        raise KimiFailed(f"llm call failed {resp.status_code}: {resp.text[:300]}")
-    content = _extract_content(resp)
-    if not content.strip():
+    prompt = (f"{task.objective}\n\n"
+              "工作完成后，把结果摘要写入最后一轮回复。")
+
+    cmd = [kimi, "-p", "--output-format", "stream-json", prompt]
+    model = os.environ.get("LAS_KIMI_CLI_MODEL", "").strip()
+    if model:
+        cmd[1:1] = ["-m", model]
+
+    env = dict(os.environ)
+    env.setdefault("CI", "true")
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=str(ws),
+        env=env,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(),
+                                                timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise KimiTimeout(f"kimi -p exceeded {timeout_seconds}s")
+
+    out_text = (stdout or b"").decode("utf-8", errors="replace")
+    artifacts: list[dict] = [
+        save_artifact(task.id, "kimi.jsonl", stdout or b"", "log"),
+        save_artifact(task.id, "kimi-stderr.log", stderr or b"", "log"),
+    ]
+
+    if proc.returncode != 0:
         raise KimiFailed(
-            f"llm returned empty content (ct={resp.headers.get('content-type')},"
-            f" body={resp.text[:200]!r})"
-        )
-    artifact = save_artifact(
-        task.id, "analysis.md",
-        f"# {task.objective}\n\n{content}\n".encode("utf-8"),
-        artifact_type="report",
-    )
-    return [artifact]
+            f"kimi -p exited {proc.returncode}; see kimi.jsonl / "
+            f"kimi-stderr.log artifacts: {out_text[-300:]!r}")
+
+    summary = _extract_assistant_text(out_text)
+    artifacts.append(save_artifact(
+        task.id, "last-message.md",
+        (summary or "（无 assistant 文本输出，详见 kimi.jsonl）").encode(),
+        "report"))
+
+    # 收集工作区内 CLI 产出的文件（排除 logs/input/context）
+    for path in sorted(ws.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(ws)
+        if rel.parts[0] in ("logs", "input", "artifacts") or \
+                rel.name == "context.md":
+            continue
+        artifacts.append(
+            save_artifact(task.id, f"workspace/{rel}", path.read_bytes(),
+                          "file"))
+    return artifacts

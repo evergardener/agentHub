@@ -6,9 +6,10 @@ from __future__ import annotations
 def agent_card(base_url: str) -> dict:
     return {
         "name": "kimi",
-        "description": "Kimi Worker：调研、长上下文分析、文档理解、中文内容、摘要。",
+        "description": "Kimi Worker（真实本地 Kimi Code CLI）：调研、长上下文"
+                       "分析、文档理解、中文内容、摘要、代码与文件任务。",
         "url": base_url,
-        "version": "0.1.0",
+        "version": "0.2.0",
         "protocolVersion": "0.3",
         "capabilities": {
             "streaming": False,

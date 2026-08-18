@@ -16,7 +16,7 @@
         │                           │
 ┌───────┴───────────────────────────┴────────── 宿主机（worker）─────────────┐
 │  codex adapter :8201   kimi adapter :8202（launchd 常驻，token 鉴权）       │
-│  codex CLI / LLM 端点（cliproxy 127.0.0.1:8317）等由用户自装               │
+│  codex CLI / Kimi Code CLI / LLM 端点（cliproxy 127.0.0.1:8317）用户自装    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -31,7 +31,7 @@
 |---|---|
 | Docker + compose 插件 | Docker Desktop（macOS）或 Docker Engine 24+（Linux） |
 | LLM 端点 | OpenAI 兼容接口（本项目用本地 cliproxy `127.0.0.1:8317`） |
-| worker CLI | 按需自装（codex CLI 等）；kimi adapter 无 CLI 依赖，直连 LLM 端点 |
+| worker CLI | 按需自装：codex CLI、**Kimi Code CLI**（kimi worker 的真实执行体，官方脚本安装至 `~/.kimi-code/bin/kimi`，需先 `kimi login` 或配置 Moonshot API key；缺失时 kimi worker 显式失败，不回退 HTTP 模型调用） |
 | 网络 | 容器可回连宿主机（compose 已配 `host.docker.internal:host-gateway`） |
 
 ## 3. 部署步骤
