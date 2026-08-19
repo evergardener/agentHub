@@ -251,6 +251,41 @@
   .verdict-ok { color: var(--ok); font-weight: 600; }
   .verdict-no { color: var(--bad); font-weight: 600; }
 
+  /* ── 过程查看器（transcript） ── */
+  .chip.art { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+              font-size: 11.5px; }
+  .tk { display: flex; flex-direction: column; gap: 8px; }
+  .tk-msg {
+    background: var(--acc-soft); border-radius: 8px; padding: 8px 12px;
+    font-size: 13px; white-space: pre-wrap; word-break: break-word;
+  }
+  .tk-call {
+    display: flex; gap: 7px; align-items: baseline;
+    font-size: 12px; color: var(--mut);
+  }
+  .tk-call b { color: var(--acc); font-weight: 600; }
+  .tk-call code {
+    background: #f2f3f6; border-radius: 5px; padding: 1px 7px;
+    font-size: 11.5px; word-break: break-all;
+  }
+  .tk-result { font-size: 12px; }
+  .tk-result summary {
+    cursor: pointer; color: var(--faint); font-size: 11.5px;
+    user-select: none;
+  }
+  .tk-result summary:hover { color: var(--acc); }
+  .tk-result pre {
+    margin: 4px 0 0; font: 11.5px/1.65 ui-monospace, SFMono-Regular, Menlo,
+    monospace; background: #f8f9fb; border: 1px solid var(--line-soft);
+    border-radius: 7px; padding: 8px 10px; white-space: pre-wrap;
+    word-break: break-all; max-height: 200px; overflow-y: auto;
+  }
+  .viewer-bar { display: flex; align-items: center; gap: 8px;
+                margin-bottom: 8px; }
+  .viewer-bar .fname { font-family: ui-monospace, Menlo, monospace;
+                       font-size: 12px; color: var(--mut);
+                       word-break: break-all; }
+
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-thumb { background: #d4d8e0; border-radius: 4px; }
   ::-webkit-scrollbar-thumb:hover { background: #b9bfcb; }
@@ -277,6 +312,11 @@
     <section class="card">
       <h2>审批中心 <span class="badge blocked" id="blocked-count" style="display:none"></span></h2>
       <div class="body" id="blocked"></div>
+    </section>
+
+    <section class="card">
+      <h2>AGENT 交互 <span class="badge blocked" id="interaction-count" style="display:none"></span></h2>
+      <div class="body" id="interactions"></div>
     </section>
 
     <section class="card">
@@ -336,6 +376,7 @@ const S = {
   evCount: 0,
   EV_CAP: 300,           // 事件流 DOM 上限
   detailId: null,
+  interactions: new Map(),
 };
 
 const $ = (s) => document.querySelector(s);
@@ -410,18 +451,68 @@ function renderBlocked(tasks) {
     c.style.display = "";
     c.textContent = tasks.length;
   } else c.style.display = "none";
+  const nativeTasks = new Set([...S.interactions.values()].map(x => x.task_id));
   $("#blocked").innerHTML = tasks.map(x =>
     `<div class="appr">
        <div class="top"><span class="tid">${esc(x.id)}</span>${badge(x.status)}</div>
        <div class="obj2">${esc(x.objective || "")}</div>
-       <div>
+       <div>${nativeTasks.has(x.id)
+         ? `<span style="font-size:12px;color:var(--warn)">请在「AGENT 交互」中处理原生请求</span>`
+         : `
          <button class="btn ok" data-decide="approve" data-id="${esc(x.id)}">批准</button>
          <button class="btn no" data-decide="reject" data-id="${esc(x.id)}">拒绝</button>
-       </div>
+         `}</div>
      </div>`
   ).join("") || `<div class="empty">（无待审批任务）</div>`;
   document.querySelectorAll("[data-decide]").forEach(b =>
     b.onclick = () => decide(b.dataset.id, b.dataset.decide, b));
+}
+
+function renderInteractions(items) {
+  const c = $("#interaction-count");
+  c.style.display = items.length ? "" : "none";
+  c.textContent = items.length;
+  S.interactions = new Map(items.map(x => [x.id, x]));
+  $("#interactions").innerHTML = items.map(x => {
+    let p = {};
+    try { p = JSON.parse(x.payload_json || "{}"); } catch (_) {}
+    if (x.kind === "approval") {
+      const view = p.toolView || {};
+      const detail = view.command || (view.paths || []).join(", ") ||
+                     view.title || "未获得可审查的命令/路径";
+      const allowDisabled = p.inspectable === true ? "" : " disabled";
+      return `<div class="appr">
+        <div class="top"><span class="tid">${esc(x.agent_id)}</span>${badge("blocked")}</div>
+        <div class="obj2"><b>${esc(p.toolName || "tool")}</b> · ${esc(p.reason || "请求执行原生工具")}</div>
+        <div class="mono" style="margin-bottom:8px;max-height:120px">${esc(detail)}</div>
+        <div class="sub" style="margin-bottom:8px;color:var(--mut)">${esc(x.operation || "未关联 ActionIntent")} · ${esc(x.action_intent_status || "pending")}</div>
+        <button class="btn ok" data-i-allow="${esc(x.id)}"${allowDisabled}>逐次允许</button>
+        <button class="btn no" data-i-reject="${esc(x.id)}">拒绝</button>
+      </div>`;
+    }
+    const questions = (p.questions || []).map(q => {
+      const options = (q.options || []).map(o =>
+        `<option value="${esc(o.label)}">${esc(o.label)}</option>`).join("");
+      return `<div style="margin:8px 0" data-question="${esc(q.id)}" data-multi="${q.multiSelect ? "1" : "0"}">
+        <div class="obj2">${esc(q.question || q.id)}</div>
+        ${q.detail ? `<div style="font-size:12px;color:var(--mut);margin-bottom:5px">${esc(q.detail)}</div>` : ""}
+        ${options ? `<select class="q-selected" ${q.multiSelect ? "multiple" : ""} style="width:100%;padding:5px;border:1px solid var(--line);border-radius:7px">${options}</select>` : ""}
+        <input class="q-custom" placeholder="自定义回答（可选）" style="width:100%;margin-top:5px;padding:5px 8px;border:1px solid var(--line);border-radius:7px">
+      </div>`;
+    }).join("");
+    return `<div class="appr" data-question-form="${esc(x.id)}">
+      <div class="top"><span class="tid">${esc(x.agent_id)}</span>${badge("blocked")}</div>
+      ${questions}<button class="btn ok" data-i-answer="${esc(x.id)}">提交回答</button>
+    </div>`;
+  }).join("") || `<div class="empty">（无待处理原生交互）</div>`;
+  document.querySelectorAll("[data-i-allow]").forEach(b =>
+    b.onclick = () => respondInteraction(b.dataset.iAllow,
+      {outcome: "allowed-once"}, b));
+  document.querySelectorAll("[data-i-reject]").forEach(b =>
+    b.onclick = () => respondInteraction(b.dataset.iReject,
+      {outcome: "rejected"}, b));
+  document.querySelectorAll("[data-i-answer]").forEach(b =>
+    b.onclick = () => answerInteraction(b.dataset.iAnswer, b));
 }
 
 function renderGrants(grants) {
@@ -445,10 +536,12 @@ async function loadAll() {
     renderAgents(ov.agents || []);
     renderChips(ov.task_counts || {});
     renderGrants(ov.grants || []);
-    const [t, b] = await Promise.all([
+    const [t, b, i] = await Promise.all([
       fetchJson("/api/tasks" + (S.filter ? "?status=" + S.filter : "")),
       fetchJson("/api/tasks?status=blocked"),
+      fetchJson("/api/interactions?status=pending"),
     ]);
+    if (!i.error) renderInteractions(i.interactions || []);
     if (!t.error) renderTasks(t.tasks || []);
     if (!b.error) renderBlocked(b.tasks || []);
     setConn(true, "已连接");
@@ -501,6 +594,8 @@ function startStream() {
       const e = JSON.parse(m.data);
       S.lastSeq = Math.max(S.lastSeq, e.seq);
       appendEvent(e);
+      if (/interaction|input_required|\.blocked$/.test(e.event_type || ""))
+        loadAll();
     } catch (_) { /* 跳过坏帧 */ }
   };
 }
@@ -536,8 +631,12 @@ async function openDetail(id) {
     `#${e.seq} ${e.event_type}  ${e.created_at}`).join("\n");
   const runs = (d.runs || []).map(r =>
     `${r.status}  agent=${r.agent_id}  @${r.started_at || ""}`).join("\n");
-  const arts = (d.artifacts || []).map(a =>
-    `${a.name}\n  ${a.path}`).join("\n");
+  const arts = (d.artifacts || []);
+  const interactions = (d.interactions || []).map(i => {
+    let payload = i.payload_json || "{}";
+    try { payload = JSON.stringify(JSON.parse(payload), null, 2); } catch (_) {}
+    return `${i.kind} · ${i.status} · ${i.agent_id}\n${payload}`;
+  }).join("\n\n");
 
   $("#d-body").innerHTML =
     `<div class="d-sec"><h3>概要</h3><div class="kv">${kv}</div></div>` +
@@ -546,9 +645,23 @@ async function openDetail(id) {
       ? `<div class="d-sec"><h3>错误</h3><div class="mono">${esc(t.error_message)}</div></div>` : "") +
     (t.result_summary
       ? `<div class="d-sec"><h3>结果摘要</h3><div class="mono">${esc(t.result_summary)}</div></div>` : "") +
+    `<div class="d-sec"><h3>AGENT 交互</h3><div class="mono">${esc(interactions) || "（无）"}</div></div>` +
     `<div class="d-sec"><h3>事件时间线</h3><div class="mono">${esc(evs) || "（无）"}</div></div>` +
     `<div class="d-sec"><h3>RUNS</h3><div class="mono">${esc(runs) || "（无）"}</div></div>` +
-    `<div class="d-sec"><h3>ARTIFACTS</h3><div class="mono">${esc(arts) || "（无）"}</div></div>`;
+    `<div class="d-sec"><h3>ARTIFACTS（点击查看内容/过程）</h3>` +
+    (arts.length
+      ? `<div style="display:flex;gap:6px;flex-wrap:wrap">` +
+        arts.map(a =>
+          `<button class="chip art" data-art="${esc(a.name)}">${esc(a.name)}</button>`
+        ).join("") + `</div>`
+      : `<div class="empty">（无产物——任务进行中时过程未落盘，完成后可见）</div>`) +
+    `</div>` +
+    `<div class="d-sec" id="d-viewer-sec" style="display:none">` +
+    `<h3>产物内容</h3><div class="viewer-bar"><span class="fname" id="d-viewer-title"></span></div>` +
+    `<div id="d-viewer"></div></div>`;
+
+  document.querySelectorAll("[data-art]").forEach(b =>
+    b.onclick = () => viewArtifact(t.id, b.dataset.art));
 
   $("#overlay").classList.add("show");
   $("#drawer").classList.add("show");
@@ -565,6 +678,65 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeDetail();
 });
 
+/* ── 产物内容查看器 ── */
+async function viewArtifact(taskId, name) {
+  $("#d-viewer-sec").style.display = "";
+  $("#d-viewer-title").textContent = name;
+  $("#d-viewer").innerHTML = `<div class="empty">加载中…</div>`;
+  const r = await fetchJson(
+    `/api/tasks/${encodeURIComponent(taskId)}/artifact-content?name=` +
+    encodeURIComponent(name));
+  if (r.error) {
+    $("#d-viewer").innerHTML = `<div class="empty">${esc(r.error)}</div>`;
+    return;
+  }
+  let html = name.endsWith(".jsonl")
+    ? renderTranscript(r.content)
+    : `<div class="mono">${esc(r.content)}</div>`;
+  if (r.truncated)
+    html += `<div class="empty">（内容过大，仅显示前 256KB）</div>`;
+  $("#d-viewer").innerHTML = html;
+  $("#d-viewer-sec").scrollIntoView({behavior: "smooth", block: "nearest"});
+}
+
+/* stream-json → 可读过程：assistant 文本 / 工具调用 / 可折叠工具结果 */
+function renderTranscript(content) {
+  const items = [];
+  for (const line of content.split("\n")) {
+    const s = line.trim();
+    if (!s.startsWith("{")) continue;
+    let o;
+    try { o = JSON.parse(s); } catch (_) { continue; }
+    const role = o.role || o.type;
+    if (role === "assistant") {
+      const text = typeof o.content === "string" ? o.content : "";
+      if (text.trim()) items.push({k: "msg", text});
+      for (const tc of o.tool_calls || []) {
+        const fn = tc.function || {};
+        let brief = "";
+        try {
+          const args = JSON.parse(fn.arguments || "{}");
+          brief = args.path || args.command || args.query ||
+                  JSON.stringify(args).slice(0, 100);
+        } catch (_) { brief = (fn.arguments || "").slice(0, 100); }
+        items.push({k: "call", name: fn.name || "tool", brief});
+      }
+    } else if (role === "tool") {
+      items.push({k: "result", text: String(o.content ?? "")});
+    }
+  }
+  if (!items.length)
+    return `<div class="mono">${esc(content)}</div>`;
+  return `<div class="tk">` + items.map(it => {
+    if (it.k === "msg")
+      return `<div class="tk-msg">${esc(it.text)}</div>`;
+    if (it.k === "call")
+      return `<div class="tk-call">🔧 <b>${esc(it.name)}</b><code>${esc(it.brief)}</code></div>`;
+    const preview = it.text.length > 400;
+    return `<details class="tk-result"><summary>工具返回（${it.text.length} 字符）${preview ? "，点击展开" : ""}</summary><pre>${esc(it.text)}</pre></details>`;
+  }).join("") + `</div>`;
+}
+
 /* ── 操作 ── */
 async function decide(id, how, btn) {
   if (btn) btn.disabled = true;
@@ -574,6 +746,38 @@ async function decide(id, how, btn) {
   });
   if (r.error) alert(r.error);
   loadAll();
+}
+
+async function respondInteraction(id, response, btn) {
+  if (response.outcome === "allowed-once" &&
+      !confirm("仅允许本次原生工具调用？该决定会关联并审计 ActionIntent。")) return;
+  if (btn) btn.disabled = true;
+  const r = await fetchJson(`/api/interactions/${encodeURIComponent(id)}/respond`, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(response),
+  });
+  if (r.error) alert(r.error);
+  await loadAll();
+  if (S.detailId) openDetail(S.detailId);
+}
+
+async function answerInteraction(id, btn) {
+  const form = document.querySelector(`[data-question-form="${CSS.escape(id)}"]`);
+  if (!form) return;
+  const answers = [...form.querySelectorAll("[data-question]")].map(row => {
+    const selected = row.querySelector(".q-selected");
+    const custom = row.querySelector(".q-custom").value.trim();
+    const item = {
+      id: row.dataset.question,
+      selected: selected ? [...selected.selectedOptions].map(o => o.value) : [],
+    };
+    if (custom) item.custom = custom;
+    return item;
+  });
+  if (answers.some(a => !a.selected.length && !a.custom)) {
+    alert("请回答所有问题"); return;
+  }
+  await respondInteraction(id, {answer: {answers}}, btn);
 }
 
 $("#grant-add").onclick = async () => {

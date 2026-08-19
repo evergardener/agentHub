@@ -37,6 +37,14 @@ def _rows(cur) -> list[dict]:
     return out
 
 
+def _is_under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="agentHub Web UI", version="0.1.0")
 
@@ -97,10 +105,58 @@ def create_app() -> FastAPI:
             events = _rows(conn.execute(
                 "SELECT seq, event_type, payload_json, created_at FROM events"
                 " WHERE task_id = ? ORDER BY seq;", (task_id,)))
+            interactions = _rows(conn.execute(
+                "SELECT i.*, a.operation, a.risk, a.policy_route,"
+                " a.policy_reason, a.status AS action_intent_status"
+                " FROM agent_session_interactions i"
+                " LEFT JOIN action_intents a ON a.id = i.action_intent_id"
+                " WHERE i.task_id = ? ORDER BY i.requested_at;",
+                (task_id,)))
             return {"task": {k: row[k] for k in keys}, "runs": runs,
-                    "artifacts": artifacts, "events": events}
+                    "artifacts": artifacts, "events": events,
+                    "interactions": interactions}
         finally:
             conn.close()
+
+    @app.get("/api/tasks/{task_id}/artifact-content")
+    def artifact_content(task_id: str, name: str, max_bytes: int = 262144):
+        """读取任务产物内容（Web UI 查看执行过程/对话流）。
+
+        安全：仅允许读取工作区根目录内的文件；超出 max_bytes（上限 1MB）
+        截断并标记 truncated。
+        """
+        from common import config as cfg
+
+        max_bytes = min(max_bytes, 1024 * 1024)
+        conn = _conn()
+        try:
+            row = conn.execute(
+                "SELECT path FROM artifacts WHERE task_id = ? AND name = ?"
+                " ORDER BY created_at DESC LIMIT 1;", (task_id, name)).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return JSONResponse({"error": "artifact not found"},
+                                status_code=404)
+        p = Path(row["path"]).resolve()
+        # 允许的根：容器工作区 + LAS_WEBUI_ARTIFACT_ROOTS（宿主机工作区，
+        # host adapter 写的产物路径以宿主机绝对路径入库，compose 以相同
+        # 路径只读挂载进来，见 docker-compose.yml webui 服务）
+        import os
+        roots = [cfg.workspace().resolve()]
+        roots += [Path(r).resolve() for r in
+                  os.environ.get("LAS_WEBUI_ARTIFACT_ROOTS", "").split(",")
+                  if r.strip()]
+        if not any(_is_under(p, root) for root in roots):
+            return JSONResponse({"error": "artifact 路径不在允许的工作区内"},
+                                status_code=403)
+        if not p.is_file():
+            return JSONResponse({"error": f"文件不存在: {p}"},
+                                status_code=404)
+        data = p.read_bytes()
+        return {"name": name, "path": str(p), "size": len(data),
+                "truncated": len(data) > max_bytes,
+                "content": data[:max_bytes].decode("utf-8", errors="replace")}
 
     @app.get("/api/events")
     def events(after: int = 0, limit: int = 100):
@@ -140,6 +196,39 @@ def create_app() -> FastAPI:
         return StreamingResponse(gen(), media_type="text/event-stream")
 
     # ---------- 审批操作 ----------
+
+    @app.get("/api/interactions")
+    def interactions(status: str | None = "pending", limit: int = 200):
+        conn = _conn()
+        try:
+            where = " WHERE i.status = ?" if status else ""
+            params = (status, limit) if status else (limit,)
+            return {"interactions": _rows(conn.execute(
+                "SELECT i.*, a.operation, a.risk, a.policy_route,"
+                " a.policy_reason, a.status AS action_intent_status"
+                " FROM agent_session_interactions i"
+                " LEFT JOIN action_intents a ON a.id = i.action_intent_id"
+                + where + " ORDER BY i.requested_at LIMIT ?;", params))}
+        finally:
+            conn.close()
+
+    @app.post("/api/interactions/{interaction_id}/respond")
+    async def respond_interaction(interaction_id: str, body: dict):
+        from orchestrator.task_manager import TaskManager
+
+        tm = TaskManager()
+        try:
+            result = await tm.respond_agent_interaction(
+                interaction_id,
+                response=body or {},
+                requested_by="user",
+            )
+            return {"interaction_id": interaction_id, "task": result}
+        except Exception as e:
+            return JSONResponse({"error": f"{type(e).__name__}: {e}"},
+                                status_code=409)
+        finally:
+            tm.close()
 
     @app.post("/api/tasks/{task_id}/approve")
     def approve(task_id: str, body: dict | None = None):

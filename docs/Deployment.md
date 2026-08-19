@@ -15,8 +15,8 @@
         ▲ 心跳注册（NATS）          ▲ A2A 委派（经 gateway → host.docker.internal）
         │                           │
 ┌───────┴───────────────────────────┴────────── 宿主机（worker）─────────────┐
-│  codex adapter :8201   kimi adapter :8202（launchd 常驻，token 鉴权）       │
-│  codex CLI / Kimi Code CLI / LLM 端点（cliproxy 127.0.0.1:8317）用户自装    │
+│  codex :8201   kimi :8202   dsh :8203（launchd 常驻，token 鉴权）          │
+│  Codex/Kimi CLI、DSH Web :3080、LLM 端点（127.0.0.1:8317）用户自装         │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -31,7 +31,7 @@
 |---|---|
 | Docker + compose 插件 | Docker Desktop（macOS）或 Docker Engine 24+（Linux） |
 | LLM 端点 | OpenAI 兼容接口（本项目用本地 cliproxy `127.0.0.1:8317`） |
-| worker CLI | 按需自装：codex CLI、**Kimi Code CLI**（kimi worker 的真实执行体，官方脚本安装至 `~/.kimi-code/bin/kimi`，需先 `kimi login` 或配置 Moonshot API key；缺失时 kimi worker 显式失败，不回退 HTTP 模型调用） |
+| worker runtime | 按需自装：Codex CLI、Kimi Code CLI，以及 DSH；DSH Adapter 要求先运行 `dsh web --host 127.0.0.1 --port 3080` |
 | 网络 | 容器可回连宿主机（compose 已配 `host.docker.internal:host-gateway`） |
 
 ## 3. 部署步骤
@@ -69,7 +69,9 @@ cp .env.example .env && chmod 600 .env
 | `LAS_GATEWAY_API_KEY` | gateway 认证 key，`openssl rand -hex 24` 生成；**留空 gateway 拒绝所有请求** |
 | `LAS_PG_PASSWORD` | PostgreSQL 密码；**已有数据卷时改它会导致认证失败**（见 §6.2） |
 | `LAS_ADAPTER_TOKEN` | 留空即可——worker 首启自动生成随机值回写本文件 |
+| `LAS_ACTION_RECEIPT_SECRET` | ActionIntent receipt HMAC 密钥；生产用 `openssl rand -hex 32` 独立生成；暂时可回退 adapter token |
 | `LAS_ADAPTER_BIND` | worker 监听地址，默认 `127.0.0.1`；需容器回连时加宿主机 LAN IP |
+| `LAS_DSH_PERMISSION_PRESET` | 当前必须为 `read-only`；ActionIntent 回执已接通，但 tool target normalization/脱敏完成前拒绝更宽 preset |
 | `LAS_DATABASE_URL` | 留空 = compose PG；`sqlite:////path/x.db` = SQLite；外部 PG 直接填 URL |
 | `LAS_OTEL_ENDPOINT` | compose 内已指向 jaeger；置空关闭 tracing |
 
@@ -103,12 +105,16 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"   # worker 运行依�
 ./scripts/agent-worker.sh codex                # 手动前台启动（调试用）
 ./scripts/install-agent-autostart.sh codex     # launchd 常驻（macOS）
 ./scripts/install-agent-autostart.sh kimi
+
+# DSH 仍可独立使用；Adapter 连接其 loopback Web API
+dsh web --host 127.0.0.1 --port 3080
+./scripts/install-agent-autostart.sh dsh
 ```
 
 验证：
 
 ```bash
-docker compose run --rm agentctl agent list    # codex/kimi 应为 online
+docker compose run --rm agentctl agent list    # codex/kimi/dsh 应为 online
 curl -H "X-Agent-Token: $(grep ^LAS_ADAPTER_TOKEN= .env | cut -d= -f2)" \
      http://127.0.0.1:8201/health              # {"status":"ok",...}
 ```
@@ -125,6 +131,36 @@ docker compose run --rm agentctl chat
 
 验收点：任务终态 `accepted`；`artifacts` 含产出文件；Web UI 任务详情可见复审记录；Jaeger 有完整 trace。
 
+### 3.6 DSH 原生交互闭环
+
+DSH 产生 approval/question 后，任务进入 `blocked`，WebUI「AGENT 交互」卡片
+实时显示请求。审批只能选择本次允许或拒绝；本次允许会先由控制面决策关联的
+ActionIntent，再把不可伪造的 receipt 送到 DSH `/api/respond`。问题以 DSH
+定义的 question id 和选项结构整批回答，二者均继续原 native session/turn。
+此时旧的任务级 approve/reject 会明确拒绝，避免只修改数据库状态却没有回应
+原生 Runtime。
+
+只读查询：
+
+```bash
+curl 'http://127.0.0.1:18070/api/interactions?status=pending'
+```
+
+逐次拒绝或回答也可直接调用 Web API：
+
+```bash
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"outcome":"rejected"}' \
+  http://127.0.0.1:18070/api/interactions/INT-ID/respond
+
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"answer":{"answers":[{"id":"question-id","selected":["选项"]}]}}' \
+  http://127.0.0.1:18070/api/interactions/INT-ID/respond
+```
+
+当前 WebUI 仍是 loopback-only、无账号体系；不得反向代理到局域网或公网。生产
+开放前必须完成 Phase 5 的认证、CSRF 与 RBAC。
+
 ## 4. 日常操作速查
 
 | 操作 | 命令 |
@@ -132,7 +168,8 @@ docker compose run --rm agentctl chat
 | 与 hermes 对话 | `./scripts/agentctl-host.sh chat`（宿主机直连）或 `docker compose run --rm agentctl chat`（容器） |
 | 一次性指令 | `./scripts/agentctl-host.sh chat "<需求>"` |
 | 任务/事件/agent 查询 | `./scripts/agentctl-host.sh status` / `task list` / `events` / `agent list` |
-| 审批（Web UI 之外） | `agentctl task approve <id>` / Web UI 审批中心 |
+| 任务级审批（Web UI 之外） | `agentctl task approve <id>` / Web UI 审批中心 |
+| 原生 Agent 交互 | WebUI「AGENT 交互」卡片；API 为 `GET /api/interactions?status=pending`、`POST /api/interactions/{id}/respond` |
 | 常驻授权 | 对话中说"以后 X 类你自己批"；`agentctl grant list` 查看 |
 | worker 日志 | `~/Library/Logs/agenthub-<agent>.log`（macOS launchd） |
 | worker 重启 | `launchctl kickstart -k gui/$(id -u)/top.evergardenviolet.agenthub.<agent>` |

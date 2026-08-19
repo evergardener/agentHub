@@ -6,15 +6,17 @@
 
 from __future__ import annotations
 
-from adapters.fake import runner
 from adapters.fake.card import agent_card
+from adapters.fake.session import FakeSessionAdapter
 from adapters.server_common import build_app
 
 AGENT_ID = "fake"
 
 
 def create_app():
-    return build_app(AGENT_ID, agent_card, runner.run, max_concurrent=1)
+    return build_app(
+        AGENT_ID, agent_card, max_concurrent=1,
+        session_adapter=FakeSessionAdapter())
 
 
 app = create_app()

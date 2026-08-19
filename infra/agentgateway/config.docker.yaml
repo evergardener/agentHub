@@ -15,7 +15,7 @@ gateways:
         metadata:
           user: hermes
           role: orchestrator
-          agents: codex,kimi   # ACL：允许访问的 agent 列表
+          agents: codex,kimi,dsh   # ACL：允许访问的 agent 列表
 
 routes:
 - name: agent-codex
@@ -57,3 +57,23 @@ routes:
       codes: [502, 503]
   backends:
   - host: host.docker.internal:8202
+
+- name: agent-dsh
+  matches:
+  - path:
+      pathPrefix: /agents/dsh
+  policies:
+    urlRewrite:
+      path:
+        prefix: /
+    authorization:
+      rules:
+      - require: 'apiKey.agents.split(",").exists(a, a == "dsh")'
+    timeout:
+      requestTimeout: 900s
+    retry:
+      attempts: 2
+      backoff: 500ms
+      codes: [502, 503]
+  backends:
+  - host: host.docker.internal:8203

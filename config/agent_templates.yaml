@@ -1,0 +1,46 @@
+# AgentHub-owned templates and initial profiles.  DSH's own "agentPreset" is
+# separate: this file controls Hub routing/authority; LAS_DSH_AGENT_PRESET
+# optionally selects the composition inside DSH.
+templates:
+  - id: TPL-DSH
+    name: DeepSeek Harness
+    adapter_kind: dsh-web
+    description: Persistent DSH Web session worker with native recovery.
+    capabilities:
+      multi_turn: true
+      resume: true
+      native_resume: true
+      durable_session: true
+      streaming: true
+      interrupt: true
+      cancel: true
+    default_config:
+      web_url_env: LAS_DSH_WEB_URL
+      agent_preset_env: LAS_DSH_AGENT_PRESET
+      permission_preset_env: LAS_DSH_PERMISSION_PRESET
+
+profiles:
+  - id: AP-DSH-REVIEW
+    template_id: TPL-DSH
+    name: DSH Independent Reviewer
+    role_prompt: >-
+      Independently review requirements, architecture, implementation and test
+      evidence. Report defects and risks before proposing modifications.
+    responsibilities:
+      - architecture review
+      - backend and frontend code review
+      - test and production-readiness review
+      - risk identification
+    execution_mode: read_only
+    allowed_operations: [read, analyze, test, review]
+    denied_operations: [write, delete, git_commit, deploy, publish]
+    allowed_tools: [filesystem.read, filesystem.search, test.run]
+    task_types: [analysis, review, testing]
+    approval_level: hermes
+    timeout_seconds: 3600
+    max_concurrent_tasks: 1
+
+assignments:
+  dsh:
+    template_id: TPL-DSH
+    profile_id: AP-DSH-REVIEW

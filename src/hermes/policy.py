@@ -1,12 +1,13 @@
 """Hermes 审批策略引擎 — Evolution v3 §6.2 / §6.2.1。
 
 三态决策：
-  auto      只读/查询类，直接放行（auto_approve 关键词）
+  auto      明确命中只读/查询类，直接放行（auto_approve 关键词）
   granted   写操作但命中未撤销的常驻授权（approval_grants）
   ask       需要用户批准（对话内或 Web UI）
 
 never_grant 类（删除/外部发布等）永远不允许常驻授权自动放行，
-只能由用户逐次批准。
+只能由用户逐次批准。未命中任何规则的操作分类为 unknown，并按
+fail-closed 原则要求批准，不能默认视为只读。
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ FALLBACK = {
 @dataclass
 class Decision:
     action: str          # "auto" | "granted" | "ask"
-    risk: str            # "read" | "write" | "critical"
+    risk: str            # "read" | "write" | "critical" | "unknown"
     reason: str
     grant_id: int | None = None
 
@@ -49,12 +50,14 @@ class ApprovalPolicy:
         self.never_grant = cfg.get("never_grant") or FALLBACK["never_grant"]
 
     def classify(self, objective: str) -> str:
-        """按关键词粗分风险等级。critical 优先于 write。"""
+        """按关键词粗分风险等级；未知操作 fail-closed。"""
         if any(k in objective for k in self.never_grant):
             return "critical"
         if any(k in objective for k in self.require_user):
             return "write"
-        return "read"
+        if any(k in objective for k in self.auto_approve):
+            return "read"
+        return "unknown"
 
     def decide(self, conn: sqlite3.Connection, objective: str) -> Decision:
         risk = self.classify(objective)
@@ -68,6 +71,9 @@ class ApprovalPolicy:
         if risk == "critical":
             return Decision("ask", risk,
                             "高危操作（never_grant），必须用户逐次批准")
+        if risk == "unknown":
+            return Decision("ask", risk,
+                            "未识别操作，按 fail-closed 原则等待用户批准")
         return Decision("ask", risk, "写操作，等待用户批准")
 
     # ---------- grants ----------

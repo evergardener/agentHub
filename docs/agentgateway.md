@@ -7,7 +7,8 @@
 ```text
 Hermes ──► 127.0.0.1:8300 (agentgateway, API key 认证)
               ├─ /agents/codex/* ──► 127.0.0.1:8201 (codex adapter)
-              └─ /agents/kimi/*  ──► 127.0.0.1:8202 (kimi adapter)
+              ├─ /agents/kimi/*  ──► 127.0.0.1:8202 (kimi adapter)
+              └─ /agents/dsh/*   ──► 127.0.0.1:8203 (dsh adapter)
 ```
 
 所有端口 loopback only。Worker 不直接对外暴露；生产部署时 Hermes 只配
@@ -36,7 +37,7 @@ key 只经环境变量注入（M2 起 env-only，不再使用 macOS Keychain）�
 - **ACL**：路由级 `authorization` 规则校验 key 元数据 `agents` 列表。
   禁用某 Agent = 从 `agents` 中移除其名字；agentgateway 热加载，
   无需重启。被拒请求返回 403。
-- **超时/重试**：路由级 `timeout.requestTimeout`（codex 900s / kimi 300s）
+- **超时/重试**：路由级 `timeout.requestTimeout`（codex/dsh 900s / kimi 300s）
   与 `retry`（2 attempts，仅 502/503，backoff 500ms）。
 
 ## Hermes 侧接线

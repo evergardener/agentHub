@@ -1,0 +1,28 @@
+# Structured ActionIntent policy (ADR-0004).
+# Exact operation IDs only. Unknown operations always route to the user.
+
+auto:
+  - agent.discover
+  - artifact.read
+  - collaboration.request
+  - filesystem.read
+  - git.diff
+  - git.status
+  - test.run
+
+hermes_approve:
+  - filesystem.create
+  - filesystem.write
+  - git.commit
+
+require_user:
+  - database.write
+  - dependency.install
+  - deployment.apply
+  - filesystem.delete
+  - git.force_push
+  - git.push
+  - grant.create
+  - network.publish
+  - secret.access
+  - service.restart

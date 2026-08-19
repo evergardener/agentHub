@@ -18,6 +18,7 @@
   LAS_HEARTBEAT_INTERVAL → AGENT_HEARTBEAT_INTERVAL  心跳间隔秒
   LAS_LEASE_TTL         → AGENT_LEASE_TTL      agent 租约秒
   LAS_A2A_PEERS         （无别名）              orchestrator A2A peer 映射（JSON）
+  LAS_ACTION_RECEIPT_SECRET（无别名）           ActionIntent receipt HMAC 密钥
 """
 
 from __future__ import annotations
@@ -84,6 +85,11 @@ def adapter_token() -> str:
     return _env("LAS_ADAPTER_TOKEN")
 
 
+def action_receipt_secret() -> str:
+    """ActionIntent receipt HMAC secret; adapter token is migration fallback."""
+    return _env("LAS_ACTION_RECEIPT_SECRET") or adapter_token()
+
+
 def api_token() -> str:
     """orchestrator A2A 端点的调用方鉴权 token（X-Agent-Token 头）。
 
@@ -95,7 +101,7 @@ def api_token() -> str:
 
 # peer→worker 固定映射允许的 worker 白名单（Hermes 接入约定，
 # 新增 worker 需在此显式放行，防止外部总控 fan-out 到未约定的执行体）。
-ALLOWED_PEER_WORKERS = frozenset({"codex", "kimi"})
+ALLOWED_PEER_WORKERS = frozenset({"codex", "kimi", "dsh"})
 
 
 def a2a_peers() -> dict[str, dict[str, str]]:

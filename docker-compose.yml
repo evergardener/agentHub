@@ -2,7 +2,7 @@
 #
 # 拓扑：
 #   容器内：nats / postgres / state-writer / janitor / agentgateway
-#   宿主机：worker adapter（codex/kimi/pi...，用户自装），心跳注册进 agentHub
+#   宿主机：worker adapter（codex/kimi/dsh/pi...，用户自装），心跳注册进 agentHub
 #   宿主机 worker 配置：LAS_NATS_URL=nats://127.0.0.1:4222
 #                      LAS_AGENT_ENDPOINT=http://host.docker.internal:<port>
 # 状态库：默认 compose PostgreSQL；回退 SQLite 在 .env 设
@@ -21,6 +21,7 @@ x-agenthub-env: &agenthub-env
   LAS_WORKSPACE: /data/workspace
   LAS_DATABASE_URL: postgresql://agenthub:${LAS_PG_PASSWORD:-agenthub-dev-only}@postgres:5432/agenthub
   LAS_OTEL_ENDPOINT: http://jaeger:4318   # 置空即关闭 tracing
+  LAS_ACTION_RECEIPT_SECRET: ${LAS_ACTION_RECEIPT_SECRET:-}
 
 services:
   nats:
@@ -51,6 +52,9 @@ services:
 
   state-writer:
     <<: *agenthub
+    # 显式声明入口：不依赖镜像 CMD（2026-08-19 教训：docker commit 热修
+    # 会把 webui 的 Cmd 烘进镜像，未声明 command 的服务会被劫持）
+    command: ["python", "-m", "state.writer"]
     environment: *agenthub-env
     volumes:
       - agent-data:/data
@@ -115,12 +119,21 @@ services:
       <<: *agenthub-env
       LAS_WEBUI_HOST: 0.0.0.0
       LAS_WEBUI_PORT: "8080"
+      LAS_GATEWAY_URL: http://agentgateway:8300
+      LAS_GATEWAY_API_KEY: ${LAS_GATEWAY_API_KEY:-}
+      LAS_ADAPTER_TOKEN: ${LAS_ADAPTER_TOKEN:-}
+      # 宿主机工作区（host adapter 产物路径以此绝对路径入库）；
+      # 下方以相同路径只读挂载，artifact-content 端点据此放行读取
+      LAS_WEBUI_ARTIFACT_ROOTS: ${HOME}/AgentWorkspace
     volumes:
       - agent-data:/data
+      - ${HOME}/AgentWorkspace:${HOME}/AgentWorkspace:ro
     ports:
       - "127.0.0.1:18070:8080"  # loopback only，无账号体系
     depends_on:
       state-writer:
+        condition: service_started
+      agentgateway:
         condition: service_started
     restart: unless-stopped
 

@@ -41,7 +41,15 @@ class A2aTask:
     status_state: str            # A2A 状态：submitted/working/input-required/completed/failed/canceled
     objective: str
     idempotency_key: str | None = None
+    context_id: str | None = None
+    session_id: str | None = None
+    adapter_instance_id: str | None = None
+    native_session_id: str | None = None
+    session_capabilities: dict = field(default_factory=dict)
+    context_revision: int = 1
+    history: list[dict] = field(default_factory=list)
     artifacts: list[dict] = field(default_factory=list)
+    pending_interactions: list[dict] = field(default_factory=list)
     error: str | None = None
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
@@ -49,8 +57,20 @@ class A2aTask:
     def to_a2a(self) -> dict:
         return {
             "id": self.id,
+            **({"contextId": self.context_id} if self.context_id else {}),
             "status": {"state": self.status_state, "timestamp": self.updated_at},
             "artifacts": self.artifacts,
+            "history": self.history,
+            "metadata": {
+                "agentHub": {
+                    "sessionId": self.session_id,
+                    "adapterInstanceId": self.adapter_instance_id,
+                    "nativeSessionId": self.native_session_id,
+                    "capabilities": self.session_capabilities,
+                    "contextRevision": self.context_revision,
+                    "pendingInteractions": self.pending_interactions,
+                }
+            },
             **({"error": self.error} if self.error else {}),
         }
 
@@ -74,12 +94,31 @@ class A2aTaskStore:
     def get(self, task_id: str) -> A2aTask | None:
         return self._tasks.get(task_id)
 
+    def get_by_idempotency_key(self, key: str) -> A2aTask | None:
+        task_id = self._by_idempotency_key.get(key)
+        return self._tasks.get(task_id) if task_id else None
+
+    def remember_idempotency_key(self, key: str, task_id: str) -> None:
+        self._by_idempotency_key.setdefault(key, task_id)
+
+    def replace(self, task: A2aTask) -> A2aTask:
+        """Explicit recovery replacement for a terminal in-memory task."""
+        self._tasks[task.id] = task
+        if task.idempotency_key:
+            self._by_idempotency_key[task.idempotency_key] = task.id
+        return task
+
     def update_state(self, task_id: str, state: str, error: str | None = None) -> None:
         t = self._tasks[task_id]
         t.status_state = state
         t.updated_at = now_iso()
         if error is not None:
             t.error = error
+
+    def append_history(self, task_id: str, message: dict) -> None:
+        task = self._tasks[task_id]
+        task.history.append(message)
+        task.updated_at = now_iso()
 
 
 # ---------- 事件发布（best-effort + 暂存） ----------

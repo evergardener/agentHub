@@ -16,7 +16,7 @@ from pathlib import Path
 from common import config as cfg
 from common.ids import idempotency_key as make_idem_key
 from common.memory import MemoryService
-from common.models import TaskStatus
+from common.models import CollaborationPhase, TaskStatus
 from orchestrator import state_store
 from orchestrator.a2a_client import A2aClient
 from state.db import init_db, next_task_id
@@ -36,6 +36,7 @@ class TaskManager:
 
     def create_task(self, objective: str, *, project: str | None = None,
                     parent_id: str | None = None,
+                    collaboration_id: str | None = None,
                     depends_on: list[str] | None = None,
                     priority: str = "normal",
                     timeout_seconds: int = 1800,
@@ -58,7 +59,8 @@ class TaskManager:
             state_store.create_task(
                 self.conn, task_id=task_id, objective=objective,
                 created_by="hermes", project=project, parent_id=parent_id,
-                root_id=root_id, priority=priority, depends_on=depends_on,
+                root_id=root_id, collaboration_id=collaboration_id,
+                priority=priority, depends_on=depends_on,
                 timeout_seconds=timeout_seconds, max_retries=max_retries,
                 idempotency_key=make_idem_key(task_id, 1),
                 status=TaskStatus.CREATED,
@@ -110,14 +112,17 @@ class TaskManager:
         row = state_store.get_task(self.conn, task_id)
         if row is None:
             raise KeyError(f"task not found: {task_id}")
-        state_store.transition_task(self.conn, task_id, TaskStatus.ASSIGNED)
-        from state.db import now_iso
-
-        self.conn.execute(
-            "UPDATE tasks SET assigned_to = ?, updated_at = ?"
-            " WHERE id = ?;", (agent_id, now_iso(), task_id),
-        )
-        self.conn.commit()
+        if row["status"] == TaskStatus.QUEUED.value:
+            needs_assignment = True
+        elif row["status"] not in {
+            TaskStatus.ASSIGNED.value,
+            TaskStatus.WORKING.value,
+            TaskStatus.BLOCKED.value,
+        }:
+            raise state_store.IllegalTransition(
+                task_id, row["status"], TaskStatus.ASSIGNED.value)
+        else:
+            needs_assignment = False
 
         from common import tracing
 
@@ -132,26 +137,324 @@ class TaskManager:
         # 异步 A2A：send 立即返回，60s 足够；结果经事件/轮询对齐（v3 M1）
         client = A2aClient.for_agent(agent_id, endpoint, timeout=60)
 
+        collaboration_id = row["collaboration_id"]
+        binding = None
+        recovery_plan = "new"
+        adapter_session_id = f"S-{uuid.uuid4()}"
+        native_session_id = None
+        context_revision = None
+        turn_sequence = 1
+        if collaboration_id:
+            from orchestrator import collaboration_store
+
+            collaboration = collaboration_store.get_collaboration(
+                self.conn, collaboration_id)
+            if collaboration is None:
+                raise KeyError(
+                    f"collaboration not found: {collaboration_id}")
+            context_revision = collaboration["context_revision"]
+            binding = collaboration_store.get_current_agent_session(
+                self.conn, task_id, agent_id)
+            recovery_plan = collaboration_store.session_recovery_plan(binding)
+            if binding is not None:
+                turn_sequence = binding["last_message_seq"] + 1
+            if binding is not None and recovery_plan == "native_resume":
+                adapter_session_id = (
+                    binding["adapter_session_id"] or adapter_session_id)
+                native_session_id = binding["native_session_id"]
+            elif binding is not None:
+                # A non-native or incomplete binding is replaced with a fresh
+                # adapter session and a durable context snapshot.
+                adapter_session_id = f"S-{uuid.uuid4()}"
+            if recovery_plan == "blocked":
+                raise RuntimeError(
+                    f"safe session recovery unavailable for "
+                    f"{task_id}/{agent_id}")
+
+        if needs_assignment:
+            state_store.transition_task(self.conn, task_id, TaskStatus.ASSIGNED)
+        from state.db import now_iso
+
+        self.conn.execute(
+            "UPDATE tasks SET assigned_to = ?, updated_at = ?"
+            " WHERE id = ?;", (agent_id, now_iso(), task_id),
+        )
+        self.conn.commit()
+
+        def _session_metadata(task: dict) -> tuple[str | None, dict, str | None]:
+            meta = (task.get("metadata") or {}).get("agentHub") or {}
+            return (meta.get("nativeSessionId"),
+                    meta.get("capabilities") or {},
+                    meta.get("adapterInstanceId"))
+
+        def _save_binding(task: dict, *, recovery_state: str):
+            if not collaboration_id:
+                return None
+            from orchestrator import collaboration_store
+
+            discovered_native, capabilities, instance_id = \
+                _session_metadata(task)
+            native = discovered_native or native_session_id
+            if native and capabilities.get("native_resume") is True:
+                resume_capability = "native"
+            elif capabilities.get("durable_session") is False:
+                resume_capability = "snapshot"
+            else:
+                resume_capability = "unknown"
+            return collaboration_store.upsert_agent_session(
+                self.conn, collaboration_id=collaboration_id,
+                task_id=task_id, agent_id=agent_id,
+                adapter_session_id=(
+                    ((task.get("metadata") or {}).get("agentHub") or {})
+                    .get("sessionId") or adapter_session_id),
+                native_session_id=native, capabilities=capabilities,
+                adapter_instance_id=instance_id,
+                resume_capability=resume_capability,
+                recovery_state=recovery_state,
+                context_snapshot={
+                    "objective": row["objective"],
+                    "project": row["project"],
+                    "context_revision": context_revision,
+                })
+
         async def _call() -> None:
+            dispatched = False
             try:
-                await client.send_message(
+                delivery_sequence = (
+                    turn_sequence if collaboration_id else attempt)
+                response = await client.send_message(
                     row["objective"],
-                    idempotency_key=make_idem_key(task_id, attempt),
+                    idempotency_key=make_idem_key(
+                        task_id, delivery_sequence),
                     trace_id=f"trace-{row['root_id']}",
                     task_id=task_id,
+                    session_id=adapter_session_id,
+                    native_session_id=native_session_id,
+                    context_revision=context_revision,
+                    replace_session=binding is not None,
+                    metadata={"recoveryMode": recovery_plan},
                 )
-                # 结果经 NATS → State Writer 落库；此处不直接写状态
-            except Exception:
+                dispatched = True
+                saved_binding = _save_binding(
+                    response,
+                    recovery_state=(
+                        "resumed" if recovery_plan == "native_resume"
+                        else "replaced" if binding is not None else "none"))
+                if saved_binding is not None:
+                    from orchestrator import collaboration_store
+
+                    collaboration_store.advance_agent_session(
+                        self.conn, saved_binding["id"],
+                        message_seq=turn_sequence,
+                        context_revision=context_revision or 1)
+
+                # Native IDs often appear after message/send returns. Poll the
+                # short-lived task view until the ID or a terminal state is
+                # visible; lifecycle status still comes from NATS/StateWriter.
+                for _ in range(150):
+                    meta = ((response.get("metadata") or {})
+                            .get("agentHub") or {})
+                    if meta.get("nativeSessionId"):
+                        break
+                    if response.get("status", {}).get("state") in {
+                        "completed", "failed", "canceled", "rejected"
+                    }:
+                        break
+                    await asyncio.sleep(0.2)
+                    response = await client.get_task(task_id)
+                _save_binding(
+                    response,
+                    recovery_state=(
+                        "resumed" if recovery_plan == "native_resume"
+                        else "replaced" if binding is not None else "none"))
+            except Exception as exc:
+                if collaboration_id:
+                    try:
+                        from orchestrator import collaboration_store
+
+                        current = collaboration_store.get_current_agent_session(
+                            self.conn, task_id, agent_id)
+                        if current is not None:
+                            collaboration_store.update_agent_session_status(
+                                self.conn, current["id"],
+                                status=(current["status"] if dispatched
+                                        else "error"),
+                                recovery_state=("tracking_failed" if dispatched
+                                                else "failed"),
+                                error=str(exc))
+                    except Exception:
+                        pass
                 # A2A 调用本身失败（Adapter 不可达等）：走重试流程
-                try:
-                    state_store.transition_task(
-                        self.conn, task_id, TaskStatus.FAILED,
-                        error_message="a2a call failed",
-                    )
-                except Exception:
-                    pass
+                if not dispatched:
+                    try:
+                        state_store.transition_task(
+                            self.conn, task_id, TaskStatus.FAILED,
+                            error_message="a2a call failed",
+                        )
+                    except Exception:
+                        pass
 
         return asyncio.create_task(_call())
+
+    async def control_agent_session(self, task_id: str, *, agent_id: str,
+                                    endpoint: str, operation: str,
+                                    requested_by: str = "hermes") -> dict:
+        """Apply a remote session control, then persist its authoritative state."""
+        if requested_by not in {"hermes", "user"}:
+            raise PermissionError("only hermes or user may control a session")
+        if operation not in {"pause", "resume", "interrupt", "cancel"}:
+            raise ValueError(f"unsupported session control: {operation}")
+        row = state_store.get_task(self.conn, task_id)
+        if row is None:
+            raise KeyError(f"task not found: {task_id}")
+        from orchestrator import collaboration_store
+
+        binding = collaboration_store.get_current_agent_session(
+            self.conn, task_id, agent_id)
+        if binding is None:
+            raise KeyError(
+                f"agent session not found: {task_id}/{agent_id}")
+        client = A2aClient.for_agent(agent_id, endpoint, timeout=60)
+        result = await client.control_session(task_id, operation)
+        status = {
+            "pause": "paused", "interrupt": "paused",
+            "resume": "active", "cancel": "canceled",
+        }[operation]
+        collaboration_store.update_agent_session_status(
+            self.conn, binding["id"], status=status,
+            recovery_state=operation)
+        if row["collaboration_id"]:
+            phase = {
+                "pause": CollaborationPhase.PAUSED,
+                "interrupt": CollaborationPhase.PAUSED,
+                "resume": CollaborationPhase.EXECUTING,
+                "cancel": CollaborationPhase.CANCELLED,
+            }[operation]
+            collaboration_store.set_phase(
+                self.conn, row["collaboration_id"], phase)
+        state_store.record_event(self.conn, {
+            "event_id": f"session-control-{uuid.uuid4()}",
+            "event_type": f"agent.session.{operation}",
+            "task_id": task_id,
+            "source": requested_by,
+            "payload": {
+                "agent_id": agent_id, "binding_id": binding["id"],
+                "operation": operation,
+            },
+        })
+        if operation == "cancel":
+            self.cancel_task(task_id)
+        return result
+
+    async def respond_agent_interaction(
+        self,
+        interaction_id: str,
+        *,
+        response: dict,
+        requested_by: str,
+        endpoint: str | None = None,
+    ) -> dict:
+        """Authorize and deliver a response to the same native agent turn."""
+        if requested_by not in {"user", "hermes"}:
+            raise PermissionError(
+                "only user or hermes may respond to agent interactions")
+        from orchestrator import collaboration_store
+
+        interaction = collaboration_store.get_session_interaction(
+            self.conn, interaction_id)
+        if interaction is None:
+            raise KeyError(f"interaction not found: {interaction_id}")
+        if interaction["status"] != "pending":
+            raise ValueError(
+                f"interaction already {interaction['status']}")
+        task = state_store.get_task(self.conn, interaction["task_id"])
+        if task is None:
+            raise KeyError(f"task not found: {interaction['task_id']}")
+        agent_id = interaction["agent_id"]
+        if endpoint is None:
+            agent = self.conn.execute(
+                "SELECT endpoint FROM agents WHERE id = ?;",
+                (agent_id,),
+            ).fetchone()
+            endpoint = agent["endpoint"] if agent is not None else None
+        if not endpoint:
+            raise RuntimeError(f"agent endpoint unavailable: {agent_id}")
+
+        outbound = dict(response)
+        if interaction["kind"] == "approval":
+            outcome = outbound.get("outcome")
+            if outcome not in {"allowed-once", "rejected"}:
+                raise ValueError(
+                    "approval outcome must be allowed-once or rejected")
+            try:
+                interaction_payload = json.loads(
+                    interaction["payload_json"] or "{}")
+            except (TypeError, ValueError):
+                interaction_payload = {}
+            if (outcome == "allowed-once"
+                    and interaction_payload.get("inspectable") is not True):
+                raise PermissionError(
+                    "approval details are incomplete; only rejection is safe")
+            action_intent_id = interaction["action_intent_id"]
+            if not action_intent_id:
+                raise RuntimeError(
+                    "approval interaction has no ActionIntent")
+            intent = self.conn.execute(
+                "SELECT * FROM action_intents WHERE id = ?;",
+                (action_intent_id,),
+            ).fetchone()
+            if intent is None:
+                raise KeyError(
+                    f"action intent not found: {action_intent_id}")
+            if intent["status"] in {"awaiting_hermes", "awaiting_user"}:
+                intent = collaboration_store.decide_action_intent(
+                    self.conn, action_intent_id,
+                    approved=outcome == "allowed-once",
+                    decided_by=requested_by,
+                    note="native agent interaction response",
+                )
+            expected = "approved" if outcome == "allowed-once" else "rejected"
+            if intent["status"] != expected:
+                raise PermissionError(
+                    f"ActionIntent is {intent['status']}; expected {expected}")
+            if outcome == "allowed-once":
+                from common.action_receipt import sign_action_receipt
+
+                outbound["authorization"] = sign_action_receipt({
+                    "actionIntentId": action_intent_id,
+                    "status": intent["status"],
+                    "decidedBy": intent["decided_by"],
+                    "decidedAt": intent["decided_at"],
+                    "basedOnRevision": intent["based_on_revision"],
+                    "taskId": interaction["task_id"],
+                    "interactionId": interaction["adapter_interaction_id"],
+                    "nativeRequestId": interaction["native_request_id"],
+                })
+        elif interaction["kind"] != "question":
+            raise ValueError(
+                f"unsupported interaction kind: {interaction['kind']}")
+
+        collaboration_store.resolve_session_interaction(
+            self.conn, interaction_id, status="responding",
+            resolved_by=requested_by, response=outbound)
+        client = A2aClient.for_agent(agent_id, endpoint, timeout=60)
+        try:
+            result = await client.respond_interaction(
+                interaction["task_id"],
+                interaction["adapter_interaction_id"],
+                outbound,
+                responded_by=requested_by,
+            )
+        except Exception as exc:
+            collaboration_store.resolve_session_interaction(
+                self.conn, interaction_id, status="failed",
+                resolved_by=requested_by, response=outbound,
+                error=str(exc))
+            raise
+        collaboration_store.resolve_session_interaction(
+            self.conn, interaction_id, status="resolved",
+            resolved_by=requested_by, response=outbound)
+        return result
 
     # ---------- 等待（event-driven，NATS 不可用时降级 DB 轮询） ----------
 
@@ -258,6 +561,7 @@ class TaskManager:
         if row["status"] != TaskStatus.BLOCKED.value:
             raise state_store.IllegalTransition(
                 task_id, row["status"], TaskStatus.WORKING.value)
+        self._reject_generic_native_interaction_decision(task_id)
         state_store.transition_task(self.conn, task_id, TaskStatus.WORKING,
                                     review={"reviewer": "user",
                                             "verdict": "approved",
@@ -272,8 +576,20 @@ class TaskManager:
         if row["status"] != TaskStatus.BLOCKED.value:
             raise state_store.IllegalTransition(
                 task_id, row["status"], TaskStatus.CANCELLED.value)
+        self._reject_generic_native_interaction_decision(task_id)
         self.cancel_task(task_id)
         return "cancelled"
+
+    def _reject_generic_native_interaction_decision(self, task_id: str) -> None:
+        pending = self.conn.execute(
+            "SELECT id FROM agent_session_interactions WHERE task_id = ?"
+            " AND status IN ('pending', 'responding') LIMIT 1;",
+            (task_id,),
+        ).fetchone()
+        if pending is not None:
+            raise ValueError(
+                "task has a native agent interaction; decide it through "
+                f"/api/interactions/{pending['id']}/respond")
 
     # ---------- 长期记忆（Hermes 唯一写方，§15.3） ----------
 

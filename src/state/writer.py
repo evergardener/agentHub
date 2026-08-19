@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from common.models import TaskStatus
 from orchestrator import state_store
@@ -24,6 +25,7 @@ _EVENT_TO_STATUS = {
     "task.assigned": TaskStatus.ASSIGNED,
     "task.started": TaskStatus.WORKING,
     "task.blocked": TaskStatus.BLOCKED,
+    "task.input_required": TaskStatus.BLOCKED,
     "task.completed": TaskStatus.COMPLETED,
     "task.failed": TaskStatus.FAILED,
     "task.reviewed": TaskStatus.REVIEWED,
@@ -35,6 +37,9 @@ _EVENT_TO_STATUS = {
 class StateWriter:
     def __init__(self, db_path: str | Path):
         self.conn = init_db(db_path)
+        from orchestrator import agent_profile_store
+
+        agent_profile_store.seed_catalog(self.conn)
         self.audit_log: list[dict] = []  # 内存留存，另发 system.audit 事件
 
     def apply(self, event: dict) -> str:
@@ -82,6 +87,9 @@ class StateWriter:
                         status=dst.value, trace_id=event.get("trace_id"),
                         error_message=payload.get("error"),
                     )
+                if event_type == "task.input_required":
+                    self._persist_interactions(
+                        task_id, source, payload)
             elif event_type == "artifact.created" and task_id:
                 state_store.add_artifact(
                     self.conn, task_id=task_id, agent_id=source,
@@ -95,6 +103,9 @@ class StateWriter:
                     endpoint=payload.get("endpoint"),
                     skills=payload.get("skills"),
                 )
+                from orchestrator import agent_profile_store
+
+                agent_profile_store.assign_seed_profile(self.conn, source)
             else:
                 return "ignored"
         except state_store.IllegalTransition as e:
@@ -104,6 +115,97 @@ class StateWriter:
             self._audit(event, f"unknown task: {e}")
             return "rejected"
         return "applied"
+
+    def _persist_interactions(
+        self, task_id: str, agent_id: str, payload: dict
+    ) -> None:
+        interactions = payload.get("interactions") or []
+        if not interactions:
+            return
+        task = state_store.get_task(self.conn, task_id)
+        if task is None or not task["collaboration_id"]:
+            return
+        from orchestrator import collaboration_store
+
+        binding = collaboration_store.get_current_agent_session(
+            self.conn, task_id, agent_id)
+        if binding is None:
+            adapter_session_id = payload.get("session_id")
+            if not adapter_session_id:
+                self._audit(
+                    {"event_id": None,
+                     "event_type": "agent.interaction.requested",
+                     "task_id": task_id, "source": agent_id},
+                    "session interaction has no durable binding metadata")
+                return
+            capabilities = payload.get("capabilities") or {}
+            binding = collaboration_store.upsert_agent_session(
+                self.conn,
+                collaboration_id=task["collaboration_id"],
+                task_id=task_id,
+                agent_id=agent_id,
+                adapter_session_id=adapter_session_id,
+                native_session_id=payload.get("native_session_id"),
+                adapter_instance_id=payload.get("adapter_instance_id"),
+                capabilities=capabilities,
+                resume_capability=(
+                    "native" if payload.get("native_session_id")
+                    and capabilities.get("native_resume") is True
+                    else "unknown"),
+                recovery_state="event_recovered",
+                context_snapshot={"objective": task["objective"]},
+            )
+        collaboration = collaboration_store.get_collaboration(
+            self.conn, task["collaboration_id"])
+        if collaboration is None:
+            return
+        for item in interactions:
+            saved = collaboration_store.upsert_session_interaction(
+                self.conn,
+                collaboration_id=task["collaboration_id"],
+                task_id=task_id,
+                session_binding_id=binding["id"],
+                agent_id=agent_id,
+                interaction=item,
+            )
+            if saved["kind"] != "approval" or saved["action_intent_id"]:
+                continue
+            details = item.get("payload") or {}
+            tool_view = details.get("toolView") or {}
+            target_paths = tool_view.get("paths") or []
+            targets = {
+                "workspace": str(self._workspace_root()),
+                "nativeSessionId": item.get("nativeSessionId"),
+                "callId": details.get("callId"),
+                "paths": target_paths,
+            }
+            if tool_view.get("cwd"):
+                targets["path"] = tool_view["cwd"]
+            intent = collaboration_store.request_action_intent(
+                self.conn,
+                collaboration_id=task["collaboration_id"],
+                task_id=task_id,
+                session_binding_id=binding["id"],
+                requested_by_agent_id=agent_id,
+                operation=f"agent.tool.{details.get('toolName') or 'unknown'}",
+                targets=targets,
+                purpose=details.get("reason") or "native agent tool request",
+                expected_effects={
+                    "toolName": details.get("toolName"),
+                    "approvalId": details.get("approvalId"),
+                    "toolView": tool_view,
+                },
+                rollback_plan=None,
+                based_on_revision=collaboration["context_revision"],
+            )
+            collaboration_store.attach_action_intent(
+                self.conn, saved["id"], intent["id"])
+
+    @staticmethod
+    def _workspace_root() -> Path:
+        from common import config as cfg
+
+        return cfg.workspace()
 
     def _audit(self, event: dict, reason: str) -> None:
         record = {

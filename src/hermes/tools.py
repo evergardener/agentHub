@@ -39,19 +39,19 @@ TOOL_SCHEMAS: list[dict] = [
         }, "required": ["objective"]}}},
     {"type": "function", "function": {
         "name": "delegate_task",
-        "description": "把任务委派给指定 agent（codex/kimi）。"
+        "description": "把任务委派给 Registry 中已注册的指定 agent。"
                        "写操作会先经过审批策略；返回 needs_approval 时"
                        "必须先询问用户，不得重复调用本工具。",
         "parameters": {"type": "object", "properties": {
             "task_id": {"type": "string"},
-            "agent_id": {"type": "string", "enum": ["codex", "kimi"]},
+            "agent_id": {"type": "string"},
         }, "required": ["task_id", "agent_id"]}}},
     {"type": "function", "function": {
         "name": "approve_and_delegate",
         "description": "用户已在对话中批准后调用：记录批准并委派任务。",
         "parameters": {"type": "object", "properties": {
             "task_id": {"type": "string"},
-            "agent_id": {"type": "string", "enum": ["codex", "kimi"]},
+            "agent_id": {"type": "string"},
             "note": {"type": "string", "description": "用户批准备注"},
         }, "required": ["task_id", "agent_id"]}}},
     {"type": "function", "function": {
@@ -109,10 +109,12 @@ TOOL_SCHEMAS: list[dict] = [
 
 class HermesTools:
     def __init__(self, tm: TaskManager, policy: ApprovalPolicy,
-                 agents_path: Path | None = None):
+                 agents_path: Path | None = None,
+                 collaboration_id: str | None = None):
         self.tm = tm
         self.policy = policy
         self.agents = load_agents(agents_path)
+        self.collaboration_id = collaboration_id
 
     def _resolve_agents(self) -> dict:
         """发现视图（v3 M2）：静态 agents.yaml 为种子，DB 中心跳注册的
@@ -129,11 +131,14 @@ class HermesTools:
         now = datetime.now(CST).isoformat(timespec="seconds")
         merged = {k: {**v, "online": None} for k, v in self.agents.items()}
         for r in self.tm.conn.execute(
-                "SELECT id, endpoint, skills_json, lease_expires_at"
+                "SELECT id, endpoint, skills_json, lease_expires_at,"
+                " template_id, profile_id"
                 " FROM agents;").fetchall():
             online = bool(r["lease_expires_at"] and r["lease_expires_at"] > now)
             entry = merged.setdefault(r["id"], {"endpoint": "", "skills": []})
             entry["online"] = online
+            entry["template_id"] = r["template_id"]
+            entry["profile_id"] = r["profile_id"]
             if online:
                 if r["endpoint"]:
                     entry["endpoint"] = r["endpoint"]
@@ -172,6 +177,7 @@ class HermesTools:
                                 project: str | None = None,
                                 depends_on: list[str] | None = None) -> dict:
         task_id = self.tm.create_task(objective, project=project,
+                                      collaboration_id=self.collaboration_id,
                                       depends_on=depends_on)
         return {"task_id": task_id, "status": "created",
                 "risk": self.policy.classify(objective)}
@@ -263,7 +269,9 @@ class HermesTools:
         for k, v in self._resolve_agents().items():
             status = {True: "online", False: "offline", None: "static"}[v["online"]]
             out.append({"id": k, "endpoint": v.get("endpoint", ""),
-                        "skills": v.get("skills", []), "status": status})
+                        "skills": v.get("skills", []), "status": status,
+                        "template_id": v.get("template_id"),
+                        "profile_id": v.get("profile_id")})
         return {"agents": out}
 
     # ---------- 常驻授权 ----------
@@ -282,7 +290,11 @@ class HermesTools:
     # ---------- 内部 ----------
 
     # 运行日志/最终汇报不算"产出文件"
-    _NON_PRODUCT_ARTIFACTS = {"codex.log", "last-message.md"}
+    _NON_PRODUCT_ARTIFACTS = {
+        "codex.log", "codex.jsonl", "kimi.jsonl", "kimi-stderr.log",
+        "dsh-history.json",
+        "last-message.md",
+    }
 
     def _artifacts_summary(self, task_id: str) -> list[dict]:
         from orchestrator import state_store

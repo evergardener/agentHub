@@ -1,6 +1,12 @@
 # local-agent-system
 
-Hermes 主控的本地多 Agent 协作系统。设计依据：[`docs/Hermes_MultiAgent_Collaboration_Design_v2.md`](docs/Hermes_MultiAgent_Collaboration_Design_v2.md)。
+Hermes 主控的本地多 Agent 协作系统。现行产品与开发基线：
+
+- [`docs/AgentHub_Product_Requirements_v1.md`](docs/AgentHub_Product_Requirements_v1.md)
+- [`docs/AgentHub_Target_Architecture_v1.md`](docs/AgentHub_Target_Architecture_v1.md)
+- [`docs/AgentHub_Implementation_Plan_v1.md`](docs/AgentHub_Implementation_Plan_v1.md)
+
+历史完整设计依据：[`docs/Hermes_MultiAgent_Collaboration_Design_v2.md`](docs/Hermes_MultiAgent_Collaboration_Design_v2.md)。
 
 ## 组件边界（速览）
 
@@ -9,7 +15,7 @@ Hermes 主控的本地多 Agent 协作系统。设计依据：[`docs/Hermes_Mult
 | Hermes | Brain / Planner / Orchestrator，唯一长期记忆写方 |
 | A2A | Agent 间业务语义通信 |
 | NATS + JetStream | 事件总线 / 可靠消息（非事实源） |
-| SQLite（WAL） | 系统当前状态，**唯一事实源** |
+| PostgreSQL（默认）/ SQLite（回退） | 系统当前状态，**唯一事实源** |
 | MCP | 工具调用层 |
 | Workspace + Git | 共享工件 / 项目状态 |
 | Memory 接口 + Hindsight | 长期记忆（可替换实现） |
@@ -26,7 +32,7 @@ pytest
 ## Docker 部署（Evolution v3 M2）
 
 控制面一体化镜像（hermes-brain / state-writer / janitor / agentgateway / agentctl）。
-Worker agent（codex / kimi / pi ...）**不打包进镜像**——宿主机自装后经心跳注册，
+Worker agent（codex / kimi / dsh / pi ...）**不打包进镜像**——宿主机自装后经心跳注册，
 没注册就不可用（`agentctl agent list` 查看在线状态）。
 
 ```bash
@@ -45,6 +51,10 @@ docker compose run --rm agentctl chat   # 与 hermes 对话
 # 手动启动（开发调试）
 ./scripts/agent-worker.sh codex
 
+# DSH：先启动其独立 Web Runtime，再启动 AgentHub Adapter
+dsh web --host 127.0.0.1 --port 3080
+./scripts/agent-worker.sh dsh
+
 # 开机/登录自启（launchd，崩溃自动重启）
 ./scripts/install-agent-autostart.sh codex           # 安装并启动
 ./scripts/install-agent-autostart.sh codex uninstall # 移除
@@ -54,6 +64,11 @@ docker compose run --rm agentctl chat   # 与 hermes 对话
 - 调用方鉴权：`LAS_ADAPTER_TOKEN` 非空时，除 `/health` 外一律要求 `X-Agent-Token` 头；
   hermes 直连/经 gateway 都会自动携带（gateway 透传）。生产/常驻部署必须配置。
 - 日志：`~/Library/Logs/agenthub-<agent>.log`
+- DSH Adapter 默认连接 `LAS_DSH_WEB_URL=http://127.0.0.1:3080`。DSH Web
+  仍可独立使用；AgentHub 通过其原生持久 session API 续聊和恢复。新建 Hub
+  session 默认执行 DSH `/permission read-only`，不会继承宽松的 Web 默认值。
+  原生 approval/question 会实时进入 A2A `pendingInteractions`，经持久
+  ActionIntent/用户或 Hermes 决策后由 `/api/respond` 回到同一 DSH turn。
 
 PostgreSQL 状态库（M3，compose 默认启用）：控制面默认使用
 `LAS_DATABASE_URL=postgresql://agenthub:***@postgres:5432/agenthub`；

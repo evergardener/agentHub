@@ -26,6 +26,7 @@ export PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 case "$AGENT" in
   codex) DEFAULT_PORT=8201 ;;
   kimi)  DEFAULT_PORT=8202 ;;
+  dsh)   DEFAULT_PORT=8203 ;;
   *)     DEFAULT_PORT=8290 ;;
 esac
 export LAS_ADAPTER_PORT="${LAS_ADAPTER_PORT:-$DEFAULT_PORT}"

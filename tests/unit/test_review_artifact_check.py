@@ -47,6 +47,18 @@ async def test_veto_when_claimed_file_missing(tools):
     assert state_store.get_task(tm.conn, tid)["status"] == "working"
 
 
+async def test_native_transport_logs_do_not_satisfy_file_claim(tools):
+    tm, t = tools
+    tid = _completed_task(tm, "创建 hello.py 文件")
+    for name in ("codex.jsonl", "kimi.jsonl", "kimi-stderr.log"):
+        _add_artifact(tm, tid, name)
+
+    result = await t.dispatch(
+        "review_task", {"task_id": tid, "approved": True})
+    assert result["status"] == "working"
+    assert "veto" in result
+
+
 async def test_approve_passes_with_produced_file(tools):
     tm, t = tools
     tid = _completed_task(tm, "在任务工作区创建 report.md 文件，写入分析摘要")

@@ -52,6 +52,8 @@ def test_tasks_and_detail(client):
     detail = client.get("/api/tasks/T-1").json()
     assert detail["task"]["objective"] == "重启 nginx"
     assert detail["events"][0]["event_type"] == "task.blocked"
+    assert detail["interactions"] == []
+    assert client.get("/api/interactions").json()["interactions"] == []
     assert client.get("/api/tasks/NOPE").status_code == 404
 
 
@@ -86,3 +88,34 @@ def test_index_page(client):
     r = client.get("/")
     assert r.status_code == 200
     assert "agentHub" in r.text
+    assert "AGENT 交互" in r.text
+
+
+def test_artifact_content(client, tmp_path, monkeypatch):
+    from orchestrator import state_store
+    from state.db import connect
+
+    ws_file = tmp_path / "ws" / "tasks" / "T-2" / "artifacts" / "last.md"
+    ws_file.parent.mkdir(parents=True)
+    ws_file.write_text("# 结果\n正文内容", encoding="utf-8")
+    outside = tmp_path / "secret.txt"
+    outside.write_text("工作区外", encoding="utf-8")
+
+    conn = connect()
+    state_store.add_artifact(conn, task_id="T-2", agent_id="kimi",
+                             name="last.md", path=str(ws_file),
+                             sha256="0" * 64)
+    state_store.add_artifact(conn, task_id="T-2", agent_id="kimi",
+                             name="evil", path=str(outside),
+                             sha256="0" * 64)
+    conn.close()
+
+    ok = client.get("/api/tasks/T-2/artifact-content?name=last.md")
+    assert ok.status_code == 200
+    assert "正文内容" in ok.json()["content"]
+    assert ok.json()["truncated"] is False
+
+    assert client.get(
+        "/api/tasks/T-2/artifact-content?name=evil").status_code == 403
+    assert client.get(
+        "/api/tasks/T-2/artifact-content?name=nope").status_code == 404

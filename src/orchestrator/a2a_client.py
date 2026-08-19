@@ -75,15 +75,28 @@ class A2aClient:
         idempotency_key: str | None = None,
         trace_id: str | None = None,
         task_id: str | None = None,
+        session_id: str | None = None,
+        native_session_id: str | None = None,
+        context_revision: int | None = None,
+        replace_session: bool = False,
+        metadata: dict | None = None,
     ) -> dict:
         """发送任务消息，返回 A2A Task。"""
-        metadata = {}
+        message_metadata = dict(metadata or {})
         if idempotency_key:
-            metadata["idempotencyKey"] = idempotency_key
+            message_metadata["idempotencyKey"] = idempotency_key
         if trace_id:
-            metadata["traceId"] = trace_id
+            message_metadata["traceId"] = trace_id
         if task_id:
-            metadata["taskId"] = task_id
+            message_metadata["taskId"] = task_id
+        if session_id:
+            message_metadata["sessionId"] = session_id
+        if native_session_id:
+            message_metadata["nativeSessionId"] = native_session_id
+        if context_revision is not None:
+            message_metadata["contextRevision"] = context_revision
+        if replace_session:
+            message_metadata["replaceSession"] = True
         payload = {
             "jsonrpc": "2.0",
             "id": str(uuid.uuid4()),
@@ -92,7 +105,7 @@ class A2aClient:
                 "message": {
                     "role": "user",
                     "parts": [{"kind": "text", "text": text}],
-                    "metadata": metadata,
+                    "metadata": message_metadata,
                 }
             },
         }
@@ -106,6 +119,45 @@ class A2aClient:
             "params": {"id": task_id},
         }
         return await self._rpc(payload)
+
+    async def control_session(self, task_id: str, operation: str) -> dict:
+        methods = {
+            "cancel": "tasks/cancel",
+            "pause": "extensions/session/pause",
+            "resume": "extensions/session/resume",
+            "interrupt": "extensions/session/interrupt",
+        }
+        try:
+            method = methods[operation]
+        except KeyError as exc:
+            raise ValueError(f"unsupported session control: {operation}") from exc
+        return await self._rpc({
+            "jsonrpc": "2.0", "id": str(uuid.uuid4()),
+            "method": method, "params": {"id": task_id},
+        })
+
+    async def respond_interaction(
+        self,
+        task_id: str,
+        interaction_id: str,
+        response: dict,
+        *,
+        responded_by: str,
+    ) -> dict:
+        """Respond to one pending native agent approval or question."""
+        if responded_by not in {"user", "hermes"}:
+            raise ValueError("responded_by must be user or hermes")
+        return await self._rpc({
+            "jsonrpc": "2.0",
+            "id": str(uuid.uuid4()),
+            "method": "extensions/session/interactions/respond",
+            "params": {
+                "id": task_id,
+                "interactionId": interaction_id,
+                "response": response,
+                "respondedBy": responded_by,
+            },
+        })
 
     async def send_and_wait(
         self,

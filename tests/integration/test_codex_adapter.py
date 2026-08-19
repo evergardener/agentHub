@@ -60,7 +60,8 @@ async def test_codex_real_task(tmp_path, monkeypatch):
 
     assert task["status"]["state"] == "completed", task.get("error")
     names = {a["name"] for a in task["artifacts"]}
-    assert "codex.log" in names
+    assert "codex.jsonl" in names
+    assert task["metadata"]["agentHub"]["nativeSessionId"], task
     # Codex 真实产出的源码文件应被收集为 workspace/* artifact
     produced = [n for n in names if n.startswith("workspace/")]
     assert produced, f"no workspace files produced: {names}"

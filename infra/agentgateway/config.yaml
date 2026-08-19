@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://agentgateway.dev/schema/config
 # agentgateway 配置 — 设计文档 §3.4 / Phase 5（通信治理层）
 #
-# 拓扑：Hermes → gateway(127.0.0.1:8300) → adapters(127.0.0.1:8201/8202)
+# 拓扑：Hermes → gateway(127.0.0.1:8300) → adapters(127.0.0.1:8201/8202/8203)
 # - 所有端口 loopback only
 # - 统一 API key 认证（strict）：key 经环境变量 $GATEWAY_API_KEY 注入
 #   （env-only，不入库不落盘；M2 起不再使用 macOS Keychain）
@@ -19,7 +19,7 @@ gateways:
         metadata:
           user: hermes
           role: orchestrator
-          agents: codex,kimi   # ACL：允许访问的 agent 列表
+          agents: codex,kimi,dsh   # ACL：允许访问的 agent 列表
 
 routes:
 - name: agent-codex
@@ -61,3 +61,23 @@ routes:
       codes: [502, 503]
   backends:
   - host: 127.0.0.1:8202
+
+- name: agent-dsh
+  matches:
+  - path:
+      pathPrefix: /agents/dsh
+  policies:
+    urlRewrite:
+      path:
+        prefix: /
+    authorization:
+      rules:
+      - require: 'apiKey.agents.split(",").exists(a, a == "dsh")'
+    timeout:
+      requestTimeout: 900s
+    retry:
+      attempts: 2
+      backoff: 500ms
+      codes: [502, 503]
+  backends:
+  - host: 127.0.0.1:8203

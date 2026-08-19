@@ -54,10 +54,11 @@ async def test_kimi_research_task(tmp_path, monkeypatch):
         task = await wait_terminal(c, task["id"])
 
     assert task["status"]["state"] == "completed", task.get("error")
-    artifact = task["artifacts"][0]
-    assert artifact["name"] == "analysis.md"
+    artifacts = {item["name"]: item for item in task["artifacts"]}
+    artifact = artifacts["last-message.md"]
     content = Path(artifact["path"]).read_text(encoding="utf-8")
     assert len(content) > 100  # 真实分析内容
+    assert task["metadata"]["agentHub"]["nativeSessionId"], task
 
 
 @pytest.mark.skipif(

@@ -1,0 +1,791 @@
+"""Persistent collaboration/session/message store (ADR-0004).
+
+Messages are assigned a per-conversation monotonic sequence before delivery.
+User interventions advance context_revision so stale write intents are denied.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from typing import Any
+
+from common.models import CollaborationPhase, InterventionMode
+from state.db import now_iso
+
+
+class ContextConflict(RuntimeError):
+    def __init__(self, collaboration_id: str, expected: int, actual: int):
+        super().__init__(
+            f"stale collaboration context {collaboration_id}: "
+            f"based_on_revision={expected}, current={actual}"
+        )
+        self.collaboration_id = collaboration_id
+        self.expected = expected
+        self.actual = actual
+
+
+def _id(prefix: str) -> str:
+    return f"{prefix}-{uuid.uuid4()}"
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _audit(conn, event_type: str, *, task_id: str | None,
+           source: str, payload: dict) -> None:
+    from orchestrator import state_store
+
+    state_store.record_event(conn, {
+        "event_id": _id("E"),
+        "event_type": event_type,
+        "task_id": task_id,
+        "source": source,
+        "payload": payload,
+    }, commit=False)
+
+
+def create_conversation(conn, *, title: str | None = None,
+                        project: str | None = None,
+                        created_by: str = "user",
+                        conversation_id: str | None = None) -> str:
+    conversation_id = conversation_id or _id("C")
+    ts = now_iso()
+    conn.execute(
+        "INSERT INTO conversations (id, title, project, status, created_by,"
+        " next_message_seq, created_at, updated_at)"
+        " VALUES (?,?,?,'active',?,0,?,?);",
+        (conversation_id, title, project, created_by, ts, ts),
+    )
+    conn.commit()
+    return conversation_id
+
+
+def create_collaboration(conn, *, conversation_id: str, objective: str,
+                         controller: str = "hermes",
+                         collaboration_id: str | None = None) -> str:
+    if get_conversation(conn, conversation_id) is None:
+        raise KeyError(f"conversation not found: {conversation_id}")
+    collaboration_id = collaboration_id or _id("COL")
+    ts = now_iso()
+    conn.execute(
+        "INSERT INTO collaborations (id, conversation_id, objective, status,"
+        " phase, controller, context_revision, created_at, updated_at)"
+        " VALUES (?,?,?,'active',?,?,1,?,?);",
+        (collaboration_id, conversation_id, objective,
+         CollaborationPhase.PLANNING.value, controller, ts, ts),
+    )
+    conn.commit()
+    return collaboration_id
+
+
+def get_conversation(conn, conversation_id: str):
+    return conn.execute(
+        "SELECT * FROM conversations WHERE id = ?;", (conversation_id,)
+    ).fetchone()
+
+
+def get_collaboration(conn, collaboration_id: str):
+    return conn.execute(
+        "SELECT * FROM collaborations WHERE id = ?;", (collaboration_id,)
+    ).fetchone()
+
+
+def set_phase(conn, collaboration_id: str, phase: CollaborationPhase,
+              *, controller: str | None = None) -> None:
+    extra = ", controller = ?" if controller else ""
+    params: list[Any] = [phase.value, now_iso()]
+    if controller:
+        params.append(controller)
+    params.append(collaboration_id)
+    cur = conn.execute(
+        f"UPDATE collaborations SET phase = ?, updated_at = ?{extra}"
+        " WHERE id = ?;", params,
+    )
+    conn.commit()
+    if cur.rowcount == 0:
+        raise KeyError(f"collaboration not found: {collaboration_id}")
+
+
+def _current_revision(conn, collaboration_id: str) -> tuple[str, int]:
+    row = get_collaboration(conn, collaboration_id)
+    if row is None:
+        raise KeyError(f"collaboration not found: {collaboration_id}")
+    return row["conversation_id"], row["context_revision"]
+
+
+def _next_message_sequence(conn, conversation_id: str) -> int:
+    row = conn.execute(
+        "UPDATE conversations SET next_message_seq = next_message_seq + 1,"
+        " updated_at = ? WHERE id = ? RETURNING next_message_seq;",
+        (now_iso(), conversation_id),
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"conversation not found: {conversation_id}")
+    return row[0]
+
+
+def _insert_message(conn, *, conversation_id: str,
+                    collaboration_id: str | None, sender_type: str,
+                    sender_id: str, content: dict | list | str,
+                    sequence: int, message_id: str,
+                    task_id: str | None = None,
+                    agent_id: str | None = None,
+                    recipient_type: str | None = None,
+                    recipient_id: str | None = None,
+                    message_type: str = "message",
+                    parent_message_id: str | None = None,
+                    based_on_revision: int | None = None,
+                    idempotency_key: str | None = None,
+                    visibility: str = "participants") -> None:
+    conn.execute(
+        "INSERT INTO conversation_messages (id, conversation_id,"
+        " collaboration_id, task_id, agent_id, sender_type, sender_id,"
+        " recipient_type, recipient_id, message_type, content_json,"
+        " parent_message_id, based_on_revision, sequence, delivery_status,"
+        " visibility, redaction_status, idempotency_key, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'persisted',?,'none',?,?);",
+        (message_id, conversation_id, collaboration_id, task_id, agent_id,
+         sender_type, sender_id, recipient_type, recipient_id, message_type,
+         _json(content), parent_message_id, based_on_revision, sequence,
+         visibility, idempotency_key, now_iso()),
+    )
+
+
+def append_message(conn, *, conversation_id: str,
+                   sender_type: str, sender_id: str,
+                   content: dict | list | str,
+                   collaboration_id: str | None = None,
+                   task_id: str | None = None,
+                   agent_id: str | None = None,
+                   recipient_type: str | None = None,
+                   recipient_id: str | None = None,
+                   message_type: str = "message",
+                   parent_message_id: str | None = None,
+                   based_on_revision: int | None = None,
+                   idempotency_key: str | None = None,
+                   visibility: str = "participants"):
+    if idempotency_key:
+        existing = conn.execute(
+            "SELECT * FROM conversation_messages WHERE idempotency_key = ?;",
+            (idempotency_key,),
+        ).fetchone()
+        if existing is not None:
+            return existing
+
+    if collaboration_id:
+        actual_conversation, current = _current_revision(conn, collaboration_id)
+        if actual_conversation != conversation_id:
+            raise ValueError("collaboration does not belong to conversation")
+        if based_on_revision is not None and based_on_revision != current:
+            raise ContextConflict(collaboration_id, based_on_revision, current)
+
+    message_id = _id("M")
+    try:
+        seq = _next_message_sequence(conn, conversation_id)
+        _insert_message(
+            conn, conversation_id=conversation_id,
+            collaboration_id=collaboration_id, task_id=task_id,
+            agent_id=agent_id, sender_type=sender_type, sender_id=sender_id,
+            recipient_type=recipient_type, recipient_id=recipient_id,
+            content=content, sequence=seq, message_id=message_id,
+            message_type=message_type, parent_message_id=parent_message_id,
+            based_on_revision=based_on_revision,
+            idempotency_key=idempotency_key, visibility=visibility,
+        )
+        _audit(
+            conn, "conversation.message.created", task_id=task_id,
+            source=sender_id,
+            payload={
+                "message_id": message_id,
+                "conversation_id": conversation_id,
+                "collaboration_id": collaboration_id,
+                "sequence": seq,
+                "message_type": message_type,
+                "based_on_revision": based_on_revision,
+                "visibility": visibility,
+            })
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        if idempotency_key:
+            existing = conn.execute(
+                "SELECT * FROM conversation_messages"
+                " WHERE idempotency_key = ?;", (idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                return existing
+        raise
+    return conn.execute(
+        "SELECT * FROM conversation_messages WHERE id = ?;", (message_id,)
+    ).fetchone()
+
+
+def record_user_intervention(conn, *, collaboration_id: str,
+                             user_id: str, mode: str,
+                             content: dict | list | str,
+                             task_id: str | None = None,
+                             agent_id: str | None = None,
+                             idempotency_key: str | None = None):
+    """Persist an intervention and atomically advance context revision."""
+    try:
+        intervention_mode = InterventionMode(mode)
+    except ValueError as exc:
+        allowed = ", ".join(item.value for item in InterventionMode)
+        raise ValueError(
+            f"unsupported intervention mode: {mode}; allowed: {allowed}"
+        ) from exc
+    if idempotency_key:
+        existing = conn.execute(
+            "SELECT * FROM conversation_messages WHERE idempotency_key = ?;",
+            (idempotency_key,),
+        ).fetchone()
+        if existing is not None:
+            return existing
+
+    conversation_id, _ = _current_revision(conn, collaboration_id)
+    phase = (CollaborationPhase.PAUSED.value
+             if intervention_mode in {
+                 InterventionMode.PAUSE,
+                 InterventionMode.INTERRUPT,
+                 InterventionMode.CANCEL,
+             }
+             else CollaborationPhase.NEEDS_REPLAN.value)
+    message_id = _id("M")
+    try:
+        rev_row = conn.execute(
+            "UPDATE collaborations SET context_revision = context_revision + 1,"
+            " phase = ?, controller = 'user', updated_at = ? WHERE id = ?"
+            " RETURNING context_revision;",
+            (phase, now_iso(), collaboration_id),
+        ).fetchone()
+        if rev_row is None:
+            raise KeyError(f"collaboration not found: {collaboration_id}")
+        revision = rev_row[0]
+        seq = _next_message_sequence(conn, conversation_id)
+        _insert_message(
+            conn, conversation_id=conversation_id,
+            collaboration_id=collaboration_id, task_id=task_id,
+            agent_id=agent_id, sender_type="user", sender_id=user_id,
+            recipient_type="session" if agent_id else "hermes",
+            recipient_id=agent_id or "hermes", content=content,
+            sequence=seq, message_id=message_id,
+            message_type=f"user.{intervention_mode.value}",
+            based_on_revision=revision,
+            idempotency_key=idempotency_key,
+        )
+        _audit(
+            conn, "conversation.message.created", task_id=task_id,
+            source=user_id,
+            payload={
+                "message_id": message_id,
+                "conversation_id": conversation_id,
+                "collaboration_id": collaboration_id,
+                "sequence": seq,
+                "message_type": f"user.{intervention_mode.value}",
+                "based_on_revision": revision,
+                "visibility": "participants",
+            })
+        _audit(
+            conn, "user.intervened", task_id=task_id, source=user_id,
+            payload={
+                "message_id": message_id,
+                "collaboration_id": collaboration_id,
+                "agent_id": agent_id,
+                "mode": intervention_mode.value,
+                "context_revision": revision,
+                "phase": phase,
+            })
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return conn.execute(
+        "SELECT * FROM conversation_messages WHERE id = ?;", (message_id,)
+    ).fetchone()
+
+
+def list_messages(conn, conversation_id: str, *, after: int = 0,
+                  limit: int = 200):
+    return conn.execute(
+        "SELECT * FROM conversation_messages WHERE conversation_id = ?"
+        " AND sequence > ? ORDER BY sequence LIMIT ?;",
+        (conversation_id, after, limit),
+    ).fetchall()
+
+
+def list_collaboration_messages(conn, collaboration_id: str, *,
+                                after: int = 0, limit: int = 1000):
+    return conn.execute(
+        "SELECT * FROM conversation_messages WHERE collaboration_id = ?"
+        " AND sequence > ? ORDER BY sequence LIMIT ?;",
+        (collaboration_id, after, limit),
+    ).fetchall()
+
+
+def bind_agent_session(conn, *, collaboration_id: str, task_id: str,
+                       agent_id: str, native_session_id: str | None = None,
+                       adapter_session_id: str | None = None,
+                       adapter_instance_id: str | None = None,
+                       resume_capability: str = "unknown",
+                       capabilities: dict | None = None,
+                       recovery_state: str = "none",
+                       replacement_of_id: str | None = None,
+                       context_snapshot: dict | None = None):
+    """Create the current binding, retaining replaced bindings for audit."""
+    _, context_revision = _current_revision(conn, collaboration_id)
+    binding_id = _id("S")
+    ts = now_iso()
+    try:
+        conn.execute(
+            "UPDATE agent_session_bindings SET is_current = 0, status ="
+            " 'replaced', last_active_at = ? WHERE task_id = ? AND agent_id = ?"
+            " AND is_current = 1;", (ts, task_id, agent_id),
+        )
+        conn.execute(
+            "INSERT INTO agent_session_bindings (id, collaboration_id, task_id,"
+            " agent_id, native_session_id, adapter_session_id,"
+            " adapter_instance_id, status,"
+            " resume_capability, context_revision, last_message_seq,"
+            " context_snapshot_json, capabilities_json, recovery_state,"
+            " replacement_of_id,"
+            " is_current, created_at, last_active_at)"
+            " VALUES (?,?,?,?,?,?,?,'active',?,?,0,?,?,?,?,1,?,?);",
+            (binding_id, collaboration_id, task_id, agent_id,
+             native_session_id, adapter_session_id, adapter_instance_id,
+             resume_capability,
+             context_revision,
+             _json(context_snapshot) if context_snapshot is not None else None,
+             _json(capabilities or {}), recovery_state, replacement_of_id,
+             ts, ts),
+        )
+        _audit(
+            conn, "agent.session.bound", task_id=task_id, source="hermes",
+            payload={
+                "binding_id": binding_id,
+                "collaboration_id": collaboration_id,
+                "agent_id": agent_id,
+                "adapter_session_id": adapter_session_id,
+                "native_session_id": native_session_id,
+                "resume_capability": resume_capability,
+                "recovery_state": recovery_state,
+                "replacement_of_id": replacement_of_id,
+            })
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return get_current_agent_session(conn, task_id, agent_id)
+
+
+def upsert_agent_session(conn, *, collaboration_id: str, task_id: str,
+                         agent_id: str, adapter_session_id: str,
+                         native_session_id: str | None = None,
+                         capabilities: dict | None = None,
+                         resume_capability: str = "unknown",
+                         recovery_state: str = "none",
+                         context_snapshot: dict | None = None,
+                         adapter_instance_id: str | None = None):
+    """Idempotently refresh the current binding or create a replacement."""
+    current = get_current_agent_session(conn, task_id, agent_id)
+    if (current is not None
+            and current["adapter_session_id"] == adapter_session_id):
+        try:
+            resolved_native = native_session_id or current["native_session_id"]
+            conn.execute(
+                "UPDATE agent_session_bindings SET native_session_id = ?,"
+                " adapter_instance_id = ?, resume_capability = ?,"
+                " capabilities_json = ?, recovery_state = ?, status = 'active',"
+                " context_revision = ?, context_snapshot_json = COALESCE(?,"
+                " context_snapshot_json), last_error = NULL, last_active_at = ?"
+                " WHERE id = ?;",
+                (resolved_native,
+                 adapter_instance_id or current["adapter_instance_id"],
+                 resume_capability, _json(capabilities or {}), recovery_state,
+                 _current_revision(conn, collaboration_id)[1],
+                 (_json(context_snapshot)
+                  if context_snapshot is not None else None),
+                 now_iso(), current["id"]),
+            )
+            if (resolved_native != current["native_session_id"]
+                    or recovery_state != current["recovery_state"]):
+                _audit(
+                    conn, "agent.session.refreshed", task_id=task_id,
+                    source="hermes",
+                    payload={
+                        "binding_id": current["id"],
+                        "agent_id": agent_id,
+                        "adapter_session_id": adapter_session_id,
+                        "native_session_id": resolved_native,
+                        "recovery_state": recovery_state,
+                    })
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return get_current_agent_session(conn, task_id, agent_id)
+
+    return bind_agent_session(
+        conn, collaboration_id=collaboration_id, task_id=task_id,
+        agent_id=agent_id, adapter_session_id=adapter_session_id,
+        native_session_id=native_session_id,
+        adapter_instance_id=adapter_instance_id,
+        resume_capability=resume_capability, capabilities=capabilities,
+        recovery_state=recovery_state,
+        replacement_of_id=current["id"] if current is not None else None,
+        context_snapshot=context_snapshot)
+
+
+def update_agent_session_status(conn, binding_id: str, *, status: str,
+                                recovery_state: str | None = None,
+                                error: str | None = None) -> None:
+    assignments = ["status = ?", "last_error = ?", "last_active_at = ?"]
+    params: list[Any] = [status, error, now_iso()]
+    if recovery_state is not None:
+        assignments.append("recovery_state = ?")
+        params.append(recovery_state)
+    params.append(binding_id)
+    cur = conn.execute(
+        f"UPDATE agent_session_bindings SET {', '.join(assignments)}"
+        " WHERE id = ?;", params)
+    conn.commit()
+    if cur.rowcount != 1:
+        raise KeyError(f"agent session binding not found: {binding_id}")
+
+
+def advance_agent_session(conn, binding_id: str, *, message_seq: int,
+                          context_revision: int) -> None:
+    """Acknowledge a delivered turn without allowing counters to move back."""
+    cur = conn.execute(
+        "UPDATE agent_session_bindings SET last_message_seq = CASE"
+        " WHEN last_message_seq < ? THEN ? ELSE last_message_seq END,"
+        " context_revision = CASE WHEN context_revision < ? THEN ?"
+        " ELSE context_revision END, last_active_at = ? WHERE id = ?;",
+        (message_seq, message_seq, context_revision, context_revision,
+         now_iso(), binding_id),
+    )
+    conn.commit()
+    if cur.rowcount != 1:
+        raise KeyError(f"agent session binding not found: {binding_id}")
+
+
+def session_recovery_plan(binding) -> str:
+    """Return native_resume, replacement, or blocked without side effects."""
+    if binding is None:
+        return "new"
+    if binding["status"] == "canceled":
+        return "blocked"
+    try:
+        capabilities = json.loads(binding["capabilities_json"] or "{}")
+    except (TypeError, ValueError):
+        capabilities = {}
+    if (binding["native_session_id"]
+            and capabilities.get("native_resume") is True):
+        return "native_resume"
+    if binding["context_snapshot_json"]:
+        return "replacement"
+    return "blocked"
+
+
+def get_current_agent_session(conn, task_id: str, agent_id: str):
+    return conn.execute(
+        "SELECT * FROM agent_session_bindings WHERE task_id = ? AND agent_id = ?"
+        " AND is_current = 1;", (task_id, agent_id),
+    ).fetchone()
+
+
+def upsert_session_interaction(
+    conn,
+    *,
+    collaboration_id: str,
+    task_id: str,
+    session_binding_id: str,
+    agent_id: str,
+    interaction: dict,
+):
+    """Persist an adapter interaction once and preserve its decision state."""
+    adapter_id = interaction.get("interactionId")
+    kind = interaction.get("kind")
+    if not isinstance(adapter_id, str) or not adapter_id:
+        raise ValueError("interactionId is required")
+    if kind not in {"approval", "question"}:
+        raise ValueError(f"unsupported interaction kind: {kind}")
+    existing = conn.execute(
+        "SELECT * FROM agent_session_interactions"
+        " WHERE session_binding_id = ? AND adapter_interaction_id = ?;",
+        (session_binding_id, adapter_id),
+    ).fetchone()
+    if existing is not None:
+        return existing
+
+    interaction_id = _id("INT")
+    payload = interaction.get("payload") or {}
+    try:
+        conn.execute(
+            "INSERT INTO agent_session_interactions (id, collaboration_id,"
+            " task_id, session_binding_id, agent_id, adapter_interaction_id,"
+            " native_request_id, kind, payload_json, status, requested_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,'pending',?);",
+            (interaction_id, collaboration_id, task_id, session_binding_id,
+             agent_id, adapter_id, interaction.get("nativeRequestId"), kind,
+             _json(payload), now_iso()),
+        )
+        _audit(
+            conn, "agent.interaction.requested", task_id=task_id,
+            source=agent_id,
+            payload={
+                "interaction_id": interaction_id,
+                "adapter_interaction_id": adapter_id,
+                "binding_id": session_binding_id,
+                "kind": kind,
+                "native_request_id": interaction.get("nativeRequestId"),
+            },
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return get_session_interaction(conn, interaction_id)
+
+
+def get_session_interaction(conn, interaction_id: str):
+    return conn.execute(
+        "SELECT * FROM agent_session_interactions WHERE id = ?;",
+        (interaction_id,),
+    ).fetchone()
+
+
+def list_session_interactions(conn, *, task_id: str | None = None,
+                              status: str | None = None):
+    clauses: list[str] = []
+    params: list[Any] = []
+    if task_id:
+        clauses.append("task_id = ?")
+        params.append(task_id)
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    return conn.execute(
+        "SELECT * FROM agent_session_interactions" + where
+        + " ORDER BY requested_at, id;", params,
+    ).fetchall()
+
+
+def attach_action_intent(conn, interaction_id: str,
+                         action_intent_id: str) -> None:
+    cur = conn.execute(
+        "UPDATE agent_session_interactions SET action_intent_id = ?"
+        " WHERE id = ? AND action_intent_id IS NULL;",
+        (action_intent_id, interaction_id),
+    )
+    conn.commit()
+    if cur.rowcount != 1:
+        raise ValueError(
+            f"interaction already linked or missing: {interaction_id}")
+
+
+def resolve_session_interaction(
+    conn,
+    interaction_id: str,
+    *,
+    status: str,
+    resolved_by: str,
+    response: dict,
+    error: str | None = None,
+):
+    if status not in {"responding", "resolved", "failed"}:
+        raise ValueError(f"unsupported interaction status: {status}")
+    if resolved_by not in {"user", "hermes"}:
+        raise PermissionError("only user or hermes may resolve interactions")
+    row = get_session_interaction(conn, interaction_id)
+    if row is None:
+        raise KeyError(f"interaction not found: {interaction_id}")
+    if row["status"] not in {"pending", "responding"}:
+        raise ValueError(f"interaction already {row['status']}")
+    resolved_at = now_iso() if status in {"resolved", "failed"} else None
+    try:
+        conn.execute(
+            "UPDATE agent_session_interactions SET status = ?,"
+            " resolved_by = ?, response_json = ?, resolved_at = ?,"
+            " last_error = ? WHERE id = ?;",
+            (status, resolved_by, _json(response), resolved_at, error,
+             interaction_id),
+        )
+        _audit(
+            conn, f"agent.interaction.{status}", task_id=row["task_id"],
+            source=resolved_by,
+            payload={"interaction_id": interaction_id,
+                     "kind": row["kind"], "status": status,
+                     "error": error},
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return get_session_interaction(conn, interaction_id)
+
+
+def create_action_intent(conn, *, collaboration_id: str, task_id: str,
+                         requested_by_agent_id: str, operation: str,
+                         targets: list | dict, purpose: str,
+                         expected_effects: list | dict,
+                         based_on_revision: int,
+                         risk: str = "unknown",
+                         rollback_plan: str | None = None,
+                         session_binding_id: str | None = None):
+    _, current = _current_revision(conn, collaboration_id)
+    if based_on_revision != current:
+        raise ContextConflict(collaboration_id, based_on_revision, current)
+    intent_id = _id("AI")
+    try:
+        conn.execute(
+            "INSERT INTO action_intents (id, collaboration_id, task_id,"
+            " session_binding_id, requested_by_agent_id, operation,"
+            " targets_json, purpose, expected_effects_json, rollback_plan,"
+            " risk, based_on_revision, status, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?);",
+            (intent_id, collaboration_id, task_id, session_binding_id,
+             requested_by_agent_id, operation, _json(targets), purpose,
+             _json(expected_effects), rollback_plan, risk, based_on_revision,
+             now_iso()),
+        )
+        _audit(
+            conn, "action.intent.created", task_id=task_id,
+            source=requested_by_agent_id,
+            payload={
+                "intent_id": intent_id,
+                "collaboration_id": collaboration_id,
+                "operation": operation,
+                "risk": risk,
+                "based_on_revision": based_on_revision,
+            })
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return conn.execute(
+        "SELECT * FROM action_intents WHERE id = ?;", (intent_id,)
+    ).fetchone()
+
+
+def route_action_intent(conn, intent_id: str, *, policy=None):
+    """Apply structured policy and route to auto/Hermes/user authority."""
+    from common import config as cfg
+    from hermes.action_policy import ActionPolicy
+
+    row = conn.execute(
+        "SELECT * FROM action_intents WHERE id = ?;", (intent_id,)
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"action intent not found: {intent_id}")
+    if row["status"] != "pending":
+        raise ValueError(f"action intent already routed: {row['status']}")
+    policy = policy or ActionPolicy(workspace=cfg.workspace())
+    agent = conn.execute(
+        "SELECT profile_id FROM agents WHERE id = ?;",
+        (row["requested_by_agent_id"],),
+    ).fetchone()
+    profile_id = agent["profile_id"] if agent is not None else None
+    profile = None
+    if profile_id:
+        from orchestrator import agent_profile_store
+
+        profile = agent_profile_store.profile_policy(conn, profile_id)
+    decision = policy.evaluate(
+        operation=row["operation"], targets=json.loads(row["targets_json"]),
+        rollback_plan=row["rollback_plan"], profile=profile)
+    status = {
+        "auto": "approved",
+        "hermes": "awaiting_hermes",
+        "user": "awaiting_user",
+    }[decision.route]
+    decided_by = "policy" if decision.route == "auto" else None
+    decided_at = now_iso() if decided_by else None
+    try:
+        conn.execute(
+            "UPDATE action_intents SET status = ?, risk = ?, policy_route = ?,"
+            " policy_reason = ?, decided_by = ?, decided_at = ?"
+            " WHERE id = ? AND status = 'pending';",
+            (status, decision.risk, decision.route, decision.reason,
+             decided_by, decided_at, intent_id),
+        )
+        if decision.route != "auto":
+            conn.execute(
+                "UPDATE collaborations SET phase = ?, updated_at = ?"
+                " WHERE id = ?;",
+                (CollaborationPhase.AWAITING_APPROVAL.value, now_iso(),
+                 row["collaboration_id"]),
+            )
+        _audit(
+            conn, "action.intent.routed", task_id=row["task_id"],
+            source="policy",
+            payload={
+                "intent_id": intent_id,
+                "collaboration_id": row["collaboration_id"],
+                "operation": row["operation"],
+                "route": decision.route,
+                "risk": decision.risk,
+                "status": status,
+                "reason": decision.reason,
+                "profile_id": profile_id,
+            })
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return conn.execute(
+        "SELECT * FROM action_intents WHERE id = ?;", (intent_id,)
+    ).fetchone()
+
+
+def request_action_intent(conn, *, policy=None, **kwargs):
+    """Create, audit, and immediately route one agent ActionIntent."""
+    intent = create_action_intent(conn, **kwargs)
+    return route_action_intent(conn, intent["id"], policy=policy)
+
+
+def decide_action_intent(conn, intent_id: str, *, approved: bool,
+                         decided_by: str, note: str = ""):
+    if decided_by not in {"user", "hermes"}:
+        raise PermissionError("only user or hermes may decide action intents")
+    row = conn.execute(
+        "SELECT * FROM action_intents WHERE id = ?;", (intent_id,)
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"action intent not found: {intent_id}")
+    if row["status"] not in {"awaiting_hermes", "awaiting_user"}:
+        raise ValueError(f"action intent already decided: {row['status']}")
+    if row["status"] == "awaiting_user" and decided_by != "user":
+        raise PermissionError("this action intent requires user approval")
+    _, current = _current_revision(conn, row["collaboration_id"])
+    if approved and row["based_on_revision"] != current:
+        raise ContextConflict(
+            row["collaboration_id"], row["based_on_revision"], current)
+    status = "approved" if approved else "rejected"
+    previous_status = row["status"]
+    try:
+        conn.execute(
+            "UPDATE action_intents SET status = ?, decided_by = ?,"
+            " decision_note = ?, decided_at = ? WHERE id = ? AND status = ?;",
+            (status, decided_by, note, now_iso(), intent_id, previous_status),
+        )
+        _audit(
+            conn, f"action.intent.{status}", task_id=row["task_id"],
+            source=decided_by,
+            payload={
+                "intent_id": intent_id,
+                "collaboration_id": row["collaboration_id"],
+                "operation": row["operation"],
+                "decided_by": decided_by,
+                "note": note,
+                "based_on_revision": row["based_on_revision"],
+            })
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return conn.execute(
+        "SELECT * FROM action_intents WHERE id = ?;", (intent_id,)
+    ).fetchone()

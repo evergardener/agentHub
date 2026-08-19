@@ -6,3 +6,6 @@ agents:
   kimi:
     endpoint: http://127.0.0.1:8202
     skills: [research, long_context, analysis]
+  dsh:
+    endpoint: http://127.0.0.1:8203
+    skills: [coding, code_review, analysis, agent_collaboration]

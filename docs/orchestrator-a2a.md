@@ -42,12 +42,13 @@ POST /a2a                           JSON-RPC 2.0
 
 ```json
 {"<token-a>": {"peer": "qishuo-codex", "worker": "codex"},
- "<token-b>": {"peer": "qishuo-kimi",  "worker": "kimi"}}
+ "<token-b>": {"peer": "qishuo-kimi",  "worker": "kimi"},
+ "<token-c>": {"peer": "qishuo-dsh",   "worker": "dsh"}}
 ```
 
 - 服务端依据认证 identity 固定选择 worker，**不信任请求体自称的
   `metadata.agent`**；body 中的 `metadata.agent` 与映射冲突 → -32602 拒绝。
-- worker 白名单见 `common/config.py ALLOWED_PEER_WORKERS`（当前 codex/kimi，
+- worker 白名单见 `common/config.py ALLOWED_PEER_WORKERS`（当前 codex/kimi/dsh，
   新增 worker 需显式放行）。
 - 映射 worker offline/未知 → 稳定 -32602 错误，**不回退**到其他 worker。
 - 配置畸形（非法 JSON / 非法项）启动即失败，不静默降级。

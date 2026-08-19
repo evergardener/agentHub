@@ -51,10 +51,23 @@ def test_pg_migrations_and_core_flow(pg_url):
 
     conn = init_db(pg_url)
 
-    # 迁移：三版全部应用，events.seq / approval_grants 存在
+    # 迁移：六版全部应用，含 Profile 与 Session recovery metadata
     versions = [r[0] for r in conn.execute(
         "SELECT version FROM schema_migrations ORDER BY version;").fetchall()]
-    assert versions == [1, 2, 3]
+    assert versions == [1, 2, 3, 4, 5, 6]
+
+    from orchestrator import collaboration_store
+
+    conversation_id = collaboration_store.create_conversation(
+        conn, title="pg persistence")
+    collaboration_id = collaboration_store.create_collaboration(
+        conn, conversation_id=conversation_id, objective="verify pg migration")
+    message = collaboration_store.append_message(
+        conn, conversation_id=conversation_id,
+        collaboration_id=collaboration_id, sender_type="hermes",
+        sender_id="hermes", content={"text": "hello"},
+        based_on_revision=1)
+    assert message["sequence"] == 1
 
     # 任务 ID 计数器（ON CONFLICT ... RETURNING 方言分支）
     t1 = next_task_id(conn)

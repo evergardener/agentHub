@@ -19,6 +19,46 @@ class TaskStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 
+class CollaborationPhase(str, enum.Enum):
+    """User-visible phase layered above the existing execution state machine."""
+
+    PLANNING = "planning"
+    CLARIFYING = "clarifying"
+    READY = "ready"
+    AWAITING_APPROVAL = "awaiting_approval"
+    EXECUTING = "executing"
+    REVIEWING = "reviewing"
+    REWORK = "rework"
+    ACCEPTED = "accepted"
+    PAUSED = "paused"
+    NEEDS_REPLAN = "needs_replan"
+    CANCELLED = "cancelled"
+
+
+class SenderType(str, enum.Enum):
+    USER = "user"
+    HERMES = "hermes"
+    AGENT = "agent"
+    SYSTEM = "system"
+
+
+class ActionRisk(str, enum.Enum):
+    READ = "read"
+    WRITE = "write"
+    CRITICAL = "critical"
+    UNKNOWN = "unknown"
+
+
+class InterventionMode(str, enum.Enum):
+    COMMENT = "comment"
+    STEER = "steer"
+    PAUSE = "pause"
+    INTERRUPT = "interrupt"
+    CANCEL = "cancel"
+    TAKEOVER = "takeover"
+    RETURN_TO_HERMES = "return_to_hermes"
+
+
 TERMINAL_STATES: frozenset[TaskStatus] = frozenset(
     {TaskStatus.ACCEPTED, TaskStatus.CANCELLED}
 )

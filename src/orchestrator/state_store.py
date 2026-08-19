@@ -32,6 +32,7 @@ class DuplicateEvent(RuntimeError):
 def create_task(conn: sqlite3.Connection, *, task_id: str, objective: str,
                 created_by: str, project: str | None = None,
                 parent_id: str | None = None, root_id: str | None = None,
+                collaboration_id: str | None = None,
                 priority: str = "normal", assigned_to: str | None = None,
                 depends_on: list[str] | None = None,
                 timeout_seconds: int | None = None,
@@ -39,11 +40,13 @@ def create_task(conn: sqlite3.Connection, *, task_id: str, objective: str,
                 status: str = TaskStatus.QUEUED) -> None:
     ts = now_iso()
     conn.execute(
-        "INSERT INTO tasks (id, parent_id, root_id, project, created_by,"
+        "INSERT INTO tasks (id, parent_id, root_id, collaboration_id,"
+        " project, created_by,"
         " assigned_to, status, priority, objective, depends_on_json,"
         " timeout_seconds, max_retries, idempotency_key, created_at, updated_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
-        (task_id, parent_id, root_id or task_id, project, created_by,
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
+        (task_id, parent_id, root_id or task_id, collaboration_id,
+         project, created_by,
          assigned_to, status, priority, objective,
          json.dumps(depends_on or []), timeout_seconds, max_retries,
          idempotency_key, ts, ts),
@@ -120,7 +123,8 @@ def transition_task(conn: sqlite3.Connection, task_id: str,
 # ---------- State Writer 专用 ----------
 
 
-def record_event(conn: sqlite3.Connection, event: dict) -> None:
+def record_event(conn: sqlite3.Connection, event: dict, *,
+                 commit: bool = True) -> None:
     """登记事件；event_id 重复时抛 DuplicateEvent（§17.6 去重）。
 
     seq 为单调自增游标（v3 §4：替代 SQLite 专有 rowid，供 agentctl
@@ -136,7 +140,8 @@ def record_event(conn: sqlite3.Connection, event: dict) -> None:
              json.dumps(event.get("payload", {}), ensure_ascii=False),
              event.get("timestamp", now_iso())),
         )
-        conn.commit()
+        if commit:
+            conn.commit()
     except Exception as e:  # 双后端唯一约束冲突 → DuplicateEvent
         conn.rollback()  # 失败 INSERT 会留下持锁的开放事务，必须回滚
         if isinstance(e, sqlite3.IntegrityError) or \

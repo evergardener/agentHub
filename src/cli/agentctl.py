@@ -237,7 +237,9 @@ def cmd_grant_revoke(db_path: Path, grant_id: int) -> int:
     return 1
 
 
-def cmd_chat(db_path: Path, one_shot: str | None) -> int:
+def cmd_chat(db_path: Path, one_shot: str | None,
+             conversation_id: str | None = None,
+             collaboration_id: str | None = None) -> int:
     """hermes 对话入口（Evolution v3 §6.1）。"""
     import asyncio
 
@@ -245,10 +247,19 @@ def cmd_chat(db_path: Path, one_shot: str | None) -> int:
     from orchestrator.task_manager import TaskManager
 
     tm = TaskManager(db_path=db_path)
-    brain = Hermes(tm)
+    brain = Hermes(
+        tm, conversation_id=conversation_id,
+        collaboration_id=collaboration_id)
+    session_reported = False
 
     async def _once(text: str) -> None:
+        nonlocal session_reported
         reply = await brain.chat(text)
+        if not session_reported:
+            print("session:"
+                  f" conversation={brain.conversation_id}"
+                  f" collaboration={brain.collaboration_id}")
+            session_reported = True
         print(f"hermes> {reply}")
 
     if one_shot:
@@ -311,6 +322,10 @@ def main() -> int:
     p_chat = sub.add_parser("chat")
     p_chat.add_argument("message", nargs="?", default=None,
                         help="one-shot 模式；缺省进入交互循环")
+    p_chat.add_argument("--conversation-id", default=None,
+                        help="恢复指定持久 Conversation")
+    p_chat.add_argument("--collaboration-id", default=None,
+                        help="恢复指定 Collaboration 及其 Agent 上下文")
 
     args = parser.parse_args()
     args.db = args.db or _default_db()
@@ -337,7 +352,9 @@ def main() -> int:
     if args.command == "grant" and args.sub == "revoke":
         return cmd_grant_revoke(args.db, args.grant_id)
     if args.command == "chat":
-        return cmd_chat(args.db, args.message)
+        return cmd_chat(
+            args.db, args.message, args.conversation_id,
+            args.collaboration_id)
     return 2
 
 

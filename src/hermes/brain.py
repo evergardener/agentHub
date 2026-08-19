@@ -21,7 +21,8 @@ SYSTEM_PROMPT = """你是 Hermes，本地多 Agent 系统的总控（规划/编�
 
 职责：
 - 分析用户需求，拆解为任务（create_task），派给合适的 Worker（delegate_task）。
-- Worker：codex（编码/测试/运维操作），kimi（调研/长上下文分析）。
+- Worker：codex（编码/测试/运维操作），kimi（调研/长上下文分析），
+  dsh（持久开发会话/复审/原生子 agent 协作）。
 - 任务完成后 wait_task 等结果，review_task 复审；不合格就返工（review approved=false 后重新委派）。
 - 最终用简洁中文向用户汇报结果。
 
@@ -45,12 +46,73 @@ MAX_TOOL_ROUNDS = 12
 class Hermes:
     def __init__(self, tm: TaskManager, llm: HermesLLM | None = None,
                  policy: ApprovalPolicy | None = None,
-                 agents_path: Path | None = None):
+                 agents_path: Path | None = None,
+                 conversation_id: str | None = None,
+                 collaboration_id: str | None = None):
         self.tm = tm
         self.llm = llm or HermesLLM()
-        self.tools = HermesTools(tm, policy or ApprovalPolicy(), agents_path)
+        self.conversation_id = conversation_id
+        self.collaboration_id = collaboration_id
+        self.tools = HermesTools(
+            tm, policy or ApprovalPolicy(), agents_path,
+            collaboration_id=collaboration_id)
         self.messages: list[dict] = [
             {"role": "system", "content": SYSTEM_PROMPT}]
+        self._restore_context()
+
+    def _restore_context(self) -> None:
+        """Validate IDs and restore persisted LLM-visible messages."""
+        from orchestrator import collaboration_store
+
+        if self.collaboration_id:
+            collaboration = collaboration_store.get_collaboration(
+                self.tm.conn, self.collaboration_id)
+            if collaboration is None:
+                raise KeyError(
+                    f"collaboration not found: {self.collaboration_id}")
+            actual_conversation = collaboration["conversation_id"]
+            if (self.conversation_id
+                    and self.conversation_id != actual_conversation):
+                raise ValueError(
+                    "collaboration does not belong to conversation")
+            self.conversation_id = actual_conversation
+            rows = collaboration_store.list_collaboration_messages(
+                self.tm.conn, self.collaboration_id)
+            for row in rows:
+                if not row["message_type"].startswith("llm."):
+                    continue
+                payload = json.loads(row["content_json"])
+                if isinstance(payload, dict) and payload.get("role"):
+                    self.messages.append(payload)
+            return
+        if self.conversation_id and collaboration_store.get_conversation(
+                self.tm.conn, self.conversation_id) is None:
+            raise KeyError(f"conversation not found: {self.conversation_id}")
+
+    def _ensure_collaboration(self, user_text: str) -> None:
+        from orchestrator import collaboration_store
+
+        if not self.conversation_id:
+            self.conversation_id = collaboration_store.create_conversation(
+                self.tm.conn, title=user_text[:80], created_by="user")
+        if not self.collaboration_id:
+            self.collaboration_id = collaboration_store.create_collaboration(
+                self.tm.conn, conversation_id=self.conversation_id,
+                objective=user_text)
+            self.tools.collaboration_id = self.collaboration_id
+
+    def _persist_message(self, payload: dict, *, sender_type: str,
+                         sender_id: str, message_type: str) -> None:
+        from orchestrator import collaboration_store
+
+        collaboration = collaboration_store.get_collaboration(
+            self.tm.conn, self.collaboration_id)
+        collaboration_store.append_message(
+            self.tm.conn, conversation_id=self.conversation_id,
+            collaboration_id=self.collaboration_id,
+            sender_type=sender_type, sender_id=sender_id,
+            content=payload, message_type=message_type,
+            based_on_revision=collaboration["context_revision"])
 
     async def chat(self, user_text: str) -> str:
         from common import tracing
@@ -63,19 +125,32 @@ class Hermes:
             return await self._chat_loop(user_text)
 
     async def _chat_loop(self, user_text: str) -> str:
-        self.messages.append({"role": "user", "content": user_text})
+        self._ensure_collaboration(user_text)
+        user_message = {"role": "user", "content": user_text}
+        self._persist_message(
+            user_message, sender_type="user", sender_id="user",
+            message_type="llm.user")
+        self.messages.append(user_message)
         for _ in range(MAX_TOOL_ROUNDS):
             reply = await self.llm.chat(self.messages, tools=TOOL_SCHEMAS)
-            self.messages.append(reply.raw_message
+            assistant_message = (reply.raw_message
                                  or {"role": "assistant",
                                      "content": reply.content})
+            self._persist_message(
+                assistant_message, sender_type="hermes", sender_id="hermes",
+                message_type="llm.assistant")
+            self.messages.append(assistant_message)
             if not reply.tool_calls:
                 return reply.content
             for call in reply.tool_calls:
                 log.info("tool call: %s(%s)", call.name, call.arguments)
                 result = await self.tools.dispatch(call.name, call.arguments)
-                self.messages.append({
+                tool_message = {
                     "role": "tool", "tool_call_id": call.id,
                     "content": json.dumps(result, ensure_ascii=False),
-                })
+                }
+                self._persist_message(
+                    tool_message, sender_type="system", sender_id="tool",
+                    message_type="llm.tool")
+                self.messages.append(tool_message)
         return "（工具调用轮次超限，请缩小任务范围或分步进行）"
