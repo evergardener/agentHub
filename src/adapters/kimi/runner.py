@@ -1,4 +1,9 @@
-"""Kimi 运行时 — 真实本地 Kimi Code CLI（`kimi -p` 无头模式）。
+"""Legacy one-shot Kimi prompt runner.
+
+The production Kimi A2A server uses ``KimiSessionAdapter`` over ``kimi acp``.
+This module remains only for explicit compatibility callers and parsing old
+stream-json artifacts; prompt mode has no AgentHub-addressable approval
+callback and must not be used as the production modification boundary.
 
 执行方式（对齐 codex runner 的形态）：
   kimi -p --output-format stream-json <prompt>     # cwd = 任务工作区
@@ -10,11 +15,9 @@
     HTTP runner；原 HTTP 路径是 codex 额度用尽时的临时替身）。
   - 认证：`kimi login`（OAuth device-code）或 Moonshot API key，
     一次性交互配置，token 持久化于 ~/.kimi-code，launchd 常驻可用。
-  - 权限边界变化（§13 修订）：-p 无头模式不请求人工批准，常规工具
-    调用按 auto 权限策略执行（静态 deny 规则仍生效）——kimi worker
-    从「仅发 HTTP 的研究助手」变为「与 codex 同级的工作区内 agent」。
-    写操作的事前门禁不变：orchestrator 审批策略（policy.ask）+
-    tasks/approve 是唯一放行通道。
+  - ``-p`` 无头模式不能把原生逐工具审批桥接回控制面。生产服务禁止
+    依赖本 runner 执行修改任务；ACP Adapter 才能保持 tool call 挂起并
+    接收 ActionIntent receipt。
   - 可选 LAS_KIMI_CLI_MODEL 指定模型别名（`kimi -m`），缺省用 CLI
     配置的 default_model。
   - 超时看门狗：task 级 timeout（§17.3），默认 1800s。

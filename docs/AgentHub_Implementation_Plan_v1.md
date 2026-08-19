@@ -212,3 +212,26 @@ revision 写许可失效。
     双端重启进行真实进程故障注入；
 13. [ ] 完成 Codex/Kimi ToolCall/ActionIntent 拦截与用户介入实时 UI，
     再进入生产安全评审。
+
+## 当前迭代（Iteration 7）
+
+1. [x] 核验本机 Codex CLI 0.148.0 与 Kimi Code 0.37.1 的真实非交互能力；
+   Codex `exec` 没有 AgentHub 可应答审批通道，Kimi prompt 模式也不能把
+   审批 correlation 暴露给平台，禁止把事后 JSONL 解析视为写前门禁；
+2. [x] Kimi 生产 Adapter 从 `-p --output-format=stream-json` 迁移到原生
+   `kimi acp` JSON-RPC：支持 initialize、session/new、session/load、
+   session/prompt、session/cancel 和实时 session/update；
+3. [x] 将 ACP `session/request_permission` 映射为统一 PendingInteraction，
+   保留 native request/session/toolCall correlation、可审查路径和有界脱敏
+   rawInput；原生 turn 在控制面决定前保持挂起；
+4. [x] 逐次允许必须携带与 task/interaction/native request/native session/
+   context revision 绑定的 ActionIntent HMAC receipt；拒绝映射到 Kimi 提供的
+   `reject_once`，允许映射到 `allow_once`，均回应同一 ACP RPC；
+5. [x] 使用本机 Kimi 做无模型调用真实 ACP initialize 握手，确认协议版本 1、
+   `loadSession=true` 及 resume/cancel 等能力；
+6. [ ] Codex 改为默认强制 read-only，并设计基于可验证执行租约的两阶段写入；
+7. [ ] 将 Kimi ACP tool update/assistant chunk 接入统一实时 SSE 时间线；
+8. [ ] 执行真实 Kimi approval 挂起/拒绝/允许、双轮 load 和 Adapter 重启故障注入；
+9. [x] 全量 unit+contract 226 passed；集成 9 passed/12 skipped；另行启用
+   `LAS_RUN_KIMI_ACP=1` 的真实无模型 ACP session/new 检查 1 passed；本批次
+   按自动提交约定记录独立 commit。

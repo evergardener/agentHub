@@ -131,7 +131,7 @@ docker compose run --rm agentctl chat
 
 验收点：任务终态 `accepted`；`artifacts` 含产出文件；Web UI 任务详情可见复审记录；Jaeger 有完整 trace。
 
-### 3.6 DSH 原生交互闭环
+### 3.6 DSH/Kimi 原生交互闭环
 
 DSH 产生 approval/question 后，任务进入 `blocked`，WebUI「AGENT 交互」卡片
 实时显示请求。审批只能选择本次允许或拒绝；本次允许会先由控制面决策关联的
@@ -139,6 +139,18 @@ ActionIntent，再把不可伪造的 receipt 送到 DSH `/api/respond`。问题�
 定义的 question id 和选项结构整批回答，二者均继续原 native session/turn。
 此时旧的任务级 approve/reject 会明确拒绝，避免只修改数据库状态却没有回应
 原生 Runtime。
+
+Kimi Adapter 使用 `kimi acp`，ACP 的 `session/request_permission` 走相同
+`blocked -> ActionIntent -> signed receipt -> native response` 链。允许仅选择
+Kimi 本次请求提供的 `allow_once`，拒绝选择 `reject_once`；prompt CLI 的
+stream-json 日志只可作为旧 Artifact，不得作为生产审批门禁。可先用以下命令
+做不调用模型的协议握手检查：
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientInfo":{"name":"agenthub-probe","version":"0.1.0"},"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false}}}' \
+  | kimi acp
+```
 
 只读查询：
 

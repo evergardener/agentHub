@@ -85,6 +85,8 @@ async def test_user_approval_delivers_action_intent_receipt(
         assert receipt["actionIntentId"] == intent["id"]
         assert receipt["status"] == "approved"
         assert receipt["decidedBy"] == "user"
+        assert receipt["nativeSessionId"] == "native-dsh"
+        assert receipt["contextRevision"] == 1
         saved = collaboration_store.get_session_interaction(
             manager.conn, interaction["id"])
         assert saved["status"] == "resolved"

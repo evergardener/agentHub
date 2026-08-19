@@ -170,4 +170,12 @@ Workspace/Git 保存实际文件产物；数据库保存路径、哈希、版本
   DSH 下行使用 `/api/events.mux` SSE（与其 WebSocket carrier 共用相同
   ServerRequest 语义），`/api/respond` 继续同一原生 turn；待处理交互同时
   写入 `agent_session_interactions` 并关联 ActionIntent；
+- Kimi 生产 Adapter 使用 `kimi acp`，不使用无法回传逐工具审批的 prompt
+  CLI。ACP `session/request_permission` 进入同一 PendingInteraction/
+  ActionIntent/签名 receipt 链，`allow_once` 或 `reject_once` 回应原 RPC 后
+  继续同一 native session/turn；`session/update` 仅保存有界、脱敏的工具摘要
+  与 assistant 输出，不保存隐藏思维链；
+- Codex `exec` 在原生可应答审批桥完成前默认只读；不得用完成后的 JSONL
+  tool event 反推授权。需要写入时采用控制面先批准、执行层再验证的短期能力
+  租约，或迁移到能保留原生 approval correlation 的 App Server 接入；
 - gateway 静态路由逐步替换为 Registry 驱动的稳定逻辑路由。

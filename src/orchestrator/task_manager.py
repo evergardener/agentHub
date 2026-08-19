@@ -420,6 +420,11 @@ class TaskManager:
             if outcome == "allowed-once":
                 from common.action_receipt import sign_action_receipt
 
+                binding = self.conn.execute(
+                    "SELECT native_session_id FROM agent_session_bindings"
+                    " WHERE id = ?;",
+                    (interaction["session_binding_id"],),
+                ).fetchone()
                 outbound["authorization"] = sign_action_receipt({
                     "actionIntentId": action_intent_id,
                     "status": intent["status"],
@@ -429,6 +434,9 @@ class TaskManager:
                     "taskId": interaction["task_id"],
                     "interactionId": interaction["adapter_interaction_id"],
                     "nativeRequestId": interaction["native_request_id"],
+                    "nativeSessionId": (
+                        binding["native_session_id"] if binding else None),
+                    "contextRevision": intent["based_on_revision"],
                 })
         elif interaction["kind"] != "question":
             raise ValueError(

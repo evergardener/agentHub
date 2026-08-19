@@ -39,13 +39,10 @@ def test_kimi_session_id_and_resume_command(monkeypatch):
     assert extract_kimi_session_id(
         '{"type":"system","data":{"session_id":"kimi-native-1"}}\n'
         '{"role":"assistant","content":"done"}\n') == "kimi-native-1"
-    monkeypatch.delenv("LAS_KIMI_CLI_MODEL", raising=False)
     adapter = KimiSessionAdapter()
-    command = adapter._command("/bin/kimi", "continue", "kimi-native-1")
-    assert command[:3] == ["/bin/kimi", "-S", "kimi-native-1"]
-    assert command[-3:] == ["--output-format=stream-json", "-p", "continue"]
     assert adapter.capabilities.native_resume is True
     assert adapter.capabilities.interrupt is True
+    assert adapter.capabilities.interactions is True
 
 
 def test_session_id_parsers_fail_closed():
