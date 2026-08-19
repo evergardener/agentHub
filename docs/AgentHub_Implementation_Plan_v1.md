@@ -236,12 +236,16 @@ revision 写许可失效。
    task/interaction/native request/native thread/context revision 的签名回执，
    允许仅使用 `accept` 或 turn-scope 精确权限，禁止 `acceptForSession` 和
    session-scope 授权；
-7. [ ] 将 Kimi ACP tool update/assistant chunk 接入统一实时 SSE 时间线；
+7. [x] 将 DSH/Kimi/Codex 原生过程通知通过 SessionEvent 统一封装为
+   `agent.session.event`，经 NATS 进入 DB 游标事件流；WebUI 全局事件
+   和任务详情可实时显示 assistant delta、工具生命周期、计划与原生交互，
+   断线后继续由现有 `seq/after` SSE 游标补发；
 8. [ ] 执行真实 Kimi approval 挂起/拒绝/允许、双轮 load 和 Adapter 重启故障注入；
 9. [x] 全量 unit+contract 226 passed；集成 9 passed/12 skipped；另行启用
    `LAS_RUN_KIMI_ACP=1` 的真实无模型 ACP session/new 检查 1 passed；本批次
    按自动提交约定记录独立 commit。
-10. [ ] 将 Codex/Kimi 原生通知接入统一实时 SSE 时间线，并实现用户 steer；
+10. [ ] 实现用户 steer/interrupt Web API 与任务详情操作区，并确保指令同时
+    写入 conversation message 供 Hermes 追溯；
 11. [ ] 执行 Codex/Kimi 真实 approval 挂起/拒绝/允许、双轮恢复和 Adapter
     重启故障注入；Codex 无模型 `initialize + thread/start` 由
     `LAS_RUN_CODEX_APP_SERVER=1` 单独门控。

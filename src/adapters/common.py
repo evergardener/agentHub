@@ -133,6 +133,7 @@ class EventPublisher:
         self.source = source
         self.nats_url = nats_url or cfg.nats_url()
         self.spool = workspace_root() / "logs" / "events-pending.jsonl"
+        self._offline_until = 0.0
 
     async def publish(self, event_type: str, task_id: str | None,
                       payload: dict, trace_id: str | None = None) -> bool:
@@ -140,23 +141,30 @@ class EventPublisher:
             event_type=event_type, source=self.source,
             task_id=task_id, trace_id=trace_id, payload=payload,
         )
+        is_native_delta = event_type == "agent.session.event"
+        if is_native_delta and time.monotonic() < self._offline_until:
+            self._spool(event)
+            return False
         try:
-            import nats  # 延迟导入，无 NATS 时也能运行
+            import nats  # delayed import keeps the adapter dependency optional
 
-            # max_reconnect_attempts=1 + allow_reconnect=False：
-            # nats-py 默认重试 60 次，NATS 不在时会挂住调用方（实测确认）。
+            # A new short-lived connection per event avoids carrying a stale
+            # JetStream socket across NATS restarts. The offline backoff below
+            # prevents reconnect storms for high-frequency native deltas.
             nc = await nats.connect(
-                self.nats_url,
-                connect_timeout=1,
-                max_reconnect_attempts=1,
+                self.nats_url, connect_timeout=1, max_reconnect_attempts=1,
                 allow_reconnect=False,
             )
-            await nc.jetstream().publish(
-                event_type, json.dumps(event.to_dict()).encode("utf-8")
-            )
-            await nc.close()
+            try:
+                await nc.jetstream().publish(
+                    event_type, json.dumps(event.to_dict()).encode("utf-8"))
+            finally:
+                await nc.close()
+            self._offline_until = 0
             return True
         except Exception:
+            if is_native_delta:
+                self._offline_until = time.monotonic() + 5
             self._spool(event)
             return False
 

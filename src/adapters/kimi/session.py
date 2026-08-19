@@ -14,7 +14,7 @@ import os
 import re
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from adapters.common import A2aTask, save_artifact, workspace_root
 from adapters.kimi.runner import (
@@ -28,6 +28,7 @@ from adapters.session import (
     SessionAdapter,
     SessionCapabilities,
     SessionCapabilityError,
+    SessionEvent,
     SessionHandle,
     SessionMessage,
     SessionTurnResult,
@@ -115,7 +116,7 @@ class KimiSessionAdapter(SessionAdapter):
         resume=True,
         native_resume=True,
         durable_session=True,
-        streaming=False,
+        streaming=True,
         pause=False,
         interrupt=True,
         cancel=True,
@@ -142,6 +143,7 @@ class KimiSessionAdapter(SessionAdapter):
         self._artifacts: dict[str, list[dict]] = {}
         self._stderr = bytearray()
         self._loaded_native_sessions: set[str] = set()
+        self._event_queues: dict[str, asyncio.Queue[SessionEvent]] = {}
 
     def get_session(self, session_id: str) -> SessionHandle | None:
         return self._handles.get(session_id)
@@ -290,6 +292,12 @@ class KimiSessionAdapter(SessionAdapter):
         else:
             return
         self._updates.setdefault(session_id, []).append(safe_update)
+        event_type = (
+            "message.delta" if kind == "agent_message_chunk"
+            else "tool.updated" if kind in {"tool_call", "tool_call_update"}
+            else "plan.updated"
+        )
+        self._emit_nowait(session_id, event_type, safe_update)
         if kind != "agent_message_chunk":
             return
         content = update.get("content") or {}
@@ -298,6 +306,17 @@ class KimiSessionAdapter(SessionAdapter):
                 and isinstance(content.get("text"), str)):
             self._assistant_text.setdefault(session_id, []).append(
                 content["text"])
+
+    def _emit_nowait(self, session_id: str, event_type: str,
+                      payload: dict[str, Any]) -> None:
+        handle = self._handles.get(session_id)
+        queue = self._event_queues.get(session_id)
+        if handle is None or queue is None:
+            return
+        queue.put_nowait(SessionEvent(
+            event_type=event_type, session_id=session_id,
+            task_id=handle.task_id, payload=_bounded(payload),
+        ))
 
     def _handle_permission_request(self, message: dict) -> None:
         params = message.get("params") or {}
@@ -343,6 +362,12 @@ class KimiSessionAdapter(SessionAdapter):
         self._interactions.setdefault(session_id, {})[interaction_id] = interaction
         self._permission_rpc_ids[interaction_id] = message["id"]
         self._interaction_events.setdefault(session_id, asyncio.Event()).set()
+        self._emit_nowait(session_id, "interaction.requested", {
+            "interactionId": interaction_id,
+            "kind": interaction.kind,
+            "nativeRequestId": interaction.native_request_id,
+            "payload": interaction.payload,
+        })
 
     def _adapter_session_id(self, native_id: str | None) -> str | None:
         if not native_id:
@@ -414,6 +439,7 @@ class KimiSessionAdapter(SessionAdapter):
         self._tasks[session_id] = task
         self._interactions.setdefault(session_id, {})
         self._interaction_events.setdefault(session_id, asyncio.Event())
+        self._event_queues.setdefault(session_id, asyncio.Queue())
         return handle
 
     async def send_message(self, session_id: str,
@@ -442,6 +468,10 @@ class KimiSessionAdapter(SessionAdapter):
             "prompt": [{"type": "text", "text": prompt}],
         }))
         self._turn_tasks[session_id] = turn
+        self._emit_nowait(session_id, "turn.started", {
+            "messageId": message.message_id,
+            "contextRevision": handle.context_revision,
+        })
         return await self._await_turn_or_interaction(session_id)
 
     async def _ensure_native_loaded(self, session_id: str) -> None:
@@ -493,6 +523,7 @@ class KimiSessionAdapter(SessionAdapter):
             await turn
             self._turn_tasks.pop(session_id, None)
             self._handles[session_id].status = "completed"
+            self._emit_nowait(session_id, "turn.completed", {})
             artifacts = self._collect_turn_artifacts(session_id)
             self._artifacts[session_id] = artifacts
             return SessionTurnResult(state="completed", artifacts=artifacts)
@@ -541,6 +572,14 @@ class KimiSessionAdapter(SessionAdapter):
             item for item in self._interactions.get(session_id, {}).values()
             if item.status == "pending"
         ]
+
+    async def stream_events(
+            self, session_id: str) -> AsyncIterator[SessionEvent]:
+        if session_id not in self._event_queues:
+            raise KeyError(f"session not found: {session_id}")
+        queue = self._event_queues[session_id]
+        while True:
+            yield await queue.get()
 
     async def respond_interaction(
         self,
@@ -603,6 +642,10 @@ class KimiSessionAdapter(SessionAdapter):
         interaction.response = _bounded(response)
         self._interaction_events[session_id].clear()
         self._handles[session_id].status = "active"
+        self._emit_nowait(session_id, "interaction.responded", {
+            "interactionId": interaction_id, "outcome": outcome,
+            "respondedBy": responded_by,
+        })
         return SessionTurnResult(state="working")
 
     async def continue_after_interaction(

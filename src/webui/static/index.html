@@ -571,9 +571,10 @@ function appendEvent(e) {
   const el = document.createElement("div");
   el.className = "ev" + (isHb ? " hb" : "");
   const time = (e.created_at || "").slice(11, 19);
+  const detail = eventDetail(e);
   el.innerHTML =
     `<span class="seq">#${e.seq}</span>` +
-    `<span class="typ">${esc(e.event_type)}${e.task_id ? " · " + esc(e.task_id) : ""}</span>` +
+    `<span class="typ">${esc(detail)}${e.task_id ? " · " + esc(e.task_id) : ""}</span>` +
     `<span class="time">${esc(time)}</span>`;
   const box = $("#events");
   box.appendChild(el);
@@ -582,6 +583,27 @@ function appendEvent(e) {
     box.removeChild(box.firstChild);
     S.evCount--;
   }
+  box.scrollTop = box.scrollHeight;
+}
+
+function eventDetail(e) {
+  if (e.event_type !== "agent.session.event") return e.event_type || "event";
+  let p = {};
+  try { p = JSON.parse(e.payload_json || "{}"); } catch (_) {}
+  const kind = p.nativeEventType || "native";
+  const d = p.data || {};
+  const text = d.delta || d.title || d.item?.command ||
+    d.item?.changes?.[0]?.path || "";
+  return `agent.session · ${kind}${text ? " · " + String(text).slice(0, 90) : ""}`;
+}
+
+function appendDetailEvent(e) {
+  if (!S.detailId || e.task_id !== S.detailId) return;
+  const box = $("#d-events-live");
+  if (!box) return;
+  if (box.textContent === "（无）") box.textContent = "";
+  box.textContent += (box.textContent ? "\n" : "") +
+    `#${e.seq} ${eventDetail(e)}  ${e.created_at || ""}`;
   box.scrollTop = box.scrollHeight;
 }
 
@@ -594,6 +616,7 @@ function startStream() {
       const e = JSON.parse(m.data);
       S.lastSeq = Math.max(S.lastSeq, e.seq);
       appendEvent(e);
+      appendDetailEvent(e);
       if (/interaction|input_required|\.blocked$/.test(e.event_type || ""))
         loadAll();
     } catch (_) { /* 跳过坏帧 */ }
@@ -628,7 +651,7 @@ async function openDetail(id) {
   }
 
   const evs = (d.events || []).map(e =>
-    `#${e.seq} ${e.event_type}  ${e.created_at}`).join("\n");
+    `#${e.seq} ${eventDetail(e)}  ${e.created_at}`).join("\n");
   const runs = (d.runs || []).map(r =>
     `${r.status}  agent=${r.agent_id}  @${r.started_at || ""}`).join("\n");
   const arts = (d.artifacts || []);
@@ -646,7 +669,7 @@ async function openDetail(id) {
     (t.result_summary
       ? `<div class="d-sec"><h3>结果摘要</h3><div class="mono">${esc(t.result_summary)}</div></div>` : "") +
     `<div class="d-sec"><h3>AGENT 交互</h3><div class="mono">${esc(interactions) || "（无）"}</div></div>` +
-    `<div class="d-sec"><h3>事件时间线</h3><div class="mono">${esc(evs) || "（无）"}</div></div>` +
+    `<div class="d-sec"><h3>事件时间线（实时）</h3><div class="mono" id="d-events-live">${esc(evs) || "（无）"}</div></div>` +
     `<div class="d-sec"><h3>RUNS</h3><div class="mono">${esc(runs) || "（无）"}</div></div>` +
     `<div class="d-sec"><h3>ARTIFACTS（点击查看内容/过程）</h3>` +
     (arts.length

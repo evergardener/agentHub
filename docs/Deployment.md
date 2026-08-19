@@ -164,6 +164,11 @@ LAS_RUN_CODEX_APP_SERVER=1 \
   .venv/bin/python -m pytest -q tests/integration/test_codex_app_server.py
 ```
 
+三类 Adapter 的原生过程事件统一发布为 `agent.session.event`，WebUI 的全局事件
+区与任务详情「事件时间线（实时）」会显示 `nativeEventType` 和脱敏摘要。浏览器
+断线重连时携带最后 `seq`，由 `/api/events/stream?after=...` 补发；NATS 短暂
+不可用时 Adapter 先写 `events-pending.jsonl`，恢复后按既有 replay 流程回放。
+
 只读查询：
 
 ```bash

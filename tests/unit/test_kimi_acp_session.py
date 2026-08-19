@@ -30,6 +30,7 @@ def _seed_adapter() -> KimiSessionAdapter:
     )
     adapter._interactions["S-kimi"] = {}
     adapter._interaction_events["S-kimi"] = asyncio.Event()
+    adapter._event_queues["S-kimi"] = asyncio.Queue()
     return adapter
 
 
@@ -155,6 +156,9 @@ async def test_acp_agent_message_chunks_form_summary():
     assert all(
         item.get("sessionUpdate") != "agent_thought_chunk"
         for item in adapter._updates["S-kimi"])
+    streamed = await anext(adapter.stream_events("S-kimi"))
+    assert streamed.event_type == "message.delta"
+    assert streamed.payload["content"]["text"] == "done"
 
 
 async def test_acp_tool_update_drops_raw_payloads():

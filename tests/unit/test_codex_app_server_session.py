@@ -25,6 +25,7 @@ def _seed_adapter() -> CodexSessionAdapter:
     )
     adapter._interactions["S-codex"] = {}
     adapter._interaction_events["S-codex"] = asyncio.Event()
+    adapter._event_queues["S-codex"] = asyncio.Queue()
     return adapter
 
 
@@ -160,6 +161,9 @@ async def test_notifications_drop_command_output_and_reasoning():
     assert "aggregatedOutput" not in saved
     assert all("reasoning" not in item.get("method", "")
                for item in adapter._updates["S-codex"])
+    streamed = await anext(adapter.stream_events("S-codex"))
+    assert streamed.event_type == "item.lifecycle"
+    assert "aggregatedOutput" not in streamed.payload["item"]
 
 
 async def test_process_restart_resumes_read_only_thread(monkeypatch, tmp_path):

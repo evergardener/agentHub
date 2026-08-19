@@ -84,6 +84,61 @@ def build_app(
     executor = FifoExecutor(max_concurrent=max_concurrent)
     adapter_instance_id = f"{agent_id}-{uuid.uuid4()}"
 
+    async def _run_with_event_pump(session_id: str, action):
+        """Forward native adapter events while one turn is executing.
+
+        The DB-backed WebUI SSE already provides cursor replay.  Adapters only
+        need to expose their live queue; this pump normalizes every runtime to
+        one durable ``agent.session.event`` envelope.
+        """
+        if not session_adapter.capabilities.streaming:
+            return await action()
+
+        received = 0
+        published = 0
+
+        async def pump() -> None:
+            nonlocal received, published
+            async for event in session_adapter.stream_events(session_id):
+                received += 1
+                handle = session_adapter.get_session(session_id)
+                await publisher.publish(
+                    "agent.session.event", event.task_id,
+                    {
+                        "nativeEventType": event.event_type,
+                        "sessionId": event.session_id,
+                        "nativeSessionId": (
+                            handle.native_session_id if handle else None),
+                        "adapterInstanceId": adapter_instance_id,
+                        "data": event.payload,
+                    },
+                )
+                published += 1
+
+        pump_task = asyncio.create_task(pump())
+        try:
+            return await action()
+        finally:
+            # Queue.put on an unbounded adapter queue need not yield. Wait for
+            # a short quiet window so already-produced terminal events reach
+            # NATS/spool before the per-turn pump is canceled.
+            deadline = asyncio.get_running_loop().time() + 2
+            stable = 0
+            previous = (-1, -1)
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.01)
+                current = (received, published)
+                if current == previous and received == published:
+                    stable += 1
+                    if stable >= 2:
+                        break
+                else:
+                    stable = 0
+                previous = current
+            pump_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await pump_task
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         from common import tracing
@@ -302,15 +357,19 @@ def build_app(
                         task.session_id or task.id)
                     if handle is not None:
                         handle.context_revision = task.context_revision
-                    result = await session_adapter.send_message(
-                        task.session_id or task.id,
-                        SessionMessage(
+                    adapter_session_id = task.session_id or task.id
+                    turn_message = SessionMessage(
                             message_id=message_id,
                             role="user",
                             content=objective,
                             based_on_revision=task.context_revision,
                             metadata=metadata,
-                        ))
+                        )
+                    result = await _run_with_event_pump(
+                        adapter_session_id,
+                        lambda: session_adapter.send_message(
+                            adapter_session_id, turn_message),
+                    )
                 handle = session_adapter.get_session(
                     task.session_id or task.id)
                 if handle is not None:
@@ -447,10 +506,13 @@ def build_app(
 
         async def continue_turn() -> None:
             try:
+                adapter_session_id = task.session_id or task.id
                 result = (
-                    await session_adapter.continue_after_interaction(
-                        task.session_id or task.id)
-                    if accepted.state == "working" else accepted
+                    await _run_with_event_pump(
+                        adapter_session_id,
+                        lambda: session_adapter.continue_after_interaction(
+                            adapter_session_id),
+                    ) if accepted.state == "working" else accepted
                 )
                 task.artifacts = result.artifacts
                 store.update_state(task.id, result.state)

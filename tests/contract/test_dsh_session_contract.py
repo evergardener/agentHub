@@ -61,7 +61,10 @@ async def test_dsh_a2a_card_and_native_session_metadata(tmp_path, monkeypatch):
         client=native_client, poll_interval=0, timeout_seconds=1)
     app = build_app("dsh", agent_card, max_concurrent=1,
                     session_adapter=adapter)
+    published: list[tuple] = []
+
     async def publish(*args, **kwargs):
+        published.append((args, kwargs))
         return True
 
     app.state.publisher.publish = publish
@@ -99,6 +102,13 @@ async def test_dsh_a2a_card_and_native_session_metadata(tmp_path, monkeypatch):
             meta = task["metadata"]["agentHub"]
             assert meta["nativeSessionId"] == "session-contract-dsh"
             assert task["artifacts"]
+            session_events = [args for args, _ in published
+                              if args[0] == "agent.session.event"]
+            assert session_events
+            assert all(event[1] == "T-dsh-contract"
+                       for event in session_events)
+            assert {event[2]["nativeEventType"] for event in session_events} >= {
+                "dsh.turn.started", "dsh.assistant/message", "dsh.turn/end"}
     finally:
         await native_client.aclose()
 

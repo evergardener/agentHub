@@ -181,4 +181,9 @@ Workspace/Git 保存实际文件产物；数据库保存路径、哈希、版本
   `item/permissions/requestApproval` 映射到统一 PendingInteraction/ActionIntent/
   签名 receipt 链；允许只回答原生同一 RPC 的一次性 `accept` 或 turn-scope
   精确权限，禁止 session 级缓存授权；
+- 所有支持 streaming 的 Adapter 把原生消息增量、工具生命周期、计划、turn
+  和交互事件转换为 SessionEvent；Adapter Server 统一发布
+  `agent.session.event`，载荷保留 nativeEventType/session/native session
+  correlation。State Writer 用全局单调 `seq` 落库，WebUI SSE 以 `after`
+  游标实时推送和断线补发；隐藏推理与原始工具输出不得进入此时间线；
 - gateway 静态路由逐步替换为 Registry 驱动的稳定逻辑路由。

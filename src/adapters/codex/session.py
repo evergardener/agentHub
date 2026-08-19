@@ -14,7 +14,7 @@ import re
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from adapters.codex.runner import (
     DEFAULT_TIMEOUT_SECONDS, CodexFailed, CodexNotAvailable, CodexTimeout,
@@ -22,7 +22,8 @@ from adapters.codex.runner import (
 from adapters.common import A2aTask, save_artifact, workspace_root
 from adapters.session import (
     PendingInteraction, SessionAdapter, SessionCapabilities,
-    SessionCapabilityError, SessionHandle, SessionMessage, SessionTurnResult,
+    SessionCapabilityError, SessionEvent, SessionHandle, SessionMessage,
+    SessionTurnResult,
 )
 from common.action_receipt import verify_action_receipt
 
@@ -69,7 +70,7 @@ def _bounded(value: Any, *, limit: int = 4096) -> Any:
 class CodexSessionAdapter(SessionAdapter):
     capabilities = SessionCapabilities(
         multi_turn=True, resume=True, native_resume=True,
-        durable_session=True, streaming=False, pause=False,
+        durable_session=True, streaming=True, pause=False,
         interrupt=True, cancel=True, interactions=True,
     )
     _APPROVAL_METHODS = {
@@ -103,6 +104,7 @@ class CodexSessionAdapter(SessionAdapter):
         self._assistant_text: dict[str, list[str]] = {}
         self._artifacts: dict[str, list[dict]] = {}
         self._stderr = bytearray()
+        self._event_queues: dict[str, asyncio.Queue[SessionEvent]] = {}
 
     def get_session(self, session_id: str) -> SessionHandle | None:
         return self._handles.get(session_id)
@@ -256,6 +258,10 @@ class CodexSessionAdapter(SessionAdapter):
                     "method": method, "turnId": params.get("turnId"),
                     "itemId": params.get("itemId"), "delta": delta,
                 }))
+                self._emit_nowait(session_id, "message.delta", {
+                    "turnId": params.get("turnId"),
+                    "itemId": params.get("itemId"), "delta": delta,
+                })
             return
         if method in {"item/started", "item/completed"}:
             item = params.get("item") or {}
@@ -267,6 +273,11 @@ class CodexSessionAdapter(SessionAdapter):
                 self._updates.setdefault(session_id, []).append({
                     "method": method, "turnId": params.get("turnId"),
                     "item": safe_item,
+                })
+                self._emit_nowait(session_id, "item.lifecycle", {
+                    "phase": "started" if method == "item/started"
+                    else "completed",
+                    "turnId": params.get("turnId"), "item": safe_item,
                 })
             return
         if method in {"turn/started", "turn/completed", "turn/diff/updated",
@@ -282,6 +293,18 @@ class CodexSessionAdapter(SessionAdapter):
                     "error": turn.get("error"),
                 })
             self._updates.setdefault(session_id, []).append(safe)
+            self._emit_nowait(session_id, method.replace("/", "."), safe)
+
+    def _emit_nowait(self, session_id: str, event_type: str,
+                      payload: dict[str, Any]) -> None:
+        handle = self._handles.get(session_id)
+        queue = self._event_queues.get(session_id)
+        if handle is None or queue is None:
+            return
+        queue.put_nowait(SessionEvent(
+            event_type=event_type, session_id=session_id,
+            task_id=handle.task_id, payload=_bounded(payload),
+        ))
 
     @staticmethod
     def _safe_item(item: dict) -> dict:
@@ -351,6 +374,12 @@ class CodexSessionAdapter(SessionAdapter):
         self._approval_methods[interaction_id] = method
         self._approval_params[interaction_id] = params
         self._interaction_events.setdefault(session_id, asyncio.Event()).set()
+        self._emit_nowait(session_id, "interaction.requested", {
+            "interactionId": interaction_id,
+            "kind": interaction.kind,
+            "nativeRequestId": interaction.native_request_id,
+            "payload": interaction.payload,
+        })
 
     @staticmethod
     def _approval_paths(params: dict, item: dict) -> list[str]:
@@ -468,6 +497,7 @@ class CodexSessionAdapter(SessionAdapter):
         self._tasks[session_id] = task
         self._interactions.setdefault(session_id, {})
         self._interaction_events.setdefault(session_id, asyncio.Event())
+        self._event_queues.setdefault(session_id, asyncio.Queue())
         return handle
 
     async def _ensure_native_loaded(self, session_id: str) -> None:
@@ -604,6 +634,14 @@ class CodexSessionAdapter(SessionAdapter):
             if item.status == "pending"
         ]
 
+    async def stream_events(
+            self, session_id: str) -> AsyncIterator[SessionEvent]:
+        if session_id not in self._event_queues:
+            raise KeyError(f"session not found: {session_id}")
+        queue = self._event_queues[session_id]
+        while True:
+            yield await queue.get()
+
     async def respond_interaction(
         self, session_id: str, interaction_id: str, response: dict[str, Any],
         *, responded_by: str,
@@ -654,6 +692,10 @@ class CodexSessionAdapter(SessionAdapter):
         interaction.response = _bounded(response)
         self._interaction_events[session_id].clear()
         self._handles[session_id].status = "active"
+        self._emit_nowait(session_id, "interaction.responded", {
+            "interactionId": interaction_id, "outcome": outcome,
+            "respondedBy": responded_by,
+        })
         return SessionTurnResult(state="working")
 
     async def continue_after_interaction(
