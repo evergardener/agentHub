@@ -78,6 +78,16 @@ cp .env.example .env && chmod 600 .env
 | `LAS_DATABASE_URL` | 留空 = compose PG；`sqlite:////path/x.db` = SQLite；外部 PG 直接填 URL |
 | `LAS_OTEL_ENDPOINT` | compose 内已指向 jaeger；置空关闭 tracing |
 
+填写完成后运行生产预检。它只输出变量名和修复建议，不输出任何密钥值：
+
+```bash
+python3 scripts/production-preflight.py .env
+# HTTPS 反代部署使用严格模式（loopback HTTP 的 cookie warning 也视为失败）
+python3 scripts/production-preflight.py --strict .env
+```
+
+只有显示 `PASS`（或明确接受非 strict 的 loopback cookie warning）后再启动。
+
 ### 3.3 启动控制面
 
 ```bash
@@ -302,3 +312,5 @@ codex/kimi。临时绕过：`LAS_GATEWAY_URL=` 置空走直连；长期方案是
   16 字符或非 loopback 无认证监听都会启动失败
 - 关键控制面服务具备 dependency-aware readiness，容器设 CPU/内存/PID 上限，
   `json-file` 日志自动轮换（10MB × 5）
+- `scripts/production-preflight.py` 在启动前检查 `.env` 权限、默认/弱密钥、
+  WebUI RBAC 配置和 A2A peer 映射，且输出永不包含 secret value

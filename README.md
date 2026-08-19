@@ -36,7 +36,9 @@ Worker agent（codex / kimi / dsh / pi ...）**不打包进镜像**——宿主�
 没注册就不可用（`agentctl agent list` 查看在线状态）。
 
 ```bash
-cp .env.example .env     # 填 LAS_LLM_API_KEY / LAS_GATEWAY_API_KEY
+cp .env.example .env && chmod 600 .env
+# 填入 .env.example 标注的生产密钥后，先做不泄露密钥值的预检
+python3 scripts/production-preflight.py .env
 docker compose up -d     # nats + postgres + state-writer + janitor + agentgateway + webui + jaeger
 docker compose run --rm agentctl chat   # 与 hermes 对话
 ```
@@ -44,6 +46,8 @@ docker compose run --rm agentctl chat   # 与 hermes 对话
 - Web UI（看板 / 任务详情 / 事件流 / 审批中心）：http://127.0.0.1:18070
 - Jaeger（OTel trace 查询）：http://127.0.0.1:16686
   （`LAS_OTEL_ENDPOINT` 置空即关闭 tracing，默认 NoOp 零开销）
+- Compose 生产模式对 WebUI 与 Orchestrator 认证 fail-closed；缺失或弱密钥时
+  相应服务拒绝启动。使用 `scripts/production-preflight.py` 在启动前一次检查。
 
 宿主机 worker 接入容器栈：
 
