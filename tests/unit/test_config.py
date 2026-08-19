@@ -17,6 +17,9 @@ ALL_KEYS = [
     "LAS_LLM_MODEL", "KIMI_MODEL",
     "LAS_HINDSIGHT_URL", "HINDSIGHT_API_URL",
     "LAS_HINDSIGHT_API_KEY", "HINDSIGHT_API_KEY",
+    "LAS_WEBUI_TOKENS", "LAS_WEBUI_SESSION_SECRET",
+    "LAS_WEBUI_SESSION_TTL", "LAS_WEBUI_COOKIE_SECURE",
+    "LAS_WEBUI_REQUIRE_AUTH",
 ]
 
 
@@ -59,3 +62,32 @@ def test_kimi_api_key_never_read(monkeypatch):
     # Kimi Work 桌面端注入的 KIMI_API_KEY 不得被当作 LLM 密钥
     monkeypatch.setenv("KIMI_API_KEY", "should-not-be-used")
     assert cfg.llm_api_key() == ""
+
+
+def test_webui_security_config(monkeypatch):
+    monkeypatch.setenv(
+        "LAS_WEBUI_TOKENS", '{"admin-token-0123456789":"admin"}')
+    monkeypatch.setenv("LAS_WEBUI_SESSION_TTL", "3600")
+    monkeypatch.setenv("LAS_WEBUI_COOKIE_SECURE", "true")
+    monkeypatch.setenv("LAS_WEBUI_REQUIRE_AUTH", "yes")
+    assert cfg.webui_tokens() == {"admin-token-0123456789": "admin"}
+    assert cfg.webui_session_ttl() == 3600
+    assert cfg.webui_cookie_secure() is True
+    assert cfg.webui_require_auth() is True
+
+
+@pytest.mark.parametrize("value", [
+    "not-json", "[]", '{}', '{"short":"admin"}',
+    '{"admin-token-0123456789":"owner"}',
+])
+def test_webui_tokens_fail_closed(monkeypatch, value):
+    monkeypatch.setenv("LAS_WEBUI_TOKENS", value)
+    with pytest.raises(ValueError):
+        cfg.webui_tokens()
+
+
+@pytest.mark.parametrize("value", ["299", "604801"])
+def test_webui_session_ttl_bounds(monkeypatch, value):
+    monkeypatch.setenv("LAS_WEBUI_SESSION_TTL", value)
+    with pytest.raises(ValueError):
+        cfg.webui_session_ttl()

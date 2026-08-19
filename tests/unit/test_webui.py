@@ -11,6 +11,9 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("LAS_DATABASE_URL",
                        f"sqlite:///{tmp_path}/webui.db")
     monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path / "ws"))
+    for name in ("LAS_WEBUI_TOKENS", "LAS_WEBUI_SESSION_SECRET",
+                 "LAS_WEBUI_REQUIRE_AUTH", "LAS_WEBUI_COOKIE_SECURE"):
+        monkeypatch.delenv(name, raising=False)
 
     from common.models import TaskStatus
     from orchestrator import state_store
@@ -35,6 +38,26 @@ def client(tmp_path, monkeypatch):
     from webui.server import create_app
 
     return TestClient(create_app())
+
+
+@pytest.fixture
+def secure_client(client, monkeypatch):
+    monkeypatch.setenv(
+        "LAS_WEBUI_TOKENS",
+        '{"admin-token-0123456789":"admin",'
+        '"operator-token-012345":"operator",'
+        '"viewer-token-01234567":"viewer"}',
+    )
+    monkeypatch.setenv("LAS_WEBUI_SESSION_SECRET", "s" * 32)
+    monkeypatch.setenv("LAS_WEBUI_REQUIRE_AUTH", "true")
+    from webui.server import create_app
+
+    return TestClient(create_app())
+
+
+def _login(client, token):
+    response = client.post("/api/auth/login", json={"token": token})
+    return response, response.json().get("csrf")
 
 
 def test_overview(client):
@@ -139,3 +162,81 @@ def test_artifact_content(client, tmp_path, monkeypatch):
         "/api/tasks/T-2/artifact-content?name=evil").status_code == 403
     assert client.get(
         "/api/tasks/T-2/artifact-content?name=nope").status_code == 404
+
+
+def test_secure_webui_login_cookie_and_csrf(secure_client):
+    assert secure_client.get("/").status_code == 200
+    assert secure_client.get("/api/overview").status_code == 401
+    assert secure_client.get("/api/auth/status").status_code == 401
+    assert _login(secure_client, "wrong-token-012345")[0].status_code == 401
+
+    login, csrf = _login(secure_client, "admin-token-0123456789")
+    assert login.status_code == 200
+    assert login.json()["role"] == "admin"
+    cookie = login.headers["set-cookie"]
+    assert "HttpOnly" in cookie
+    assert "SameSite=strict" in cookie
+    assert secure_client.get("/api/auth/status").json()["csrf"] == csrf
+
+    assert secure_client.post(
+        "/api/grants", json={"pattern": "restart"}).status_code == 403
+    allowed = secure_client.post(
+        "/api/grants", json={"pattern": "restart"},
+        headers={"X-CSRF-Token": csrf})
+    assert allowed.status_code == 200
+
+
+def test_secure_webui_role_boundaries(secure_client, monkeypatch):
+    from orchestrator.task_manager import TaskManager
+
+    async def fake(self, task_id, **kwargs):
+        return {"task_id": task_id, **kwargs}
+
+    monkeypatch.setattr(TaskManager, "intervene_agent_session", fake)
+
+    viewer, viewer_csrf = _login(secure_client, "viewer-token-01234567")
+    assert viewer.status_code == 200
+    assert secure_client.get("/api/overview").status_code == 200
+    assert secure_client.post(
+        "/api/tasks/T-1/interventions", json={"mode": "comment"},
+        headers={"X-CSRF-Token": viewer_csrf}).status_code == 403
+
+    operator, operator_csrf = _login(
+        secure_client, "operator-token-012345")
+    assert operator.status_code == 200
+    intervention = secure_client.post(
+        "/api/tasks/T-1/interventions",
+        json={"mode": "comment", "content": {"text": "note"}},
+        headers={"X-CSRF-Token": operator_csrf})
+    assert intervention.status_code == 200
+    assert secure_client.post(
+        "/api/grants", json={"pattern": "restart"},
+        headers={"X-CSRF-Token": operator_csrf}).status_code == 403
+
+
+def test_secure_webui_rejects_tampered_cookie(secure_client):
+    login, _ = _login(secure_client, "admin-token-0123456789")
+    assert login.status_code == 200
+    value = secure_client.cookies.get("agenthub_session")
+    secure_client.cookies.set("agenthub_session", value[:-1] + "x")
+    assert secure_client.get("/api/overview").status_code == 401
+
+
+def test_webui_security_bind_validation(monkeypatch):
+    from webui.server import validate_webui_security
+
+    for name in ("LAS_WEBUI_TOKENS", "LAS_WEBUI_SESSION_SECRET",
+                 "LAS_WEBUI_REQUIRE_AUTH"):
+        monkeypatch.delenv(name, raising=False)
+    validate_webui_security("127.0.0.1")
+    with pytest.raises(RuntimeError, match="非 loopback"):
+        validate_webui_security("0.0.0.0")
+
+    monkeypatch.setenv("LAS_WEBUI_REQUIRE_AUTH", "true")
+    with pytest.raises(RuntimeError, match="TOKENS 为空"):
+        validate_webui_security("127.0.0.1")
+    monkeypatch.setenv(
+        "LAS_WEBUI_TOKENS", '{"admin-token-0123456789":"admin"}')
+    monkeypatch.setenv("LAS_WEBUI_SESSION_SECRET", "short")
+    with pytest.raises(RuntimeError, match="至少 32"):
+        validate_webui_security("0.0.0.0")

@@ -84,7 +84,8 @@ revision 写许可失效。
 
 ## Phase 5：生产部署加固
 
-- WebUI 身份认证、CSRF、RBAC；
+- [x] WebUI 身份认证、签名 HttpOnly Cookie、CSRF、RBAC，以及非 loopback
+  无认证启动失败；compose 默认 fail-closed；
 - gateway TLS/JWT/ACL/限流；
 - 固定镜像版本、SBOM、签名和漏洞扫描；
 - readiness、资源限制、日志轮换和告警；

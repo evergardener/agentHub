@@ -130,7 +130,8 @@ hermes          runtime 镜像（总控入口，见 §6）
 - **审批中心**：blocked（input-required）任务列表 + 批准/拒绝按钮
   （对接已有 approve/reject）。
 - 技术：FastAPI 复用 state_store 出 JSON/SSE；前端轻量单页
-  （htmx 或 React，不做账号体系，loopback only）。
+  （初版为 loopback-only；生产加固现已增加 token 登录、CSRF 与 RBAC，
+  默认仍只发布到 loopback）。
 
 ## 6. Hermes 总控交互层
 

@@ -377,6 +377,8 @@ const S = {
   EV_CAP: 300,           // 事件流 DOM 上限
   detailId: null,
   interactions: new Map(),
+  role: null,
+  csrf: null,
 };
 
 const $ = (s) => document.querySelector(s);
@@ -391,6 +393,11 @@ const agentColor = (id) => {
 };
 
 async function fetchJson(url, opt) {
+  opt = {...(opt || {}), credentials: "same-origin"};
+  const method = String(opt.method || "GET").toUpperCase();
+  if (!["GET", "HEAD", "OPTIONS"].includes(method) && S.csrf) {
+    opt.headers = {...(opt.headers || {}), "X-CSRF-Token": S.csrf};
+  }
   const r = await fetch(url, opt);
   const data = await r.json().catch(() => ({}));
   if (!r.ok && !data.error) data.error = `HTTP ${r.status}`;
@@ -458,10 +465,10 @@ function renderBlocked(tasks) {
        <div class="obj2">${esc(x.objective || "")}</div>
        <div>${nativeTasks.has(x.id)
          ? `<span style="font-size:12px;color:var(--warn)">请在「AGENT 交互」中处理原生请求</span>`
-         : `
+         : S.role !== "viewer" ? `
          <button class="btn ok" data-decide="approve" data-id="${esc(x.id)}">批准</button>
          <button class="btn no" data-decide="reject" data-id="${esc(x.id)}">拒绝</button>
-         `}</div>
+         ` : `<span style="font-size:12px;color:var(--mut)">只读角色</span>`}</div>
      </div>`
   ).join("") || `<div class="empty">（无待审批任务）</div>`;
   document.querySelectorAll("[data-decide]").forEach(b =>
@@ -486,8 +493,8 @@ function renderInteractions(items) {
         <div class="obj2"><b>${esc(p.toolName || "tool")}</b> · ${esc(p.reason || "请求执行原生工具")}</div>
         <div class="mono" style="margin-bottom:8px;max-height:120px">${esc(detail)}</div>
         <div class="sub" style="margin-bottom:8px;color:var(--mut)">${esc(x.operation || "未关联 ActionIntent")} · ${esc(x.action_intent_status || "pending")}</div>
-        <button class="btn ok" data-i-allow="${esc(x.id)}"${allowDisabled}>逐次允许</button>
-        <button class="btn no" data-i-reject="${esc(x.id)}">拒绝</button>
+        ${S.role !== "viewer" ? `<button class="btn ok" data-i-allow="${esc(x.id)}"${allowDisabled}>逐次允许</button>
+        <button class="btn no" data-i-reject="${esc(x.id)}">拒绝</button>` : `<span style="font-size:12px;color:var(--mut)">只读角色</span>`}
       </div>`;
     }
     const questions = (p.questions || []).map(q => {
@@ -502,7 +509,7 @@ function renderInteractions(items) {
     }).join("");
     return `<div class="appr" data-question-form="${esc(x.id)}">
       <div class="top"><span class="tid">${esc(x.agent_id)}</span>${badge("blocked")}</div>
-      ${questions}<button class="btn ok" data-i-answer="${esc(x.id)}">提交回答</button>
+      ${questions}${S.role !== "viewer" ? `<button class="btn ok" data-i-answer="${esc(x.id)}">提交回答</button>` : `<span style="font-size:12px;color:var(--mut)">只读角色</span>`}
     </div>`;
   }).join("") || `<div class="empty">（无待处理原生交互）</div>`;
   document.querySelectorAll("[data-i-allow]").forEach(b =>
@@ -519,7 +526,7 @@ function renderGrants(grants) {
   $("#grants").innerHTML = grants.map(g =>
     `<div class="grant-row">
        <code>#${g.id}</code><span>${esc(g.pattern)}</span>
-       <button class="btn x" data-revoke="${g.id}">撤销</button>
+       ${S.role === "admin" ? `<button class="btn x" data-revoke="${g.id}">撤销</button>` : ""}
      </div>`
   ).join("") || `<div class="empty">（无常驻授权）</div>`;
   document.querySelectorAll("[data-revoke]").forEach(b =>
@@ -673,7 +680,7 @@ async function openDetail(id) {
       } catch (_) {}
       return `#${m.sequence} ${m.message_type} · rev ${m.based_on_revision}\n${content}`;
     }).join("\n\n");
-  const canControl = currentSession && ![
+  const canControl = S.role !== "viewer" && currentSession && ![
     "completed", "reviewed", "accepted", "failed", "cancelled"
   ].includes(t.status);
   const controls = canControl ?
@@ -887,8 +894,35 @@ hb.onchange = () => {
 setInterval(() => {
   $("#clock").textContent = new Date().toLocaleString("zh-CN", {hour12: false});
 }, 1000);
-loadAll();
-startStream();
+async function bootstrap() {
+  let status = await fetchJson("/api/auth/status");
+  if (status.error) {
+    const token = prompt("请输入 AgentHub WebUI 登录 Token");
+    if (!token) {
+      setConn(false, "需要登录");
+      return;
+    }
+    status = await fetchJson("/api/auth/login", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({token}),
+    });
+  }
+  if (status.error) {
+    alert(status.error);
+    setConn(false, "登录失败，刷新后重试");
+    return;
+  }
+  S.role = status.role || "admin";
+  S.csrf = status.csrf || null;
+  if (S.role !== "admin") {
+    $("#grant-pattern").disabled = true;
+    $("#grant-add").disabled = true;
+    $("#grant-pattern").placeholder = "仅 admin 可管理常驻授权";
+  }
+  loadAll();
+  startStream();
+}
+bootstrap();
 </script>
 </body>
 </html>

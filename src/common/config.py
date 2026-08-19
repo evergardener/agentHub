@@ -19,6 +19,8 @@
   LAS_LEASE_TTL         → AGENT_LEASE_TTL      agent 租约秒
   LAS_A2A_PEERS         （无别名）              orchestrator A2A peer 映射（JSON）
   LAS_ACTION_RECEIPT_SECRET（无别名）           ActionIntent receipt HMAC 密钥
+  LAS_WEBUI_TOKENS      （无别名）              WebUI token→role JSON 映射
+  LAS_WEBUI_SESSION_SECRET（无别名）            WebUI session cookie HMAC 密钥
 """
 
 from __future__ import annotations
@@ -97,6 +99,56 @@ def api_token() -> str:
     回退 LAS_ADAPTER_TOKEN（单租户可共用）；均空 = 关闭（仅开发）。
     """
     return _env("LAS_API_TOKEN") or adapter_token()
+
+
+def webui_tokens() -> dict[str, str]:
+    """WebUI login token → role mapping (viewer/operator/admin).
+
+    Empty means authentication is disabled and is only valid for loopback
+    development. Malformed security configuration always fails closed.
+    """
+    import json
+
+    raw = _env("LAS_WEBUI_TOKENS").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"LAS_WEBUI_TOKENS 不是合法 JSON: {e}") from e
+    if not isinstance(data, dict) or not data:
+        raise ValueError("LAS_WEBUI_TOKENS 必须是非空 {token: role} 字典")
+    allowed = {"viewer", "operator", "admin"}
+    tokens: dict[str, str] = {}
+    for token, role in data.items():
+        if not isinstance(token, str) or len(token) < 16:
+            raise ValueError("LAS_WEBUI_TOKENS 中每个 token 至少 16 个字符")
+        if role not in allowed:
+            raise ValueError(
+                "LAS_WEBUI_TOKENS role 仅允许 viewer/operator/admin")
+        tokens[token] = role
+    return tokens
+
+
+def webui_session_secret() -> str:
+    return _env("LAS_WEBUI_SESSION_SECRET")
+
+
+def webui_session_ttl() -> int:
+    ttl = int(_env("LAS_WEBUI_SESSION_TTL", default="28800"))
+    if not 300 <= ttl <= 604800:
+        raise ValueError("LAS_WEBUI_SESSION_TTL 必须在 300..604800 秒之间")
+    return ttl
+
+
+def webui_cookie_secure() -> bool:
+    return _env("LAS_WEBUI_COOKIE_SECURE", default="false").lower() in {
+        "1", "true", "yes", "on"}
+
+
+def webui_require_auth() -> bool:
+    return _env("LAS_WEBUI_REQUIRE_AUTH", default="false").lower() in {
+        "1", "true", "yes", "on"}
 
 
 # peer→worker 固定映射允许的 worker 白名单（Hermes 接入约定，

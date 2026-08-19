@@ -122,6 +122,12 @@ services:
       LAS_GATEWAY_URL: http://agentgateway:8300
       LAS_GATEWAY_API_KEY: ${LAS_GATEWAY_API_KEY:-}
       LAS_ADAPTER_TOKEN: ${LAS_ADAPTER_TOKEN:-}
+      # WebUI 控制面默认 fail-closed；先在 .env 配 token→role 和 session HMAC
+      LAS_WEBUI_REQUIRE_AUTH: "true"
+      LAS_WEBUI_TOKENS: ${LAS_WEBUI_TOKENS:-}
+      LAS_WEBUI_SESSION_SECRET: ${LAS_WEBUI_SESSION_SECRET:-}
+      LAS_WEBUI_SESSION_TTL: ${LAS_WEBUI_SESSION_TTL:-28800}
+      LAS_WEBUI_COOKIE_SECURE: ${LAS_WEBUI_COOKIE_SECURE:-false}
       # 宿主机工作区（host adapter 产物路径以此绝对路径入库）；
       # 下方以相同路径只读挂载，artifact-content 端点据此放行读取
       LAS_WEBUI_ARTIFACT_ROOTS: ${HOME}/AgentWorkspace
@@ -129,7 +135,7 @@ services:
       - agent-data:/data
       - ${HOME}/AgentWorkspace:${HOME}/AgentWorkspace:ro
     ports:
-      - "127.0.0.1:18070:8080"  # loopback only，无账号体系
+      - "127.0.0.1:18070:8080"  # 仍仅 loopback；另有应用层认证/CSRF/RBAC
     depends_on:
       state-writer:
         condition: service_started

@@ -1,4 +1,4 @@
-"""agentHub Web UI — 只读为主 + 审批操作（Evolution v3 §5.2）。
+"""agentHub Web UI — 看板、审批、会话介入与生产控制面安全。
 
 功能：
   Dashboard   Agent 在线状态/租约 + 任务按状态计数
@@ -6,14 +6,20 @@
   事件流      /api/events/stream（SSE，seq 游标轮询）
   审批中心    blocked 任务批准/拒绝；常驻授权（grants）管理
 
-loopback only，无账号体系。启动：
+生产支持 token 登录、签名 HttpOnly session cookie、CSRF 与 RBAC。启动：
   python -m webui.server   # LAS_WEBUI_HOST/PORT 可覆盖（默认 127.0.0.1:8080）
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import hashlib
+import hmac
 import json
+import secrets
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -21,6 +27,72 @@ from fastapi.responses import (FileResponse, JSONResponse,
                                StreamingResponse)
 
 STATIC = Path(__file__).parent / "static"
+COOKIE_NAME = "agenthub_session"
+ROLES = {"viewer": 1, "operator": 2, "admin": 3}
+
+
+def _b64encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64decode(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+
+
+def _sign_session(payload: dict, secret: str) -> str:
+    encoded = _b64encode(json.dumps(
+        payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+    signature = hmac.new(secret.encode(), encoded.encode(),
+                         hashlib.sha256).digest()
+    return f"{encoded}.{_b64encode(signature)}"
+
+
+def _token_id(token: str) -> str:
+    """Non-secret stable subject id used to revoke sessions on token removal."""
+    return hashlib.sha256(token.encode()).hexdigest()[:24]
+
+
+def _verify_session(value: str, secret: str) -> dict | None:
+    try:
+        encoded, supplied = value.split(".", 1)
+        expected = hmac.new(secret.encode(), encoded.encode(),
+                            hashlib.sha256).digest()
+        if not hmac.compare_digest(supplied, _b64encode(expected)):
+            return None
+        payload = json.loads(_b64decode(encoded))
+        if (not isinstance(payload, dict)
+                or payload.get("role") not in ROLES
+                or not isinstance(payload.get("sub"), str)
+                or not isinstance(payload.get("csrf"), str)
+                or float(payload.get("exp", 0)) <= time.time()):
+            return None
+        return payload
+    except (ValueError, TypeError, json.JSONDecodeError, binascii.Error):
+        return None
+
+
+def validate_webui_security(host: str) -> None:
+    """Fail startup closed when auth/session configuration is unsafe."""
+    import ipaddress
+
+    from common import config as cfg
+
+    tokens = cfg.webui_tokens()
+    if cfg.webui_require_auth() and not tokens:
+        raise RuntimeError(
+            "LAS_WEBUI_REQUIRE_AUTH=true 但 LAS_WEBUI_TOKENS 为空")
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host.lower() == "localhost"
+    if not loopback and not tokens:
+        raise RuntimeError(
+            "WebUI 绑定非 loopback 地址时必须配置 LAS_WEBUI_TOKENS")
+    if tokens and len(cfg.webui_session_secret()) < 32:
+        raise RuntimeError(
+            "启用 WebUI 认证时 LAS_WEBUI_SESSION_SECRET 至少 32 个字符")
+    if tokens:
+        cfg.webui_session_ttl()
 
 
 def _conn():
@@ -46,13 +118,113 @@ def _is_under(path: Path, root: Path) -> bool:
 
 
 def create_app() -> FastAPI:
+    from common import config as cfg
+
+    # create_app is used by tests and local embedding; validate token/session
+    # invariants here, while main() additionally validates the actual bind host.
+    tokens = cfg.webui_tokens()
+    if tokens and len(cfg.webui_session_secret()) < 32:
+        raise RuntimeError(
+            "启用 WebUI 认证时 LAS_WEBUI_SESSION_SECRET 至少 32 个字符")
+    if cfg.webui_require_auth() and not tokens:
+        raise RuntimeError(
+            "LAS_WEBUI_REQUIRE_AUTH=true 但 LAS_WEBUI_TOKENS 为空")
+    session_secret = cfg.webui_session_secret()
+    valid_subjects = {_token_id(token): role for token, role in tokens.items()}
     app = FastAPI(title="agentHub Web UI", version="0.1.0")
+
+    @app.middleware("http")
+    async def control_plane_security(request: Request, call_next):
+        if not tokens:
+            request.state.role = "admin"
+            return await call_next(request)
+
+        # The login form and shell must be reachable before a session exists.
+        if request.url.path in {"/", "/api/auth/login"}:
+            return await call_next(request)
+
+        claims = _verify_session(
+            request.cookies.get(COOKIE_NAME, ""), session_secret)
+        if (claims is None
+                or valid_subjects.get(claims.get("sub")) != claims.get("role")):
+            return JSONResponse({"error": "authentication required"},
+                                status_code=401)
+        request.state.role = claims["role"]
+        request.state.session_exp = claims["exp"]
+
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            csrf = request.headers.get("X-CSRF-Token", "")
+            if not hmac.compare_digest(csrf, claims["csrf"]):
+                return JSONResponse({"error": "CSRF token invalid"},
+                                    status_code=403)
+            required = ("viewer" if request.url.path == "/api/auth/logout"
+                        else "admin" if request.url.path.startswith("/api/grants")
+                        else "operator")
+            if ROLES[claims["role"]] < ROLES[required]:
+                return JSONResponse(
+                    {"error": f"{required} role required"}, status_code=403)
+        return await call_next(request)
 
     # ---------- 页面 ----------
 
     @app.get("/")
     async def index():
         return FileResponse(STATIC / "index.html")
+
+    # ---------- 登录 / 会话 ----------
+
+    @app.post("/api/auth/login")
+    async def login(request: Request):
+        if not tokens:
+            return {"enabled": False, "role": "admin", "csrf": None}
+        try:
+            body = await request.json()
+        except (ValueError, json.JSONDecodeError):
+            body = {}
+        supplied = body.get("token", "") if isinstance(body, dict) else ""
+        role = None
+        if isinstance(supplied, str):
+            # Compare every configured token to avoid a dictionary timing oracle.
+            for candidate, candidate_role in tokens.items():
+                if hmac.compare_digest(supplied, candidate):
+                    role = candidate_role
+        if role is None:
+            return JSONResponse({"error": "invalid login token"},
+                                status_code=401)
+        csrf = secrets.token_urlsafe(24)
+        response = JSONResponse({"enabled": True, "role": role,
+                                 "csrf": csrf})
+        response.set_cookie(
+            COOKIE_NAME,
+            _sign_session({"role": role, "sub": _token_id(supplied),
+                           "csrf": csrf,
+                           "exp": int(time.time()) + cfg.webui_session_ttl()},
+                          session_secret),
+            max_age=cfg.webui_session_ttl(), httponly=True,
+            secure=cfg.webui_cookie_secure(), samesite="strict", path="/",
+        )
+        return response
+
+    @app.get("/api/auth/status")
+    async def auth_status(request: Request):
+        if not tokens:
+            return {"enabled": False, "role": "admin", "csrf": None}
+        claims = _verify_session(
+            request.cookies.get(COOKIE_NAME, ""), session_secret)
+        # Middleware has already authenticated this request; keep the explicit
+        # check so this route remains safe if middleware exclusions change.
+        if (claims is None
+                or valid_subjects.get(claims.get("sub")) != claims.get("role")):
+            return JSONResponse({"error": "authentication required"},
+                                status_code=401)
+        return {"enabled": True, "role": claims["role"],
+                "csrf": claims["csrf"]}
+
+    @app.post("/api/auth/logout")
+    async def logout():
+        response = JSONResponse({"logged_out": True})
+        response.delete_cookie(COOKIE_NAME, path="/", samesite="strict")
+        return response
 
     # ---------- 只读 API ----------
 
@@ -185,6 +357,9 @@ def create_app() -> FastAPI:
         async def gen():
             last = after
             while True:
+                session_exp = getattr(request.state, "session_exp", None)
+                if session_exp is not None and time.time() >= session_exp:
+                    break
                 # 客户端断开即退出，避免孤儿生成器每 3s 空转查库
                 if await request.is_disconnected():
                     break
@@ -334,8 +509,10 @@ def main() -> None:
 
     import uvicorn
 
+    host = os.environ.get("LAS_WEBUI_HOST", "127.0.0.1")
+    validate_webui_security(host)
     uvicorn.run(create_app(),
-                host=os.environ.get("LAS_WEBUI_HOST", "127.0.0.1"),
+                host=host,
                 port=int(os.environ.get("LAS_WEBUI_PORT", "8080")),
                 log_level="info")
 

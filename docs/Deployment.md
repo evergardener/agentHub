@@ -70,6 +70,8 @@ cp .env.example .env && chmod 600 .env
 | `LAS_PG_PASSWORD` | PostgreSQL 密码；**已有数据卷时改它会导致认证失败**（见 §6.2） |
 | `LAS_ADAPTER_TOKEN` | 留空即可——worker 首启自动生成随机值回写本文件 |
 | `LAS_ACTION_RECEIPT_SECRET` | ActionIntent receipt HMAC 密钥；生产用 `openssl rand -hex 32` 独立生成；暂时可回退 adapter token |
+| `LAS_WEBUI_TOKENS` | WebUI 登录 token→role JSON；token 用 `openssl rand -hex 24` 生成，role 为 `viewer` / `operator` / `admin` |
+| `LAS_WEBUI_SESSION_SECRET` | WebUI 签名 session cookie 的独立 HMAC 密钥，使用 `openssl rand -hex 32`；未配置时 WebUI 拒绝启动 |
 | `LAS_ADAPTER_BIND` | worker 监听地址，默认 `127.0.0.1`；需容器回连时加宿主机 LAN IP |
 | `LAS_DSH_PERMISSION_PRESET` | 当前必须为 `read-only`；ActionIntent 回执已接通，但 tool target normalization/脱敏完成前拒绝更宽 preset |
 | `LAS_DATABASE_URL` | 留空 = compose PG；`sqlite:////path/x.db` = SQLite；外部 PG 直接填 URL |
@@ -83,7 +85,7 @@ docker compose ps          # 全部 Up / healthy
 ```
 
 入口：
-- Web UI（看板/审批/事件流/复审记录）：http://127.0.0.1:18070
+- Web UI（看板/审批/事件流/复审记录）：http://127.0.0.1:18070；首次打开输入 `.env` 中某个 `LAS_WEBUI_TOKENS` key
 - Jaeger：http://127.0.0.1:16686
 - **外部总控 A2A 端点**（自建 hermes 接入）：http://127.0.0.1:8310，
   契约见 [docs/orchestrator-a2a.md](orchestrator-a2a.md)。支持 A2A v1.0
@@ -176,26 +178,43 @@ ACP 当前不支持。所有操作会写入 conversation message 与 `user.inter
 偏差，应先点“中断当前 turn”，再由 Hermes 按新 revision 下发下一轮，不得把
 新 prompt 伪装成对旧 turn 的 steer。
 
-只读查询：
+以下 `curl` 示例先登录并保存 cookie/CSRF（浏览器会自动处理）：
 
 ```bash
-curl 'http://127.0.0.1:18070/api/interactions?status=pending'
+curl -sS -c /tmp/agenthub-webui.cookie \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"<LAS_WEBUI_TOKENS 中的 token>"}' \
+  http://127.0.0.1:18070/api/auth/login
+```
+
+响应中的 `csrf` 用于所有写请求的 `X-CSRF-Token`；cookie 文件含登录凭据，使用
+完成后应删除。只读查询：
+
+```bash
+curl -b /tmp/agenthub-webui.cookie \
+  'http://127.0.0.1:18070/api/interactions?status=pending'
 ```
 
 逐次拒绝或回答也可直接调用 Web API：
 
 ```bash
-curl -X POST -H 'Content-Type: application/json' \
+curl -X POST -b /tmp/agenthub-webui.cookie \
+  -H 'Content-Type: application/json' -H 'X-CSRF-Token: <csrf>' \
   -d '{"outcome":"rejected"}' \
   http://127.0.0.1:18070/api/interactions/INT-ID/respond
 
-curl -X POST -H 'Content-Type: application/json' \
+curl -X POST -b /tmp/agenthub-webui.cookie \
+  -H 'Content-Type: application/json' -H 'X-CSRF-Token: <csrf>' \
   -d '{"answer":{"answers":[{"id":"question-id","selected":["选项"]}]}}' \
   http://127.0.0.1:18070/api/interactions/INT-ID/respond
 ```
 
-当前 WebUI 仍是 loopback-only、无账号体系；不得反向代理到局域网或公网。生产
-开放前必须完成 Phase 5 的认证、CSRF 与 RBAC。
+WebUI 已启用签名 HttpOnly session cookie、SameSite=Strict、CSRF 和 RBAC。
+`viewer` 只读，`operator` 可审批/回答/介入，`admin` 还可创建或撤销常驻授权。
+compose 默认 `LAS_WEBUI_REQUIRE_AUTH=true`，缺 token 或 session secret 会拒绝启动；
+即使误把 `LAS_WEBUI_HOST` 绑定到非 loopback，无认证配置也会拒绝启动。默认仍只
+发布到宿主机 loopback。跨主机开放必须在可信反向代理上启用 HTTPS，同时设置
+`LAS_WEBUI_COOKIE_SECURE=true`；不得以裸 HTTP 暴露到局域网或公网。
 
 ## 4. 日常操作速查
 
@@ -269,3 +288,5 @@ codex/kimi。临时绕过：`LAS_GATEWAY_URL=` 置空走直连；长期方案是
 - worker 需要容器回连时才加 LAN IP 到 `LAS_ADAPTER_BIND`，且必须配 `LAS_ADAPTER_TOKEN`
 - `never_grant` 高危操作（删库、 force push 等）只能逐次人工批准，见 `src/hermes/policy.py`
 - gateway `apiKey.agents` ACL 控制 hermes 可访问的 agent 列表
+- WebUI 使用高熵 token、签名 HttpOnly Cookie、CSRF 与 `viewer/operator/admin`
+  RBAC；跨主机只允许经带登录限流的 HTTPS 反向代理访问
