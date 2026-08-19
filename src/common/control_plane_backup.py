@@ -22,6 +22,10 @@ class BackupError(RuntimeError):
     pass
 
 
+MIGRATION_RECEIPT_DEST = (
+    "/data/workspace/runtime/migration-backup-receipt.json")
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -44,6 +48,39 @@ def _run(runner: Runner, args: list[str], **kwargs) -> subprocess.CompletedProce
 
 def _compose(runner: Runner, *args: str, **kwargs) -> subprocess.CompletedProcess:
     return _run(runner, ["docker", "compose", *args], **kwargs)
+
+
+def _write_migration_receipt(runner: Runner, writer_id: str,
+                             archive: Path) -> None:
+    receipt = {
+        "format_version": 1,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "archive_sha256": _sha256(archive),
+    }
+    with tempfile.TemporaryDirectory(prefix="agenthub-receipt-") as temp:
+        source = Path(temp) / "migration-backup-receipt.json"
+        source.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+        source.chmod(0o600)
+        _run(runner, ["docker", "exec", writer_id, "mkdir", "-p",
+                      "/data/workspace/runtime"])
+        _run(runner, ["docker", "exec", writer_id, "rm", "-f",
+                      f"{MIGRATION_RECEIPT_DEST}.consuming"])
+        _run(runner, ["docker", "cp", str(source),
+                      f"{writer_id}:{MIGRATION_RECEIPT_DEST}"])
+
+
+def _write_restored_migration_receipt(agent_data: Path,
+                                      archive: Path) -> None:
+    destination = (agent_data / "workspace" / "runtime" /
+                   "migration-backup-receipt.json")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps({
+        "format_version": 1,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "archive_sha256": _sha256(archive),
+    }, indent=2) + "\n", encoding="utf-8")
+    destination.chmod(0o600)
+    destination.with_suffix(".json.consuming").unlink(missing_ok=True)
 
 
 def create_backup(output_dir: Path, workspace: Path | None,
@@ -137,6 +174,11 @@ def create_backup(output_dir: Path, workspace: Path | None,
     try:
         verify_backup(archive_part)
         archive_part.replace(archive)
+        try:
+            _write_migration_receipt(runner, writer_id, archive)
+        except BackupError as exc:
+            raise BackupError(
+                f"备份已验证并保留在 {archive}，但迁移回执写入失败") from exc
     except Exception:
         archive_part.unlink(missing_ok=True)
         raise
@@ -245,6 +287,8 @@ def restore_backup(archive: Path, safety_dir: Path,
                     "--if-exists", "--exit-on-error", "--no-owner",
                     "--no-acl", stdin=dump)
             _restore_volume(runner, "nats", extracted / "nats-data")
+            _write_restored_migration_receipt(
+                extracted / "agent-data", stable_archive)
             _restore_volume(runner, "state-writer", extracted / "agent-data")
 
             preserved_workspace = None

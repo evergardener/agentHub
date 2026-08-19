@@ -21,6 +21,8 @@ ALL_KEYS = [
     "LAS_WEBUI_SESSION_TTL", "LAS_WEBUI_COOKIE_SECURE",
     "LAS_WEBUI_REQUIRE_AUTH",
     "LAS_ORCH_REQUIRE_AUTH",
+    "LAS_REQUIRE_MIGRATION_BACKUP", "LAS_MIGRATION_BACKUP_RECEIPT",
+    "LAS_MIGRATION_BACKUP_MAX_AGE",
 ]
 
 
@@ -81,6 +83,18 @@ def test_orchestrator_require_auth(monkeypatch):
     assert cfg.orchestrator_require_auth() is False
     monkeypatch.setenv("LAS_ORCH_REQUIRE_AUTH", "1")
     assert cfg.orchestrator_require_auth() is True
+
+
+def test_migration_backup_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path))
+    assert cfg.require_migration_backup() is False
+    assert cfg.migration_backup_receipt() == (
+        tmp_path / "runtime" / "migration-backup-receipt.json")
+    assert cfg.migration_backup_max_age() == 86400
+    monkeypatch.setenv("LAS_REQUIRE_MIGRATION_BACKUP", "true")
+    monkeypatch.setenv("LAS_MIGRATION_BACKUP_MAX_AGE", "600")
+    assert cfg.require_migration_backup() is True
+    assert cfg.migration_backup_max_age() == 600
 
 
 @pytest.mark.parametrize("value", [

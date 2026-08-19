@@ -95,6 +95,17 @@ def check_production_env(path: Path) -> list[Finding]:
     if not _enabled(env.get("LAS_ORCH_REQUIRE_AUTH", "")):
         findings.append(Finding(
             "error", "LAS_ORCH_REQUIRE_AUTH", "生产必须为 true"))
+    if not _enabled(env.get("LAS_REQUIRE_MIGRATION_BACKUP", "")):
+        findings.append(Finding(
+            "error", "LAS_REQUIRE_MIGRATION_BACKUP", "生产必须为 true"))
+    try:
+        max_age = int(env.get("LAS_MIGRATION_BACKUP_MAX_AGE", "86400"))
+        if not 300 <= max_age <= 604800:
+            raise ValueError
+    except ValueError:
+        findings.append(Finding(
+            "error", "LAS_MIGRATION_BACKUP_MAX_AGE",
+            "必须在 300..604800 秒之间"))
     require_secret("LAS_WEBUI_SESSION_SECRET", 32)
 
     raw_web_tokens = env.get("LAS_WEBUI_TOKENS", "")

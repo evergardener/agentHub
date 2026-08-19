@@ -22,6 +22,7 @@
   LAS_WEBUI_TOKENS      （无别名）              WebUI token→role JSON 映射
   LAS_WEBUI_SESSION_SECRET（无别名）            WebUI session cookie HMAC 密钥
   LAS_ORCH_REQUIRE_AUTH  （无别名）              Orchestrator A2A 强制认证开关
+  LAS_REQUIRE_MIGRATION_BACKUP（无别名）         生产迁移前强制备份回执
 """
 
 from __future__ import annotations
@@ -155,6 +156,24 @@ def webui_require_auth() -> bool:
 def orchestrator_require_auth() -> bool:
     return _env("LAS_ORCH_REQUIRE_AUTH", default="false").lower() in {
         "1", "true", "yes", "on"}
+
+
+def require_migration_backup() -> bool:
+    return _env("LAS_REQUIRE_MIGRATION_BACKUP", default="false").lower() in {
+        "1", "true", "yes", "on"}
+
+
+def migration_backup_receipt() -> Path:
+    return Path(_env(
+        "LAS_MIGRATION_BACKUP_RECEIPT",
+        default=str(workspace() / "runtime" / "migration-backup-receipt.json")))
+
+
+def migration_backup_max_age() -> int:
+    seconds = int(_env("LAS_MIGRATION_BACKUP_MAX_AGE", default="86400"))
+    if not 300 <= seconds <= 604800:
+        raise ValueError("LAS_MIGRATION_BACKUP_MAX_AGE 必须在 300..604800 秒之间")
+    return seconds
 
 
 # peer→worker 固定映射允许的 worker 白名单（Hermes 接入约定，

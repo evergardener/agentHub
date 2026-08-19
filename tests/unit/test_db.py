@@ -1,7 +1,11 @@
-"""SQLite 建库与并发安全 ID 生成测试（设计文档 §6 / §22.1）。"""
+"""状态库、并发 ID 与生产迁移备份门禁测试。"""
 
+import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 from common.ids import idempotency_key, temp_task_id
 from state.db import MIGRATIONS_DIR, init_db, migrate, next_task_id
@@ -98,3 +102,113 @@ def test_migrations_upgrade_existing_database(tmp_path):
         "SELECT name FROM sqlite_master WHERE type = 'table'"
         " AND name = 'agent_session_interactions';"
     ).fetchone() is not None
+
+
+class _FakePg:
+    backend = "pg"
+
+    def __init__(self):
+        self.conn = sqlite3.connect(":memory:")
+
+    def execute(self, sql, params=()):
+        return self.conn.execute(sql, params)
+
+    def commit(self):
+        self.conn.commit()
+
+
+def _existing_pg() -> _FakePg:
+    conn = _FakePg()
+    conn.execute(
+        "CREATE TABLE schema_migrations ("
+        "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);")
+    conn.execute(
+        "INSERT INTO schema_migrations VALUES (1, '2026-08-19T00:00:00Z');")
+    conn.commit()
+    return conn
+
+
+def _write_receipt(path: Path, created: datetime):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "format_version": 1,
+        "created_at": created.isoformat(),
+        "archive_sha256": "a" * 64,
+    }), encoding="utf-8")
+
+
+def test_pg_migration_requires_and_consumes_fresh_backup_receipt(
+        tmp_path, monkeypatch):
+    from state import db as db_module
+
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    (migrations / "001_existing.sql").write_text(
+        "CREATE TABLE already_applied (id INTEGER);", encoding="utf-8")
+    (migrations / "002_test.sql").write_text(
+        "CREATE TABLE guarded (id INTEGER PRIMARY KEY);", encoding="utf-8")
+    receipt = tmp_path / "receipt.json"
+    monkeypatch.setattr(db_module, "MIGRATIONS_PG_DIR", migrations)
+    monkeypatch.setenv("LAS_REQUIRE_MIGRATION_BACKUP", "true")
+    monkeypatch.setenv("LAS_MIGRATION_BACKUP_RECEIPT", str(receipt))
+
+    conn = _existing_pg()
+    with pytest.raises(RuntimeError, match="一次性备份回执"):
+        db_module.migrate(conn)
+    _write_receipt(receipt, datetime.now(timezone.utc))
+    assert db_module.migrate(conn) == [2]
+    assert not receipt.exists()
+    assert not receipt.with_suffix(".json.consuming").exists()
+    assert db_module.migrate(conn) == []
+
+
+def test_pg_migration_rejects_stale_backup_receipt(tmp_path, monkeypatch):
+    from state import db as db_module
+
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    (migrations / "001_existing.sql").write_text(
+        "CREATE TABLE already_applied (id INTEGER);", encoding="utf-8")
+    (migrations / "002_test.sql").write_text(
+        "CREATE TABLE guarded (id INTEGER PRIMARY KEY);", encoding="utf-8")
+    receipt = tmp_path / "receipt.json"
+    _write_receipt(receipt, datetime.now(timezone.utc) - timedelta(days=2))
+    monkeypatch.setattr(db_module, "MIGRATIONS_PG_DIR", migrations)
+    monkeypatch.setenv("LAS_REQUIRE_MIGRATION_BACKUP", "true")
+    monkeypatch.setenv("LAS_MIGRATION_BACKUP_RECEIPT", str(receipt))
+    with pytest.raises(RuntimeError, match="一次性备份回执"):
+        db_module.migrate(_existing_pg())
+
+
+def test_pg_migration_error_restores_receipt_for_retry(tmp_path, monkeypatch):
+    from state import db as db_module
+
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    (migrations / "001_existing.sql").write_text(
+        "CREATE TABLE already_applied (id INTEGER);", encoding="utf-8")
+    (migrations / "002_bad.sql").write_text(
+        "THIS IS NOT SQL;", encoding="utf-8")
+    receipt = tmp_path / "receipt.json"
+    _write_receipt(receipt, datetime.now(timezone.utc))
+    monkeypatch.setattr(db_module, "MIGRATIONS_PG_DIR", migrations)
+    monkeypatch.setenv("LAS_REQUIRE_MIGRATION_BACKUP", "true")
+    monkeypatch.setenv("LAS_MIGRATION_BACKUP_RECEIPT", str(receipt))
+    with pytest.raises(sqlite3.OperationalError):
+        db_module.migrate(_existing_pg())
+    assert receipt.is_file()
+    assert not receipt.with_suffix(".json.consuming").exists()
+
+
+def test_pg_pristine_bootstrap_does_not_require_backup(tmp_path, monkeypatch):
+    from state import db as db_module
+
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    (migrations / "001_bootstrap.sql").write_text(
+        "CREATE TABLE initial (id INTEGER PRIMARY KEY);", encoding="utf-8")
+    monkeypatch.setattr(db_module, "MIGRATIONS_PG_DIR", migrations)
+    monkeypatch.setenv("LAS_REQUIRE_MIGRATION_BACKUP", "true")
+    monkeypatch.setenv("LAS_MIGRATION_BACKUP_RECEIPT",
+                       str(tmp_path / "missing.json"))
+    assert db_module.migrate(_FakePg()) == [1]

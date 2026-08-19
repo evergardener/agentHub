@@ -18,6 +18,8 @@ def _secure_env() -> str:
         "LAS_A2A_PEERS=",
         "LAS_WEBUI_REQUIRE_AUTH=true",
         "LAS_ORCH_REQUIRE_AUTH=true",
+        "LAS_REQUIRE_MIGRATION_BACKUP=true",
+        "LAS_MIGRATION_BACKUP_MAX_AGE=86400",
         "LAS_WEBUI_SESSION_SECRET=" + "s" * 64,
         "LAS_WEBUI_TOKENS=" + json.dumps({"w" * 48: "admin"}),
         "LAS_WEBUI_COOKIE_SECURE=true",

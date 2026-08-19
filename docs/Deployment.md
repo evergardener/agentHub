@@ -251,11 +251,14 @@ compose 默认 `LAS_WEBUI_REQUIRE_AUTH=true`，缺 token 或 session secret 会�
 ## 5. 升级与回滚
 
 ```bash
+python3 scripts/control-plane-backup.py create \
+  --output /path/to/local-backups --workspace "$HOME/AgentWorkspace"
 git pull && docker compose build && docker compose up -d   # 升级
 launchctl kickstart -k gui/$(id -u)/top.evergardenviolet.agenthub.codex  # worker 代码同仓，重启即生效
 ```
 
-- 数据库迁移随 `state-writer` 启动自动执行（`migrations_pg/` 目录，幂等）
+- 数据库迁移随 `state-writer` 启动自动执行（`migrations_pg/` 目录，幂等）；
+  生产环境只有已验证备份生成的一次性回执存在且新鲜时才允许执行
 - 回滚：`git checkout <旧 commit> && docker compose build && docker compose up -d`；
   迁移只增不改，旧代码读新库一般兼容
 - 修改 `LAS_ADAPTER_TOKEN` 后：`kickstart` 重启 worker 即生效（agentctl 每次运行重读 .env）；切换窗口内进行中调用会 401
@@ -315,6 +318,13 @@ python3 scripts/control-plane-backup.py verify \
 JetStream 卷、`agent-data` 和宿主机 Workspace；随后先启动 NATS、再恢复原先
 运行的服务。归档在校验所有文件大小、SHA-256 和 `PGDMP` 头后才原子发布，权限
 固定为 600。`.env` 和其他密钥不会进入归档，必须通过独立的机密备份渠道保存。
+成功备份还会向持久卷写入一次性 migration receipt。compose 固定启用
+`LAS_REQUIRE_MIGRATION_BACKUP=true`：检测到新 migration 时，State Writer
+先将回执原子改名为 `.consuming`；无回执、超过 24 小时、格式错误或崩溃遗留
+的 consuming 状态都会拒绝迁移。迁移全部成功后回执删除，不能复用；正常捕获
+的迁移错误会恢复回执，允许修复 migration 后基于同一安全备份重试。全新空库
+没有旧数据可保护且尚不能运行备份脚本，因此首次 bootstrap 豁免此门禁；只要
+已有任一 `schema_migrations` 版本，后续升级即强制执行。
 
 `verify` 是离线操作，应定期在另一台机器和异地副本上执行。SHA-256 用于发现
 损坏，不代表来源签名；在镜像签名批次完成前只能信任来自受控备份目录的归档。

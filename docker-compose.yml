@@ -30,6 +30,8 @@ x-agenthub-env: &agenthub-env
   LAS_DATABASE_URL: postgresql://agenthub:${LAS_PG_PASSWORD:-agenthub-dev-only}@postgres:5432/agenthub
   LAS_OTEL_ENDPOINT: http://jaeger:4318   # 置空即关闭 tracing
   LAS_ACTION_RECEIPT_SECRET: ${LAS_ACTION_RECEIPT_SECRET:-}
+  LAS_REQUIRE_MIGRATION_BACKUP: "true"
+  LAS_MIGRATION_BACKUP_MAX_AGE: ${LAS_MIGRATION_BACKUP_MAX_AGE:-86400}
 
 services:
   nats:

@@ -20,6 +20,7 @@ class FakeDocker:
         self.calls: list[list[str]] = []
         self.fail_dump = fail_dump
         self.fail_restore = fail_restore
+        self.restored_receipt = False
 
     def __call__(self, args, check, **kwargs):
         self.calls.append(args)
@@ -35,9 +36,15 @@ class FakeDocker:
             kwargs["stdout"].write(b"PGDMP\x01fake-custom-dump")
         if "pg_restore" in args and self.fail_restore:
             raise subprocess.CalledProcessError(1, args)
+        if args[:3] == ["docker", "compose", "run"] and "state-writer" in args:
+            mount = args[args.index("-v") + 1].split(":/restore:ro", 1)[0]
+            receipt = (Path(mount) / "workspace" / "runtime" /
+                       "migration-backup-receipt.json")
+            self.restored_receipt = receipt.is_file()
         if args[:2] == ["docker", "cp"]:
-            target = Path(args[-1])
-            (target / "data.bin").write_bytes(args[2].encode())
+            if ":" not in args[-1]:
+                target = Path(args[-1])
+                (target / "data.bin").write_bytes(args[2].encode())
         return subprocess.CompletedProcess(args, 0, "")
 
 
@@ -52,6 +59,11 @@ def test_create_backup_quiesces_copies_restarts_and_verifies(tmp_path):
     assert archive.stat().st_mode & 0o777 == 0o600
     assert manifest["workspace_included"] is True
     assert "workspace/artifact.md" in manifest["files"]
+    assert any(call[:3] == ["docker", "exec", "state-writer-cid"]
+               for call in docker.calls)
+    assert any(call[:2] == ["docker", "cp"]
+               and call[-1].endswith("migration-backup-receipt.json")
+               for call in docker.calls)
     assert any(call[:3] == ["docker", "compose", "stop"] for call in docker.calls)
     nats_start = docker.calls.index(["docker", "compose", "start", "nats"])
     app_start = next(i for i, call in enumerate(docker.calls)
@@ -134,6 +146,10 @@ def test_restore_creates_safety_backup_and_preserves_workspace(tmp_path):
     assert artifact.read_text() == "backup-state"
     restore_call = next(call for call in docker.calls if "pg_restore" in call)
     assert "--exit-on-error" in restore_call
+    restore_index = docker.calls.index(restore_call)
+    assert not any(call[:2] == ["docker", "exec"]
+                   for call in docker.calls[restore_index + 1:])
+    assert docker.restored_receipt is True
 
 
 def test_restore_failure_keeps_services_stopped(tmp_path):

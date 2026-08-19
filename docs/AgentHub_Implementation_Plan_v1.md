@@ -100,7 +100,8 @@ revision 写许可失效。
 - [x] 受显式确认保护的自动化恢复：恢复前 safety backup、PG exit-on-error、
   卷替换、原 Workspace 可恢复保留、失败保持停机；
 - 隔离 Compose 栈实际恢复演练；
-- 数据库迁移前备份；
+- [x] 数据库 migration 前强制验证一次性、新鲜备份回执；迁移前原子消费，
+  成功删除，异常恢复供重试，崩溃遗留 consuming 状态拒绝复用；
 - 故障注入、升级和回滚演练。
 
 验收：Hermes、gateway、NATS、DB、Adapter 任一重启不丢任务或重复写操作；备份可实际恢复。

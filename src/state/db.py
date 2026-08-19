@@ -17,6 +17,7 @@ src/state/migrations_pg/NNN_name.sql（PostgreSQL）按版本号顺序应用，
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from datetime import datetime, timezone, timedelta
@@ -146,10 +147,9 @@ def _backend(conn) -> str:
     return getattr(conn, "backend", "sqlite")
 
 
-def migrate(conn) -> list[int]:
-    """应用未执行的迁移，返回本次应用的版本列表。"""
-    pg = _backend(conn) == "pg"
-    migrations_dir = MIGRATIONS_PG_DIR if pg else MIGRATIONS_DIR
+def _migration_versions(conn) -> tuple[Path, set[int], list[int]]:
+    migrations_dir = (MIGRATIONS_PG_DIR if _backend(conn) == "pg"
+                      else MIGRATIONS_DIR)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations ("
         "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);"
@@ -158,28 +158,83 @@ def migrate(conn) -> list[int]:
     applied = {
         r[0] for r in conn.execute("SELECT version FROM schema_migrations;")
     }
-    newly: list[int] = []
+    available = []
     for path in sorted(migrations_dir.glob("*.sql")):
-        m = re.match(r"^(\d+)_", path.name)
-        if not m:
-            continue
-        version = int(m.group(1))
-        if version in applied:
-            continue
-        sql = path.read_text(encoding="utf-8")
-        if pg:
-            # psycopg 单语句执行：按分号切（迁移 DDL 内无过程体）
-            for stmt in sql.split(";"):
-                if stmt.strip():
-                    conn.execute(stmt)
-        else:
-            conn.executescript(sql)
-        conn.execute(
-            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?);",
-            (version, now_iso()),
-        )
-        conn.commit()
-        newly.append(version)
+        match = re.match(r"^(\d+)_", path.name)
+        if match:
+            available.append(int(match.group(1)))
+    return migrations_dir, applied, [v for v in available if v not in applied]
+
+
+def _validate_migration_backup(pending: list[int], applied: set[int]) -> Path | None:
+    from common import config as cfg
+
+    # A pristine database has nothing to protect and cannot be backed up through
+    # the running control plane yet. The gate applies only to upgrades.
+    if not pending or not applied or not cfg.require_migration_backup():
+        return None
+    receipt_path = cfg.migration_backup_receipt()
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        created = datetime.fromisoformat(receipt["created_at"])
+        if created.tzinfo is None:
+            raise ValueError
+        age = (datetime.now(timezone.utc) - created.astimezone(timezone.utc)
+               ).total_seconds()
+        digest = receipt["archive_sha256"]
+        if (receipt.get("format_version") != 1
+                or not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                or age < -300 or age > cfg.migration_backup_max_age()):
+            raise ValueError
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"待执行数据库迁移 {pending}，但缺少有效且新鲜的一次性备份回执；"
+            "先运行 control-plane-backup.py create") from exc
+    return receipt_path
+
+
+def migrate(conn) -> list[int]:
+    """应用未执行的迁移，返回本次应用的版本列表。"""
+    pg = _backend(conn) == "pg"
+    migrations_dir, applied, pending = _migration_versions(conn)
+    receipt_path = _validate_migration_backup(pending, applied) if pg else None
+    consuming_path = None
+    if receipt_path is not None:
+        consuming_path = receipt_path.with_suffix(receipt_path.suffix + ".consuming")
+        if consuming_path.exists():
+            raise RuntimeError(
+                "发现未完成迁移的 consuming 回执；必须先创建新的安全备份")
+        receipt_path.replace(consuming_path)
+    newly: list[int] = []
+    try:
+        for path in sorted(migrations_dir.glob("*.sql")):
+            m = re.match(r"^(\d+)_", path.name)
+            if not m:
+                continue
+            version = int(m.group(1))
+            if version in applied:
+                continue
+            sql = path.read_text(encoding="utf-8")
+            if pg:
+                # psycopg 单语句执行：按分号切（迁移 DDL 内无过程体）
+                for stmt in sql.split(";"):
+                    if stmt.strip():
+                        conn.execute(stmt)
+            else:
+                conn.executescript(sql)
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?);",
+                (version, now_iso()),
+            )
+            conn.commit()
+            newly.append(version)
+    except Exception:
+        if consuming_path is not None and consuming_path.exists():
+            consuming_path.replace(receipt_path)
+        raise
+    if consuming_path is not None:
+        consuming_path.unlink()
     return newly
 
 
