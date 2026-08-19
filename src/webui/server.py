@@ -112,9 +112,20 @@ def create_app() -> FastAPI:
                 " LEFT JOIN action_intents a ON a.id = i.action_intent_id"
                 " WHERE i.task_id = ? ORDER BY i.requested_at;",
                 (task_id,)))
+            sessions = _rows(conn.execute(
+                "SELECT * FROM agent_session_bindings WHERE task_id = ?"
+                " ORDER BY is_current DESC, created_at DESC;", (task_id,)))
+            messages = (_rows(conn.execute(
+                "SELECT id, sender_type, sender_id, recipient_type,"
+                " recipient_id, message_type, content_json, sequence,"
+                " based_on_revision, created_at FROM conversation_messages"
+                " WHERE collaboration_id = ? ORDER BY sequence;",
+                (row["collaboration_id"],))) if row["collaboration_id"]
+                else [])
             return {"task": {k: row[k] for k in keys}, "runs": runs,
                     "artifacts": artifacts, "events": events,
-                    "interactions": interactions}
+                    "interactions": interactions, "sessions": sessions,
+                    "messages": messages}
         finally:
             conn.close()
 
@@ -224,6 +235,29 @@ def create_app() -> FastAPI:
                 requested_by="user",
             )
             return {"interaction_id": interaction_id, "task": result}
+        except Exception as e:
+            return JSONResponse({"error": f"{type(e).__name__}: {e}"},
+                                status_code=409)
+        finally:
+            tm.close()
+
+    @app.post("/api/tasks/{task_id}/interventions")
+    async def intervene(task_id: str, body: dict):
+        from orchestrator.task_manager import TaskManager
+
+        mode = (body or {}).get("mode")
+        content = (body or {}).get("content", "")
+        if not isinstance(mode, str) or not mode:
+            return JSONResponse({"error": "mode required"}, status_code=400)
+        tm = TaskManager()
+        try:
+            result = await tm.intervene_agent_session(
+                task_id, mode=mode, content=content,
+                agent_id=(body or {}).get("agent_id"),
+                user_id="user",
+                idempotency_key=(body or {}).get("idempotency_key"),
+            )
+            return result
         except Exception as e:
             return JSONResponse({"error": f"{type(e).__name__}: {e}"},
                                 status_code=409)

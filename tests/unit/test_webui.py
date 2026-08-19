@@ -53,6 +53,8 @@ def test_tasks_and_detail(client):
     assert detail["task"]["objective"] == "重启 nginx"
     assert detail["events"][0]["event_type"] == "task.blocked"
     assert detail["interactions"] == []
+    assert detail["sessions"] == []
+    assert detail["messages"] == []
     assert client.get("/api/interactions").json()["interactions"] == []
     assert client.get("/api/tasks/NOPE").status_code == 404
 
@@ -89,6 +91,24 @@ def test_index_page(client):
     assert r.status_code == 200
     assert "agentHub" in r.text
     assert "AGENT 交互" in r.text
+    assert "用户介入" in r.text
+
+
+def test_intervention_api(client, monkeypatch):
+    from orchestrator.task_manager import TaskManager
+
+    async def fake(self, task_id, **kwargs):
+        return {"task_id": task_id, "context_revision": 2, **kwargs}
+
+    monkeypatch.setattr(TaskManager, "intervene_agent_session", fake)
+    response = client.post("/api/tasks/T-1/interventions", json={
+        "mode": "steer", "agent_id": "codex",
+        "content": {"text": "不要修改数据库"},
+        "idempotency_key": "webui-1",
+    })
+    assert response.status_code == 200
+    assert response.json()["mode"] == "steer"
+    assert response.json()["context_revision"] == 2
 
 
 def test_artifact_content(client, tmp_path, monkeypatch):

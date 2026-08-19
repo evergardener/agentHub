@@ -210,6 +210,8 @@ def build_app(
             return await _session_control(body, rpc_id, "resume")
         if method == "extensions/session/interrupt":
             return await _session_control(body, rpc_id, "interrupt")
+        if method == "extensions/session/steer":
+            return await _session_steer(body, rpc_id)
         if method == "extensions/session/interactions/respond":
             return await _interaction_respond(body, rpc_id)
         return _rpc_error(rpc_id, -32601, f"method not found: {method}")
@@ -597,6 +599,61 @@ def build_app(
         await publisher.publish(
             f"session.{operation}", task.id,
             {"session_id": handle.session_id, "status": handle.status})
+        return _rpc_result(rpc_id, task.to_a2a())
+
+    async def _session_steer(body: dict, rpc_id) -> JSONResponse:
+        params = body.get("params", {})
+        task_id = params.get("id")
+        task = store.get(task_id) if task_id else None
+        if task is None:
+            return _rpc_error(rpc_id, -32602, f"task not found: {task_id}")
+        metadata = params.get("message", {}).get("metadata", {}) or {}
+        message_id = metadata.get("messageId") or f"M-{uuid.uuid4()}"
+        if any(item.get("messageId") == message_id
+               for item in task.history):
+            return _rpc_result(rpc_id, task.to_a2a())
+        if task.status_state != "working":
+            return _rpc_error(
+                rpc_id, -32004,
+                f"session is not actively working: {task.status_state}")
+        if not session_adapter.capabilities.steer:
+            return _rpc_error(
+                rpc_id, -32002, "adapter does not support same-turn steer")
+        content = _extract_objective(params)
+        if not content.strip():
+            return _rpc_error(rpc_id, -32602, "steer message has no text part")
+        try:
+            revision = int(metadata.get(
+                "contextRevision", task.context_revision))
+        except (TypeError, ValueError):
+            return _rpc_error(
+                rpc_id, -32602, "contextRevision must be an integer")
+        if revision < task.context_revision:
+            return _rpc_error(
+                rpc_id, -32005,
+                f"stale contextRevision: {revision} < {task.context_revision}")
+        try:
+            handle = await session_adapter.steer(
+                task.session_id or task.id,
+                SessionMessage(
+                    message_id=message_id, role="user", content=content,
+                    based_on_revision=revision, metadata={"steer": True},
+                ),
+            )
+        except (KeyError, SessionCapabilityError) as exc:
+            return _rpc_error(rpc_id, -32004, str(exc))
+        task.context_revision = revision
+        store.append_history(task.id, {
+            "messageId": message_id, "role": "user",
+            "parts": [{"kind": "text", "text": content}],
+            "metadata": {"contextRevision": revision, "steer": True},
+        })
+        await publisher.publish("session.steer", task.id, {
+            "session_id": handle.session_id,
+            "native_session_id": handle.native_session_id,
+            "message_id": message_id,
+            "context_revision": revision,
+        })
         return _rpc_result(rpc_id, task.to_a2a())
 
     return app

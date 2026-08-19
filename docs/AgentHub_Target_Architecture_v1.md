@@ -118,6 +118,12 @@ User authority
 用户消息总能写入当前 revision；用户 steer/takeover 会原子提升 collaboration revision。
 Hermes/Agent 基于旧 revision 提交上下文变更时返回 `context_conflict`，读取最新快照后重试。
 
+运行时介入采用 capability 驱动：Codex 以当前 `turnId` 为前置条件调用原生
+`turn/steer`，DSH 调用原生 `session.prompt(mode=steer)`；未声明 steer 的
+Adapter（当前 Kimi ACP）不得由平台模拟“同 turn 纠正”，只能 interrupt 后开始
+新 turn。介入消息先持久化为 `user.<mode>` 并提升 revision，再调用 Adapter；
+Hermes 每轮会同步新增的用户介入消息，确保用户、Hermes 与子 Agent 看到同一纠偏。
+
 ## 5. Session 恢复
 
 每个 Task 与 Agent 的绑定保存 native_session_id、resume_capability、最后消息和 Context Snapshot。

@@ -229,3 +229,26 @@ async def test_allow_fails_closed_when_native_does_not_offer_accept(
             "S-codex", interaction.interaction_id,
             {"outcome": "allowed-once", "authorization": receipt},
             responded_by="user")
+
+
+async def test_codex_steer_targets_expected_active_turn(monkeypatch):
+    adapter = _seed_adapter()
+    adapter._active_turn_ids["S-codex"] = "turn-active"
+    calls = []
+
+    async def rpc(method, params):
+        calls.append((method, params))
+        return {"turnId": "turn-active"}
+
+    monkeypatch.setattr(adapter, "_rpc", rpc)
+    from adapters.session import SessionMessage
+
+    handle = await adapter.steer("S-codex", SessionMessage(
+        message_id="M-steer", role="user", content="只改 API",
+        based_on_revision=5))
+    assert calls == [("turn/steer", {
+        "threadId": "native-codex", "expectedTurnId": "turn-active",
+        "input": [{"type": "text", "text": "只改 API"}],
+        "clientUserMessageId": "M-steer",
+    })]
+    assert handle.context_revision == 5

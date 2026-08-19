@@ -12,6 +12,7 @@ class FakeA2aClient:
         self.native = native
         self.sent: list[dict] = []
         self.controls: list[tuple[str, str]] = []
+        self.steers: list[dict] = []
 
     async def send_message(self, text, **kwargs):
         self.sent.append({"text": text, **kwargs})
@@ -20,6 +21,7 @@ class FakeA2aClient:
             "resume": self.native,
             "native_resume": self.native,
             "durable_session": self.native,
+            "steer": self.native,
         }
         return {
             "id": kwargs["task_id"],
@@ -39,6 +41,14 @@ class FakeA2aClient:
     async def control_session(self, task_id, operation):
         self.controls.append((task_id, operation))
         return {"id": task_id, "status": {"state": operation}}
+
+    async def steer_session(self, task_id, text, *, context_revision,
+                            message_id=None):
+        self.steers.append({
+            "task_id": task_id, "text": text,
+            "context_revision": context_revision, "message_id": message_id,
+        })
+        return {"id": task_id, "status": {"state": "working"}}
 
 
 def _task_with_collaboration(tm):
@@ -148,6 +158,78 @@ async def test_session_control_updates_binding_phase_and_audit(
         "SELECT event_type FROM events ORDER BY seq;").fetchall()]
     assert "agent.session.pause" in event_types
     assert "agent.session.resume" in event_types
+
+
+async def test_user_steer_advances_context_and_reaches_same_session(
+        tmp_path, monkeypatch):
+    from orchestrator import collaboration_store
+    from orchestrator.a2a_client import A2aClient
+    from orchestrator.task_manager import TaskManager
+
+    client = FakeA2aClient(native=True)
+    monkeypatch.setattr(
+        A2aClient, "for_agent", classmethod(
+            lambda cls, agent_name, direct_endpoint, timeout=30: client))
+    tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
+    task_id, collaboration_id = _task_with_collaboration(tm)
+    await (await tm.delegate_task(task_id, "http://fake", "codex"))
+
+    result = await tm.intervene_agent_session(
+        task_id, mode="steer", content={"text": "不要改数据库"},
+        agent_id="codex", endpoint="http://fake", user_id="user",
+        idempotency_key="steer-once")
+
+    assert result["context_revision"] == 2
+    assert client.steers == [{
+        "task_id": task_id, "text": "不要改数据库",
+        "context_revision": 2, "message_id": result["message_id"],
+    }]
+    binding = collaboration_store.get_current_agent_session(
+        tm.conn, task_id, "codex")
+    assert binding["context_revision"] == 2
+    collaboration = collaboration_store.get_collaboration(
+        tm.conn, collaboration_id)
+    assert collaboration["phase"] == "executing"
+    assert collaboration["controller"] == "user"
+    duplicate = await tm.intervene_agent_session(
+        task_id, mode="steer", content={"text": "不要改数据库"},
+        agent_id="codex", endpoint="http://fake", user_id="user",
+        idempotency_key="steer-once")
+    assert duplicate["duplicate"] is True
+    assert len(client.steers) == 1
+
+
+async def test_failed_steer_can_retry_same_idempotency_key(
+        tmp_path, monkeypatch):
+    from orchestrator.a2a_client import A2aClient
+    from orchestrator.task_manager import TaskManager
+
+    client = FakeA2aClient(native=True)
+    attempts = 0
+    original = client.steer_session
+
+    async def flaky(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionError("adapter unavailable")
+        return await original(*args, **kwargs)
+
+    client.steer_session = flaky
+    monkeypatch.setattr(
+        A2aClient, "for_agent", classmethod(
+            lambda cls, agent_name, direct_endpoint, timeout=30: client))
+    tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
+    task_id, _ = _task_with_collaboration(tm)
+    await (await tm.delegate_task(task_id, "http://fake", "codex"))
+    kwargs = dict(
+        mode="steer", content={"text": "只改 API"}, agent_id="codex",
+        endpoint="http://fake", idempotency_key="retry-steer")
+    with pytest.raises(ConnectionError, match="unavailable"):
+        await tm.intervene_agent_session(task_id, **kwargs)
+    result = await tm.intervene_agent_session(task_id, **kwargs)
+    assert result["context_revision"] == 2
+    assert attempts == 2
 
 
 async def test_blocked_recovery_does_not_mutate_queued_task(

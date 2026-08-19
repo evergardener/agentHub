@@ -169,6 +169,13 @@ LAS_RUN_CODEX_APP_SERVER=1 \
 断线重连时携带最后 `seq`，由 `/api/events/stream?after=...` 补发；NATS 短暂
 不可用时 Adapter 先写 `events-pending.jsonl`，恢复后按既有 replay 流程回放。
 
+任务详情中的「用户介入」支持备注、实时纠正、中断和取消。实时纠正按钮只在
+Agent Card 的 `agentHubSession.steer=true` 时显示：Codex/DSH 当前支持，Kimi
+ACP 当前不支持。所有操作会写入 conversation message 与 `user.intervened`
+审计事件并提升 context revision；刷新或重启 Hermes 后仍可恢复。若 Kimi 指令
+偏差，应先点“中断当前 turn”，再由 Hermes 按新 revision 下发下一轮，不得把
+新 prompt 伪装成对旧 turn 的 steer。
+
 只读查询：
 
 ```bash

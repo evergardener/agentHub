@@ -64,3 +64,23 @@ async def test_hermes_created_tasks_link_to_collaboration(tmp_path):
         "SELECT collaboration_id FROM tasks WHERE id = ?;",
         (result["task_id"],)).fetchone()
     assert row["collaboration_id"] == brain.collaboration_id
+
+
+async def test_live_hermes_sees_webui_user_intervention(tmp_path):
+    tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
+    llm = RecordingLLM("开始")
+    brain = Hermes(tm, llm=llm)
+    await brain.chat("开始开发")
+    collaboration_store.record_user_intervention(
+        tm.conn, collaboration_id=brain.collaboration_id,
+        user_id="user", mode="steer",
+        content={"text": "不要修改数据库"},
+        idempotency_key="webui-steer-1")
+
+    await brain.chat("现在进度如何")
+    second_call = llm.calls[-1]
+    assert any(
+        m.get("role") == "user"
+        and "用户直接介入子 Agent：steer" in m.get("content", "")
+        and "不要修改数据库" in m.get("content", "")
+        for m in second_call)

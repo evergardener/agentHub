@@ -660,6 +660,32 @@ async function openDetail(id) {
     try { payload = JSON.stringify(JSON.parse(payload), null, 2); } catch (_) {}
     return `${i.kind} · ${i.status} · ${i.agent_id}\n${payload}`;
   }).join("\n\n");
+  const currentSession = (d.sessions || []).find(s => !!s.is_current);
+  let sessionCaps = {};
+  try { sessionCaps = JSON.parse(currentSession?.capabilities_json || "{}"); }
+  catch (_) {}
+  const msgs = (d.messages || []).filter(m =>
+    m.message_type?.startsWith("user.")).map(m => {
+      let content = m.content_json || "";
+      try {
+        const parsed = JSON.parse(content);
+        content = typeof parsed === "string" ? parsed : parsed.text || JSON.stringify(parsed);
+      } catch (_) {}
+      return `#${m.sequence} ${m.message_type} · rev ${m.based_on_revision}\n${content}`;
+    }).join("\n\n");
+  const canControl = currentSession && ![
+    "completed", "reviewed", "accepted", "failed", "cancelled"
+  ].includes(t.status);
+  const controls = canControl ?
+    `<div class="d-sec"><h3>用户介入（指令会同步给 Hermes）</h3>` +
+    `<textarea id="d-intervention-text" rows="3" style="width:100%;box-sizing:border-box" ` +
+    `placeholder="输入纠正指令或备注"></textarea>` +
+    `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">` +
+    `<button class="btn" data-intervene="comment">备注给 Hermes</button>` +
+    (sessionCaps.steer ? `<button class="btn" data-intervene="steer">实时纠正 Agent</button>` : "") +
+    (sessionCaps.interrupt ? `<button class="btn x" data-intervene="interrupt">中断当前 turn</button>` : "") +
+    (sessionCaps.cancel ? `<button class="btn x" data-intervene="cancel">取消任务</button>` : "") +
+    `</div></div>` : "";
 
   $("#d-body").innerHTML =
     `<div class="d-sec"><h3>概要</h3><div class="kv">${kv}</div></div>` +
@@ -668,6 +694,8 @@ async function openDetail(id) {
       ? `<div class="d-sec"><h3>错误</h3><div class="mono">${esc(t.error_message)}</div></div>` : "") +
     (t.result_summary
       ? `<div class="d-sec"><h3>结果摘要</h3><div class="mono">${esc(t.result_summary)}</div></div>` : "") +
+    controls +
+    `<div class="d-sec"><h3>用户介入记录</h3><div class="mono">${esc(msgs) || "（无）"}</div></div>` +
     `<div class="d-sec"><h3>AGENT 交互</h3><div class="mono">${esc(interactions) || "（无）"}</div></div>` +
     `<div class="d-sec"><h3>事件时间线（实时）</h3><div class="mono" id="d-events-live">${esc(evs) || "（无）"}</div></div>` +
     `<div class="d-sec"><h3>RUNS</h3><div class="mono">${esc(runs) || "（无）"}</div></div>` +
@@ -685,6 +713,9 @@ async function openDetail(id) {
 
   document.querySelectorAll("[data-art]").forEach(b =>
     b.onclick = () => viewArtifact(t.id, b.dataset.art));
+  document.querySelectorAll("[data-intervene]").forEach(b =>
+    b.onclick = () => interveneTask(
+      t.id, currentSession.agent_id, b.dataset.intervene, b));
 
   $("#overlay").classList.add("show");
   $("#drawer").classList.add("show");
@@ -782,6 +813,27 @@ async function respondInteraction(id, response, btn) {
   if (r.error) alert(r.error);
   await loadAll();
   if (S.detailId) openDetail(S.detailId);
+}
+
+async function interveneTask(taskId, agentId, mode, btn) {
+  const input = $("#d-intervention-text");
+  const text = (input?.value || "").trim();
+  if (["steer", "comment"].includes(mode) && !text) {
+    alert("请先输入介入内容"); return;
+  }
+  if (["interrupt", "cancel"].includes(mode) &&
+      !confirm(mode === "cancel" ? "确认取消整个任务？" : "确认中断当前 turn？")) return;
+  if (btn) btn.disabled = true;
+  const r = await fetchJson(`/api/tasks/${encodeURIComponent(taskId)}/interventions`, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      mode, agent_id: agentId, content: {text},
+      idempotency_key: `webui-${taskId}-${mode}-${Date.now()}`,
+    }),
+  });
+  if (r.error) alert(r.error);
+  await openDetail(taskId);
+  loadAll();
 }
 
 async function answerInteraction(id, btn) {

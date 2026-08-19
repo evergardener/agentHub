@@ -67,3 +67,22 @@ async def test_interaction_response_encoding(monkeypatch):
         "response": {"outcome": "rejected"},
         "respondedBy": "hermes",
     }
+
+
+async def test_steer_encodes_revision_and_message(monkeypatch):
+    client = A2aClient("http://adapter")
+    captured = {}
+
+    async def fake_rpc(payload):
+        captured.update(payload)
+        return {"id": "T-1"}
+
+    monkeypatch.setattr(client, "_rpc", fake_rpc)
+    await client.steer_session(
+        "T-1", "不要改数据库", context_revision=8, message_id="M-steer")
+    assert captured["method"] == "extensions/session/steer"
+    assert captured["params"]["message"] == {
+        "role": "user",
+        "parts": [{"kind": "text", "text": "不要改数据库"}],
+        "metadata": {"messageId": "M-steer", "contextRevision": 8},
+    }

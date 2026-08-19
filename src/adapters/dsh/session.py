@@ -174,6 +174,7 @@ class DshWebSessionAdapter(SessionAdapter):
         interrupt=True,
         cancel=True,
         interactions=True,
+        steer=True,
     )
 
     def __init__(
@@ -858,6 +859,24 @@ class DshWebSessionAdapter(SessionAdapter):
             raise SessionCapabilityError("native DSH session ID is missing")
         await self._history(handle.native_session_id)
         handle.status = "active"
+        return handle
+
+    async def steer(self, session_id: str,
+                    message: SessionMessage) -> SessionHandle:
+        handle = self._handles[session_id]
+        if not handle.native_session_id:
+            raise SessionCapabilityError("native DSH session ID is missing")
+        await self._request("session.prompt", {
+            "sessionId": handle.native_session_id,
+            "mode": "steer",
+            "content": [{"type": "text", "text": message.content}],
+        })
+        handle.context_revision = message.based_on_revision
+        await self._emit(session_id, "user.steer", {
+            "messageId": message.message_id,
+            "contextRevision": message.based_on_revision,
+            "text": message.content,
+        })
         return handle
 
     async def interrupt(self, session_id: str) -> SessionHandle:

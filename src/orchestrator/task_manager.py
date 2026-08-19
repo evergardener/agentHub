@@ -346,6 +346,126 @@ class TaskManager:
             self.cancel_task(task_id)
         return result
 
+    async def intervene_agent_session(
+        self,
+        task_id: str,
+        *,
+        mode: str,
+        content,
+        agent_id: str | None = None,
+        endpoint: str | None = None,
+        user_id: str = "user",
+        idempotency_key: str | None = None,
+    ) -> dict:
+        """Persist user authority first, then apply the matching native action."""
+        from orchestrator import collaboration_store
+
+        task = state_store.get_task(self.conn, task_id)
+        if task is None:
+            raise KeyError(f"task not found: {task_id}")
+        if not task["collaboration_id"]:
+            raise ValueError("task is not attached to a collaboration")
+        agent_id = agent_id or task["assigned_to"]
+        if not agent_id:
+            raise ValueError("task has no assigned agent")
+        binding = collaboration_store.get_current_agent_session(
+            self.conn, task_id, agent_id)
+        if binding is None:
+            raise KeyError(f"agent session not found: {task_id}/{agent_id}")
+        existing = None
+        if idempotency_key:
+            existing = self.conn.execute(
+                "SELECT * FROM conversation_messages"
+                " WHERE idempotency_key = ?;", (idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                if (existing["message_type"] != f"user.{mode}"
+                        or existing["task_id"] != task_id
+                        or existing["agent_id"] != agent_id):
+                    raise ValueError(
+                        "idempotency key belongs to another intervention")
+                if existing["delivery_status"] == "delivered":
+                    return {
+                        "task_id": task_id, "agent_id": agent_id,
+                        "mode": mode, "message_id": existing["id"],
+                        "context_revision": existing["based_on_revision"],
+                        "duplicate": True,
+                    }
+        message = existing or collaboration_store.record_user_intervention(
+            self.conn, collaboration_id=task["collaboration_id"],
+            user_id=user_id, mode=mode, content=content,
+            task_id=task_id, agent_id=agent_id,
+            idempotency_key=idempotency_key)
+        revision = message["based_on_revision"]
+        result: dict | None = None
+        if mode == "steer":
+            capabilities = json.loads(binding["capabilities_json"] or "{}")
+            if capabilities.get("steer") is not True:
+                raise ValueError(
+                    f"agent {agent_id} does not support same-turn steer; "
+                    "interrupt it and send a new turn")
+            text = (content.get("text") if isinstance(content, dict)
+                    else content)
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("steer content must contain non-empty text")
+            if endpoint is None:
+                agent = self.conn.execute(
+                    "SELECT endpoint FROM agents WHERE id = ?;",
+                    (agent_id,),
+                ).fetchone()
+                endpoint = agent["endpoint"] if agent is not None else None
+            if not endpoint:
+                raise RuntimeError(f"agent endpoint unavailable: {agent_id}")
+            client = A2aClient.for_agent(agent_id, endpoint, timeout=60)
+            result = await client.steer_session(
+                task_id, text, context_revision=revision,
+                message_id=message["id"],
+            )
+            collaboration_store.advance_agent_session(
+                self.conn, binding["id"], message_seq=message["sequence"],
+                context_revision=revision)
+            collaboration_store.set_phase(
+                self.conn, task["collaboration_id"],
+                CollaborationPhase.EXECUTING, controller="user")
+            state_store.record_event(self.conn, {
+                "event_id": f"session-steer-{uuid.uuid4()}",
+                "event_type": "agent.session.steer.requested",
+                "task_id": task_id,
+                "source": user_id,
+                "payload": {
+                    "agent_id": agent_id, "binding_id": binding["id"],
+                    "message_id": message["id"],
+                    "context_revision": revision,
+                },
+            })
+        elif mode in {"pause", "interrupt", "cancel"}:
+            if endpoint is None:
+                agent = self.conn.execute(
+                    "SELECT endpoint FROM agents WHERE id = ?;",
+                    (agent_id,),
+                ).fetchone()
+                endpoint = agent["endpoint"] if agent is not None else None
+            if not endpoint:
+                raise RuntimeError(f"agent endpoint unavailable: {agent_id}")
+            result = await self.control_agent_session(
+                task_id, agent_id=agent_id, endpoint=endpoint,
+                operation=mode, requested_by="user")
+        elif mode == "return_to_hermes":
+            collaboration_store.set_phase(
+                self.conn, task["collaboration_id"],
+                CollaborationPhase.NEEDS_REPLAN, controller="hermes")
+        elif mode not in {"comment", "takeover"}:
+            raise ValueError(f"unsupported intervention mode: {mode}")
+        self.conn.execute(
+            "UPDATE conversation_messages SET delivery_status = 'delivered'"
+            " WHERE id = ?;", (message["id"],))
+        self.conn.commit()
+        return {
+            "task_id": task_id, "agent_id": agent_id, "mode": mode,
+            "message_id": message["id"], "context_revision": revision,
+            "native_result": result,
+        }
+
     async def respond_agent_interaction(
         self,
         interaction_id: str,

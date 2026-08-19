@@ -174,9 +174,12 @@ revision 写许可失效。
 7. [x] 在 `LAS_RUN_DSH=1` 下验证真实 DSH Web `session.list`（无模型调用）；
    真实双轮与进程重启恢复仍需另行授权模型调用；
 8. [ ] 将 Hermes 委派从自然语言旧策略迁移到结构化 Task Plan + ActionIntent + Profile；
-9. [ ] 为 Codex/Kimi 工具事件建立标准 ToolCall/ActionIntent 翻译，修改操作执行前必须经过控制面；
-10. [ ] 将用户 comment/steer/pause/interrupt/cancel/takeover Web API 接入 TaskManager session control；
-11. [ ] 将 agent session/message/action/tool/artifact 事件统一接入可断线补发的实时 SSE；
+9. [x] 为 Codex/Kimi 工具事件建立标准 PendingInteraction/ActionIntent 翻译，
+    修改操作执行前必须经过控制面签名回执；
+10. [x] 将用户 comment/steer/pause/interrupt/cancel/takeover 语义接入
+    TaskManager；当前 WebUI 开放 comment/steer/interrupt/cancel，takeover 与
+    return_to_hermes 已有持久控制面语义，待专用 UI；
+11. [x] 将 agent session/message/action/tool/artifact 事件统一接入可断线补发的实时 SSE；
 12. [ ] 在授权环境执行 Codex/Kimi 真实双轮 resume、进程重启和 Adapter 重启测试；
 13. [ ] 增加 PostgreSQL + NATS + gateway 的故障注入与重复投递集成测试。
 
@@ -210,7 +213,7 @@ revision 写许可失效。
     脱敏前，DSH 仍强制 `read-only`，不得开放 `workspace-write`；
 12. [ ] 对 SSE 重连、pending replay、重复 `/api/respond`、Adapter/DSH
     双端重启进行真实进程故障注入；
-13. [ ] 完成 Codex/Kimi ToolCall/ActionIntent 拦截与用户介入实时 UI，
+13. [x] 完成 Codex/Kimi ToolCall/ActionIntent 拦截与用户介入实时 UI，
     再进入生产安全评审。
 
 ## 当前迭代（Iteration 7）
@@ -244,8 +247,11 @@ revision 写许可失效。
 9. [x] 全量 unit+contract 226 passed；集成 9 passed/12 skipped；另行启用
    `LAS_RUN_KIMI_ACP=1` 的真实无模型 ACP session/new 检查 1 passed；本批次
    按自动提交约定记录独立 commit。
-10. [ ] 实现用户 steer/interrupt Web API 与任务详情操作区，并确保指令同时
-    写入 conversation message 供 Hermes 追溯；
+10. [x] 实现用户 steer/interrupt Web API 与任务详情操作区：Codex 使用
+    `turn/steer(expectedTurnId)`，DSH 使用 `session.prompt(mode=steer)`；Kimi
+    ACP 未声明同 turn steer，因此 UI 只提供 interrupt/cancel。任何介入都先写
+    conversation message 并原子提升 context revision；当前及重启后的 Hermes
+    会在下一轮对话同步 `user.*` 指令，重复 idempotency key 不会二次下发；
 11. [ ] 执行 Codex/Kimi 真实 approval 挂起/拒绝/允许、双轮恢复和 Adapter
     重启故障注入；Codex 无模型 `initialize + thread/start` 由
     `LAS_RUN_CODEX_APP_SERVER=1` 单独门控。
@@ -253,3 +259,7 @@ revision 写许可失效。
     9 passed/13 skipped；本机无模型 `initialize + thread/start` 1 passed。
     同时修正多轮 handle 的 context revision 同步，以及把 Codex App Server/
     Kimi ACP 传输日志排除在“业务文件产物”之外。
+13. [x] 实时会话与用户介入批次回归：unit+contract 241 passed；集成
+    9 passed/13 skipped；覆盖 A2A same-turn steer、TaskManager revision/
+    idempotency、Codex expected turn、DSH 原生 steer、Hermes 上下文同步及
+    WebUI 介入 API。

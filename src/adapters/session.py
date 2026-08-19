@@ -30,6 +30,7 @@ class SessionCapabilities:
     interrupt: bool = False
     cancel: bool = False
     interactions: bool = False
+    steer: bool = False
 
     def to_dict(self) -> dict[str, bool]:
         return asdict(self)
@@ -136,6 +137,11 @@ class SessionAdapter(ABC):
 
     async def cancel(self, session_id: str) -> SessionHandle:
         raise SessionCapabilityError("session cancellation is not supported")
+
+    async def steer(
+        self, session_id: str, message: SessionMessage
+    ) -> SessionHandle:
+        raise SessionCapabilityError("same-turn steering is not supported")
 
     async def collect_artifacts(self, session_id: str) -> list[dict]:
         return []

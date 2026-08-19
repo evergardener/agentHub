@@ -136,6 +136,27 @@ class A2aClient:
             "method": method, "params": {"id": task_id},
         })
 
+    async def steer_session(
+        self, task_id: str, text: str, *, context_revision: int,
+        message_id: str | None = None,
+    ) -> dict:
+        """Inject a user correction into the runtime's current native turn."""
+        return await self._rpc({
+            "jsonrpc": "2.0", "id": str(uuid.uuid4()),
+            "method": "extensions/session/steer",
+            "params": {
+                "id": task_id,
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": text}],
+                    "metadata": {
+                        "messageId": message_id or f"M-{uuid.uuid4()}",
+                        "contextRevision": context_revision,
+                    },
+                },
+            },
+        })
+
     async def respond_interaction(
         self,
         task_id: str,

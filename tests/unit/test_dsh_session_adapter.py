@@ -155,6 +155,24 @@ async def test_dsh_uses_same_native_session_for_multiple_turns(
         await client.aclose()
 
 
+async def test_dsh_steer_uses_native_steer_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path))
+    fixture = DshFixture()
+    adapter, client = _adapter(fixture)
+    try:
+        await adapter.start_session(_task(), session_id="S-dsh", metadata={})
+        calls_before = len(fixture.prompts)
+        handle = await adapter.steer(
+            "S-dsh", SessionMessage(
+                "M-steer", "user", "只复审 API", based_on_revision=2))
+        assert fixture.prompts[calls_before:] == ["只复审 API"]
+        assert handle.context_revision == 2
+        streamed = await anext(adapter.stream_events("S-dsh"))
+        assert streamed.event_type == "user.steer"
+    finally:
+        await client.aclose()
+
+
 async def test_dsh_adapter_restart_validates_and_resumes_native_session(
         tmp_path, monkeypatch):
     monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path))

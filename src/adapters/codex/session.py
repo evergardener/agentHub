@@ -71,7 +71,7 @@ class CodexSessionAdapter(SessionAdapter):
     capabilities = SessionCapabilities(
         multi_turn=True, resume=True, native_resume=True,
         durable_session=True, streaming=True, pause=False,
-        interrupt=True, cancel=True, interactions=True,
+        interrupt=True, cancel=True, interactions=True, steer=True,
     )
     _APPROVAL_METHODS = {
         "item/commandExecution/requestApproval",
@@ -710,6 +710,26 @@ class CodexSessionAdapter(SessionAdapter):
             raise SessionCapabilityError("native Codex thread ID is missing")
         await self._ensure_native_loaded(session_id)
         handle.status = "active"
+        return handle
+
+    async def steer(self, session_id: str,
+                    message: SessionMessage) -> SessionHandle:
+        handle = self._handles[session_id]
+        turn_id = self._active_turn_ids.get(session_id)
+        if not turn_id:
+            raise SessionCapabilityError("Codex session has no active turn")
+        await self._rpc("turn/steer", {
+            "threadId": handle.native_session_id,
+            "expectedTurnId": turn_id,
+            "input": [{"type": "text", "text": message.content}],
+            "clientUserMessageId": message.message_id,
+        })
+        handle.context_revision = message.based_on_revision
+        self._emit_nowait(session_id, "user.steer", {
+            "messageId": message.message_id,
+            "contextRevision": message.based_on_revision,
+            "text": message.content,
+        })
         return handle
 
     async def _interrupt_native(self, session_id: str) -> None:

@@ -58,6 +58,7 @@ class Hermes:
             collaboration_id=collaboration_id)
         self.messages: list[dict] = [
             {"role": "system", "content": SYSTEM_PROMPT}]
+        self._restored_sequence = 0
         self._restore_context()
 
     def _restore_context(self) -> None:
@@ -79,15 +80,44 @@ class Hermes:
             rows = collaboration_store.list_collaboration_messages(
                 self.tm.conn, self.collaboration_id)
             for row in rows:
-                if not row["message_type"].startswith("llm."):
-                    continue
-                payload = json.loads(row["content_json"])
-                if isinstance(payload, dict) and payload.get("role"):
-                    self.messages.append(payload)
+                self._restore_visible_row(row)
+                self._restored_sequence = max(
+                    self._restored_sequence, row["sequence"])
             return
         if self.conversation_id and collaboration_store.get_conversation(
                 self.tm.conn, self.conversation_id) is None:
             raise KeyError(f"conversation not found: {self.conversation_id}")
+
+    def _restore_visible_row(self, row) -> None:
+        payload = json.loads(row["content_json"])
+        if row["message_type"].startswith("llm."):
+            if isinstance(payload, dict) and payload.get("role"):
+                self.messages.append(payload)
+            return
+        if not row["message_type"].startswith("user."):
+            return
+        text = payload.get("text") if isinstance(payload, dict) else payload
+        if not isinstance(text, str):
+            text = json.dumps(payload, ensure_ascii=False)
+        mode = row["message_type"].removeprefix("user.")
+        self.messages.append({
+            "role": "user",
+            "content": f"[用户直接介入子 Agent：{mode}] {text}",
+        })
+
+    def _sync_user_interventions(self) -> None:
+        """Make WebUI-issued session corrections visible to live Hermes."""
+        if not self.collaboration_id:
+            return
+        from orchestrator import collaboration_store
+
+        rows = collaboration_store.list_collaboration_messages(
+            self.tm.conn, self.collaboration_id,
+            after=self._restored_sequence)
+        for row in rows:
+            self._restore_visible_row(row)
+            self._restored_sequence = max(
+                self._restored_sequence, row["sequence"])
 
     def _ensure_collaboration(self, user_text: str) -> None:
         from orchestrator import collaboration_store
@@ -107,12 +137,14 @@ class Hermes:
 
         collaboration = collaboration_store.get_collaboration(
             self.tm.conn, self.collaboration_id)
-        collaboration_store.append_message(
+        row = collaboration_store.append_message(
             self.tm.conn, conversation_id=self.conversation_id,
             collaboration_id=self.collaboration_id,
             sender_type=sender_type, sender_id=sender_id,
             content=payload, message_type=message_type,
             based_on_revision=collaboration["context_revision"])
+        self._restored_sequence = max(
+            self._restored_sequence, row["sequence"])
 
     async def chat(self, user_text: str) -> str:
         from common import tracing
@@ -126,6 +158,7 @@ class Hermes:
 
     async def _chat_loop(self, user_text: str) -> str:
         self._ensure_collaboration(user_text)
+        self._sync_user_interventions()
         user_message = {"role": "user", "content": user_text}
         self._persist_message(
             user_message, sender_type="user", sender_id="user",
