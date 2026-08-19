@@ -25,7 +25,8 @@
                                  peer identity {peer, worker}（固定路由）
   X-Agent-Token: <token>         LAS_API_TOKEN（回退 LAS_ADAPTER_TOKEN）→
                                  legacy identity（metadata.agent 路由）
-  两 header 同时出现且值不一致 → 401。均未配置 = 关闭（仅本地开发）。
+  两 header 同时出现且值不一致 → 401。均未配置只允许 loopback 开发模式；
+  LAS_ORCH_REQUIRE_AUTH=true 或绑定非 loopback 时启动即失败。
 
 运行：python -m orchestrator.a2a_server
 （LAS_ORCH_BIND 默认 127.0.0.1，LAS_ORCH_PORT 默认 8310）。
@@ -33,6 +34,8 @@
 
 from __future__ import annotations
 
+import hmac
+import ipaddress
 import json
 import os
 import uuid
@@ -57,6 +60,26 @@ _REJECT_WORDS = frozenset({"拒绝", "取消", "不批", "不批准", "驳回",
 
 _APPROVAL_EVENTS = ("task.approval_requested", "task.approved",
                     "task.auto_approved")
+
+
+def validate_orchestrator_security(host: str) -> None:
+    """Reject production/non-loopback startup without strong credentials."""
+    legacy_token = cfg.api_token()
+    peers = cfg.a2a_peers()
+    auth_enabled = bool(legacy_token or peers)
+    if cfg.orchestrator_require_auth() and not auth_enabled:
+        raise RuntimeError(
+            "LAS_ORCH_REQUIRE_AUTH=true 但 LAS_API_TOKEN/LAS_A2A_PEERS 为空")
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host.lower() == "localhost"
+    if not loopback and not auth_enabled:
+        raise RuntimeError("Orchestrator 绑定非 loopback 地址时必须配置认证")
+    if cfg.orchestrator_require_auth() or not loopback:
+        configured = ([legacy_token] if legacy_token else []) + list(peers)
+        if any(len(token) < 16 for token in configured):
+            raise RuntimeError("Orchestrator 生产认证 token 至少 16 个字符")
 
 
 def _now(conn) -> str:
@@ -150,6 +173,13 @@ def create_app(tm: TaskManager | None = None,
     legacy_token = cfg.api_token()
     peers = cfg.a2a_peers()  # token → {peer, worker}
     auth_enabled = bool(legacy_token or peers)
+    if cfg.orchestrator_require_auth() and not auth_enabled:
+        raise RuntimeError(
+            "LAS_ORCH_REQUIRE_AUTH=true 但 LAS_API_TOKEN/LAS_A2A_PEERS 为空")
+    if cfg.orchestrator_require_auth():
+        configured = ([legacy_token] if legacy_token else []) + list(peers)
+        if any(len(token) < 16 for token in configured):
+            raise RuntimeError("Orchestrator 生产认证 token 至少 16 个字符")
 
     def _authenticate(request: Request) -> dict | None:
         """解析调用方 identity；未认证返回 None。
@@ -162,14 +192,15 @@ def create_app(tm: TaskManager | None = None,
         x_tok = request.headers.get("x-agent-token")
         auth = request.headers.get("authorization", "")
         bearer = auth[7:] if auth.lower().startswith("bearer ") else None
-        if x_tok and bearer and x_tok != bearer:
+        if x_tok and bearer and not hmac.compare_digest(x_tok, bearer):
             return None  # 双 header 冲突，拒绝
         tok = bearer or x_tok
         if not tok:
             return None
-        if tok in peers:
-            return {"peer": peers[tok]["peer"], "worker": peers[tok]["worker"]}
-        if legacy_token and tok == legacy_token:
+        for candidate, meta in peers.items():
+            if hmac.compare_digest(tok, candidate):
+                return {"peer": meta["peer"], "worker": meta["worker"]}
+        if legacy_token and hmac.compare_digest(tok, legacy_token):
             return {"peer": "legacy", "worker": None}
         return None
 
@@ -382,10 +413,11 @@ app = None  # 惰性：测试用 create_app(自建 tm)；服务进程走 main()
 def main() -> None:
     import uvicorn
 
+    host = os.environ.get("LAS_ORCH_BIND", "127.0.0.1")
+    validate_orchestrator_security(host)
     global app
     app = create_app()
-    uvicorn.run(app,
-                host=os.environ.get("LAS_ORCH_BIND", "127.0.0.1"),
+    uvicorn.run(app, host=host,
                 port=int(os.environ.get("LAS_ORCH_PORT", "8310")))
 
 

@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from hermes.policy import ApprovalPolicy
 from orchestrator import state_store
-from orchestrator.a2a_server import create_app
+from orchestrator.a2a_server import create_app, validate_orchestrator_security
 from orchestrator.task_manager import TaskManager
 
 pytestmark = pytest.mark.anyio
@@ -23,6 +23,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("LAS_API_TOKEN", raising=False)
     monkeypatch.delenv("LAS_ADAPTER_TOKEN", raising=False)
     monkeypatch.delenv("LAS_A2A_PEERS", raising=False)
+    monkeypatch.delenv("LAS_ORCH_REQUIRE_AUTH", raising=False)
     tm = TaskManager(db_path=tmp_path / "state.db",
                      workspace=tmp_path / "ws")
     # 注册在线 worker
@@ -115,6 +116,7 @@ def test_tasks_get_with_artifacts(env):
 
 
 def test_auth_enforced_when_token_set(tmp_path, monkeypatch):
+    monkeypatch.delenv("LAS_ORCH_REQUIRE_AUTH", raising=False)
     monkeypatch.setenv("LAS_API_TOKEN", "orch-tok")
     tm = TaskManager(db_path=tmp_path / "s.db", workspace=tmp_path / "ws")
     client = TestClient(create_app(tm=tm))
@@ -125,3 +127,25 @@ def test_auth_enforced_when_token_set(tmp_path, monkeypatch):
                     headers={"X-Agent-Token": "orch-tok"})
     assert ok.status_code == 200
     assert ok.json()["name"] == "agenthub-orchestrator"
+
+
+def test_orchestrator_security_bind_validation(tmp_path, monkeypatch):
+    for name in ("LAS_API_TOKEN", "LAS_ADAPTER_TOKEN", "LAS_A2A_PEERS",
+                 "LAS_ORCH_REQUIRE_AUTH"):
+        monkeypatch.delenv(name, raising=False)
+    validate_orchestrator_security("127.0.0.1")
+    with pytest.raises(RuntimeError, match="非 loopback"):
+        validate_orchestrator_security("0.0.0.0")
+
+    monkeypatch.setenv("LAS_ORCH_REQUIRE_AUTH", "true")
+    with pytest.raises(RuntimeError, match="为空"):
+        create_app(tm=TaskManager(
+            db_path=tmp_path / "required.db", workspace=tmp_path / "ws2"))
+    monkeypatch.setenv("LAS_API_TOKEN", "weak")
+    with pytest.raises(RuntimeError, match="至少 16"):
+        validate_orchestrator_security("0.0.0.0")
+    with pytest.raises(RuntimeError, match="至少 16"):
+        create_app(tm=TaskManager(
+            db_path=tmp_path / "weak.db", workspace=tmp_path / "ws3"))
+    monkeypatch.setenv("LAS_API_TOKEN", "strong-token-0123456789")
+    validate_orchestrator_security("0.0.0.0")

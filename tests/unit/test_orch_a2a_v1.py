@@ -40,6 +40,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("LAS_API_TOKEN", LEGACY_TOKEN)
     monkeypatch.delenv("LAS_ADAPTER_TOKEN", raising=False)
     monkeypatch.setenv("LAS_A2A_PEERS", PEERS_JSON)
+    monkeypatch.delenv("LAS_ORCH_REQUIRE_AUTH", raising=False)
     tm = TaskManager(db_path=tmp_path / "state.db",
                      workspace=tmp_path / "ws")
     state_store.update_heartbeat(tm.conn, "codex",

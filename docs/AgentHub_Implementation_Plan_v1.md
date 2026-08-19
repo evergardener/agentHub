@@ -86,6 +86,8 @@ revision 写许可失效。
 
 - [x] WebUI 身份认证、签名 HttpOnly Cookie、CSRF、RBAC，以及非 loopback
   无认证启动失败；compose 默认 fail-closed；
+- [x] 外部 Hermes A2A 入口生产强制认证、弱 token/非 loopback 无认证启动
+  失败，并使用常量时间凭据比对；
 - gateway TLS/JWT/ACL/限流；
 - 固定镜像版本、SBOM、签名和漏洞扫描；
 - [x] WebUI/Orchestrator readiness、State Writer/Janitor 依赖探针、Gateway

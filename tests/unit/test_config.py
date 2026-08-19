@@ -20,6 +20,7 @@ ALL_KEYS = [
     "LAS_WEBUI_TOKENS", "LAS_WEBUI_SESSION_SECRET",
     "LAS_WEBUI_SESSION_TTL", "LAS_WEBUI_COOKIE_SECURE",
     "LAS_WEBUI_REQUIRE_AUTH",
+    "LAS_ORCH_REQUIRE_AUTH",
 ]
 
 
@@ -74,6 +75,12 @@ def test_webui_security_config(monkeypatch):
     assert cfg.webui_session_ttl() == 3600
     assert cfg.webui_cookie_secure() is True
     assert cfg.webui_require_auth() is True
+
+
+def test_orchestrator_require_auth(monkeypatch):
+    assert cfg.orchestrator_require_auth() is False
+    monkeypatch.setenv("LAS_ORCH_REQUIRE_AUTH", "1")
+    assert cfg.orchestrator_require_auth() is True
 
 
 @pytest.mark.parametrize("value", [

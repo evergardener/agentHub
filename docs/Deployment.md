@@ -70,6 +70,7 @@ cp .env.example .env && chmod 600 .env
 | `LAS_PG_PASSWORD` | PostgreSQL 密码；**已有数据卷时改它会导致认证失败**（见 §6.2） |
 | `LAS_ADAPTER_TOKEN` | 留空即可——worker 首启自动生成随机值回写本文件 |
 | `LAS_ACTION_RECEIPT_SECRET` | ActionIntent receipt HMAC 密钥；生产用 `openssl rand -hex 32` 独立生成；暂时可回退 adapter token |
+| `LAS_API_TOKEN` / `LAS_A2A_PEERS` | 外部 Hermes A2A 身份；至少配置一项（或由 API token 回退到 adapter token），compose 无认证会拒绝启动 |
 | `LAS_WEBUI_TOKENS` | WebUI 登录 token→role JSON；token 用 `openssl rand -hex 24` 生成，role 为 `viewer` / `operator` / `admin` |
 | `LAS_WEBUI_SESSION_SECRET` | WebUI 签名 session cookie 的独立 HMAC 密钥，使用 `openssl rand -hex 32`；未配置时 WebUI 拒绝启动 |
 | `LAS_ADAPTER_BIND` | worker 监听地址，默认 `127.0.0.1`；需容器回连时加宿主机 LAN IP |
@@ -297,5 +298,7 @@ codex/kimi。临时绕过：`LAS_GATEWAY_URL=` 置空走直连；长期方案是
 - gateway `apiKey.agents` ACL 控制 hermes 可访问的 agent 列表
 - WebUI 使用高熵 token、签名 HttpOnly Cookie、CSRF 与 `viewer/operator/admin`
   RBAC；跨主机只允许经带登录限流的 HTTPS 反向代理访问
+- Orchestrator A2A 入口在 compose 中强制认证；认证全空、生产 token 少于
+  16 字符或非 loopback 无认证监听都会启动失败
 - 关键控制面服务具备 dependency-aware readiness，容器设 CPU/内存/PID 上限，
   `json-file` 日志自动轮换（10MB × 5）

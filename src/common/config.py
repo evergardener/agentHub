@@ -21,6 +21,7 @@
   LAS_ACTION_RECEIPT_SECRET（无别名）           ActionIntent receipt HMAC 密钥
   LAS_WEBUI_TOKENS      （无别名）              WebUI token→role JSON 映射
   LAS_WEBUI_SESSION_SECRET（无别名）            WebUI session cookie HMAC 密钥
+  LAS_ORCH_REQUIRE_AUTH  （无别名）              Orchestrator A2A 强制认证开关
 """
 
 from __future__ import annotations
@@ -148,6 +149,11 @@ def webui_cookie_secure() -> bool:
 
 def webui_require_auth() -> bool:
     return _env("LAS_WEBUI_REQUIRE_AUTH", default="false").lower() in {
+        "1", "true", "yes", "on"}
+
+
+def orchestrator_require_auth() -> bool:
+    return _env("LAS_ORCH_REQUIRE_AUTH", default="false").lower() in {
         "1", "true", "yes", "on"}
 
 
