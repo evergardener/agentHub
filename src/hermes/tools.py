@@ -291,7 +291,8 @@ class HermesTools:
 
     # 运行日志/最终汇报不算"产出文件"
     _NON_PRODUCT_ARTIFACTS = {
-        "codex.log", "codex.jsonl", "kimi.jsonl", "kimi-stderr.log",
+        "codex.log", "codex.jsonl", "codex-app-server.jsonl",
+        "kimi.jsonl", "kimi-acp.jsonl", "kimi-stderr.log",
         "dsh-history.json",
         "last-message.md",
     }

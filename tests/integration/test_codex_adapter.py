@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
-from pathlib import Path
+import time
 
 import httpx
 import pytest
@@ -29,6 +30,7 @@ async def test_codex_real_task(tmp_path, monkeypatch):
     (ws / "logs").mkdir(parents=True)
     monkeypatch.setenv("AGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("NATS_URL", "nats://127.0.0.1:1")  # 离线 → 走 spool
+    monkeypatch.setenv("LAS_ACTION_RECEIPT_SECRET", "c" * 32)
 
     from adapters.codex.server import create_app
 
@@ -54,13 +56,51 @@ async def test_codex_real_task(tmp_path, monkeypatch):
             }},
         })
         task = r.json()["result"]
-        # 异步 A2A（v3 M1）：轮询至终态
-        from .poll import wait_terminal
-        task = await wait_terminal(c, task["id"])
+        deadline = time.monotonic() + 600
+        approval_seq = 0
+        while time.monotonic() < deadline:
+            task = (await c.post("/a2a", json={
+                "jsonrpc": "2.0", "id": "poll", "method": "tasks/get",
+                "params": {"id": task["id"]},
+            })).json()["result"]
+            state = task["status"]["state"]
+            if state in {"completed", "failed", "canceled", "rejected"}:
+                break
+            if state == "input-required":
+                interaction = task["metadata"]["agentHub"][
+                    "pendingInteractions"][0]
+                hub = task["metadata"]["agentHub"]
+                from common.action_receipt import sign_action_receipt
+
+                approval_seq += 1
+                receipt = sign_action_receipt({
+                    "actionIntentId": f"AI-CODEX-{approval_seq}",
+                    "taskId": task["id"],
+                    "interactionId": interaction["interactionId"],
+                    "nativeRequestId": interaction["nativeRequestId"],
+                    "nativeSessionId": interaction["nativeSessionId"],
+                    "contextRevision": hub["contextRevision"],
+                    "status": "approved", "decidedBy": "user",
+                })
+                response = await c.post("/a2a", json={
+                    "jsonrpc": "2.0", "id": f"approve-{approval_seq}",
+                    "method": "extensions/session/interactions/respond",
+                    "params": {
+                        "id": task["id"],
+                        "interactionId": interaction["interactionId"],
+                        "respondedBy": "user",
+                        "response": {"outcome": "allowed-once",
+                                     "authorization": receipt},
+                    },
+                })
+                assert "error" not in response.json(), response.json()
+            await asyncio.sleep(0.25)
+        else:
+            raise TimeoutError("Codex real task did not reach terminal state")
 
     assert task["status"]["state"] == "completed", task.get("error")
     names = {a["name"] for a in task["artifacts"]}
-    assert "codex.jsonl" in names
+    assert "codex-app-server.jsonl" in names
     assert task["metadata"]["agentHub"]["nativeSessionId"], task
     # Codex 真实产出的源码文件应被收集为 workspace/* artifact
     produced = [n for n in names if n.startswith("workspace/")]

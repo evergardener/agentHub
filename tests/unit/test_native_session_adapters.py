@@ -1,6 +1,4 @@
-"""Native CLI session ID parsing, resume command, and capability tests."""
-
-from pathlib import Path
+"""Native session ID parsing and capability tests."""
 
 from adapters.codex.session import CodexSessionAdapter, extract_codex_session_id
 from adapters.kimi.session import (
@@ -10,29 +8,14 @@ from adapters.kimi.session import (
 )
 
 
-def test_codex_thread_id_and_resume_command():
+def test_codex_thread_id_and_app_server_capabilities():
     assert extract_codex_session_id(
         '{"type":"thread.started","thread_id":"codex-native-1"}\n'
         '{"type":"turn.completed"}\n') == "codex-native-1"
     adapter = CodexSessionAdapter()
-    command = adapter._command(
-        "/bin/codex", Path("/tmp/ws"), Path("/tmp/last.md"),
-        "continue", "codex-native-1")
-    assert command[:3] == ["/bin/codex", "exec", "resume"]
-    assert "--json" in command
-    assert command[-2:] == ["codex-native-1", "continue"]
     assert adapter.capabilities.native_resume is True
     assert adapter.capabilities.pause is False
-
-
-def test_codex_new_session_is_workspace_scoped():
-    adapter = CodexSessionAdapter()
-    command = adapter._command(
-        "/bin/codex", Path("/tmp/ws"), Path("/tmp/last.md"),
-        "start", None)
-    assert command[:2] == ["/bin/codex", "exec"]
-    assert ["--sandbox", "workspace-write"] == command[2:4]
-    assert "-C" in command and "/tmp/ws" in command
+    assert adapter.capabilities.interactions is True
 
 
 def test_kimi_session_id_and_resume_command(monkeypatch):

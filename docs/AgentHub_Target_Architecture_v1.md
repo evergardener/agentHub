@@ -175,7 +175,10 @@ Workspace/Git 保存实际文件产物；数据库保存路径、哈希、版本
   ActionIntent/签名 receipt 链，`allow_once` 或 `reject_once` 回应原 RPC 后
   继续同一 native session/turn；`session/update` 仅保存有界、脱敏的工具摘要
   与 assistant 输出，不保存隐藏思维链；
-- Codex `exec` 在原生可应答审批桥完成前默认只读；不得用完成后的 JSONL
-  tool event 反推授权。需要写入时采用控制面先批准、执行层再验证的短期能力
-  租约，或迁移到能保留原生 approval correlation 的 App Server 接入；
+- Codex 生产 Adapter 使用 `codex app-server`，不使用只能事后观察工具事件的
+  `exec --json`。thread 新建与恢复均固定 read-only，并将
+  `item/commandExecution/requestApproval`、`item/fileChange/requestApproval`、
+  `item/permissions/requestApproval` 映射到统一 PendingInteraction/ActionIntent/
+  签名 receipt 链；允许只回答原生同一 RPC 的一次性 `accept` 或 turn-scope
+  精确权限，禁止 session 级缓存授权；
 - gateway 静态路由逐步替换为 Registry 驱动的稳定逻辑路由。

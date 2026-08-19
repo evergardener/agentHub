@@ -50,7 +50,10 @@ async def test_veto_when_claimed_file_missing(tools):
 async def test_native_transport_logs_do_not_satisfy_file_claim(tools):
     tm, t = tools
     tid = _completed_task(tm, "创建 hello.py 文件")
-    for name in ("codex.jsonl", "kimi.jsonl", "kimi-stderr.log"):
+    for name in (
+        "codex.jsonl", "codex-app-server.jsonl",
+        "kimi.jsonl", "kimi-acp.jsonl", "kimi-stderr.log",
+    ):
         _add_artifact(tm, tid, name)
 
     result = await t.dispatch(

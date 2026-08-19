@@ -131,7 +131,7 @@ docker compose run --rm agentctl chat
 
 验收点：任务终态 `accepted`；`artifacts` 含产出文件；Web UI 任务详情可见复审记录；Jaeger 有完整 trace。
 
-### 3.6 DSH/Kimi 原生交互闭环
+### 3.6 DSH/Kimi/Codex 原生交互闭环
 
 DSH 产生 approval/question 后，任务进入 `blocked`，WebUI「AGENT 交互」卡片
 实时显示请求。审批只能选择本次允许或拒绝；本次允许会先由控制面决策关联的
@@ -150,6 +150,18 @@ stream-json 日志只可作为旧 Artifact，不得作为生产审批门禁。�
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientInfo":{"name":"agenthub-probe","version":"0.1.0"},"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false}}}' \
   | kimi acp
+```
+
+Codex Adapter 使用 `codex app-server --stdio`。所有 thread（包括恢复的旧
+thread）均由 Adapter 覆盖为 `read-only`、`approvalPolicy=on-request`、
+`approvalsReviewer=user`。命令、文件变更和附加权限请求在原生 JSON-RPC 上
+保持挂起；控制面批准 ActionIntent 后才以签名 receipt 回答同一 request。
+Adapter 只发送一次性 `accept`，权限请求只授予原请求且 scope 固定为 `turn`，
+绝不发送 `acceptForSession` 或 session-scope 权限。无模型协议检查：
+
+```bash
+LAS_RUN_CODEX_APP_SERVER=1 \
+  .venv/bin/python -m pytest -q tests/integration/test_codex_app_server.py
 ```
 
 只读查询：

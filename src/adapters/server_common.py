@@ -295,6 +295,13 @@ def build_app(
                         context=tracing.task_context(trace_id),
                         attributes={"agent.id": agent_id,
                                     "task.id": task.id}):
+                    # The receipt verifier lives in the native adapter. Keep
+                    # its mutable handle aligned with the authoritative task
+                    # revision before every turn, including later messages.
+                    handle = session_adapter.get_session(
+                        task.session_id or task.id)
+                    if handle is not None:
+                        handle.context_revision = task.context_revision
                     result = await session_adapter.send_message(
                         task.session_id or task.id,
                         SessionMessage(
