@@ -318,7 +318,25 @@ JetStream 卷、`agent-data` 和宿主机 Workspace；随后先启动 NATS、再
 
 `verify` 是离线操作，应定期在另一台机器和异地副本上执行。SHA-256 用于发现
 损坏，不代表来源签名；在镜像签名批次完成前只能信任来自受控备份目录的归档。
-当前批次完成一致性创建与离线校验，自动化恢复及实际恢复演练仍是发布阻断项。
+自动化恢复流程如下；隔离环境中的实际恢复演练仍是发布阻断项。
+
+受保护恢复（破坏性操作，必须在维护窗口执行）：
+
+```bash
+python3 scripts/control-plane-backup.py restore \
+  /path/to/local-backups/agenthub-backup-20260820T000000000000Z.tar.gz \
+  --workspace "$HOME/AgentWorkspace" \
+  --safety-output /path/to/local-backups/pre-restore \
+  --confirm RESTORE
+```
+
+恢复会先对当前状态自动创建并验证新的 safety backup；这一步失败时不会覆盖任何
+数据。随后暂停控制面和 NATS，以 `pg_restore --clean --if-exists
+--exit-on-error` 恢复数据库，并替换 JetStream/agent-data 卷。现有宿主机
+Workspace 不删除，而是重命名为同级 `AgentWorkspace.pre-restore-<时间>` 后再
+恢复目标版本。任何破坏性阶段错误都会让控制面保持停机，禁止半恢复状态继续
+处理任务；应根据错误检查并用输出的 safety backup 回退。自动化恢复已有离线
+测试，但在隔离 Compose 栈完成一次真实恢复演练前仍不得标记生产发布通过。
 
 ## 8. 安全基线
 

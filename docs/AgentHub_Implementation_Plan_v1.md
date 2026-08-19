@@ -97,7 +97,9 @@ revision 写许可失效。
 - 告警路由与通知升级；
 - [x] PostgreSQL custom dump、JetStream、agent-data、宿主机 Workspace 一致性
   备份与离线完整性校验；
-- 自动化恢复与实际恢复演练；
+- [x] 受显式确认保护的自动化恢复：恢复前 safety backup、PG exit-on-error、
+  卷替换、原 Workspace 可恢复保留、失败保持停机；
+- 隔离 Compose 栈实际恢复演练；
 - 数据库迁移前备份；
 - 故障注入、升级和回滚演练。
 

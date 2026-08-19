@@ -179,4 +179,102 @@ def verify_backup(archive: Path) -> dict:
         for required in (root / "nats-data", root / "agent-data"):
             if not required.is_dir():
                 raise BackupError(f"备份缺少目录: {required.name}")
+        if manifest.get("workspace_included") and not (
+                root / "workspace").is_dir():
+            raise BackupError("manifest 声明包含 Workspace，但目录缺失")
         return manifest
+
+
+def _restore_volume(runner: Runner, service: str, source: Path) -> None:
+    mount = f"{source.resolve()}:/restore:ro"
+    script = ("set -eu; "
+              "find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; "
+              "cp -a /restore/. /data/")
+    _compose(runner, "run", "--rm", "--no-deps", "--entrypoint", "sh",
+             "-v", mount, service, "-c", script)
+
+
+def restore_backup(archive: Path, safety_dir: Path,
+                   workspace: Path | None,
+                   runner: Runner = subprocess.run) -> dict:
+    """Restore a verified archive after creating a fresh safety backup.
+
+    Callers must enforce explicit user confirmation. On any destructive-phase
+    failure services intentionally remain stopped for operator inspection.
+    """
+    archive = archive.expanduser().resolve()
+    workspace = workspace.expanduser().resolve() if workspace else None
+    if workspace:
+        home = Path.home().resolve()
+        if workspace in {Path("/").resolve(), home} or len(workspace.parts) < 3:
+            raise BackupError("拒绝恢复到过宽的 Workspace 路径")
+    verify_backup(archive)
+    safety_archive = create_backup(safety_dir, workspace, runner=runner)
+
+    with tempfile.TemporaryDirectory(prefix="agenthub-restore-") as temp:
+        temp_root = Path(temp)
+        stable_archive = temp_root / "restore.tar.gz"
+        shutil.copy2(archive, stable_archive)
+        manifest = verify_backup(stable_archive)
+        extracted = temp_root / "extracted"
+        extracted.mkdir()
+        try:
+            with tarfile.open(stable_archive, "r:gz") as tar:
+                tar.extractall(extracted, filter="data")
+        except (tarfile.TarError, OSError) as exc:
+            raise BackupError("恢复归档解压失败") from exc
+
+        running_result = _compose(
+            runner, "ps", "--services", "--status", "running",
+            stdout=subprocess.PIPE, text=True)
+        running = set(running_result.stdout.splitlines())
+        missing = sorted({"postgres", "nats", "state-writer"} - running)
+        if missing:
+            raise BackupError(f"恢复前服务状态异常: {', '.join(missing)}")
+        stopped_apps = [name for name in QUIESCE_SERVICES if name in running]
+        if stopped_apps:
+            _compose(runner, "stop", "--timeout", "30", *stopped_apps)
+        _compose(runner, "stop", "--timeout", "30", "nats")
+
+        # Destructive phase: failures below deliberately do not restart apps.
+        try:
+            with (extracted / "postgres.dump").open("rb") as dump:
+                _compose(
+                    runner, "exec", "-T", "postgres", "pg_restore",
+                    "-U", "agenthub", "-d", "agenthub", "--clean",
+                    "--if-exists", "--exit-on-error", "--no-owner",
+                    "--no-acl", stdin=dump)
+            _restore_volume(runner, "nats", extracted / "nats-data")
+            _restore_volume(runner, "state-writer", extracted / "agent-data")
+
+            preserved_workspace = None
+            source_workspace = extracted / "workspace"
+            if manifest.get("workspace_included") and workspace:
+                preserved_workspace = workspace.with_name(
+                    f"{workspace.name}.pre-restore-"
+                    f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}")
+                if preserved_workspace.exists():
+                    raise BackupError(
+                        f"Workspace 保留路径已存在: {preserved_workspace}")
+                if workspace.exists():
+                    workspace.rename(preserved_workspace)
+                try:
+                    shutil.copytree(source_workspace, workspace, symlinks=True)
+                except Exception:
+                    shutil.rmtree(workspace, ignore_errors=True)
+                    if preserved_workspace.exists():
+                        preserved_workspace.rename(workspace)
+                    raise
+        except Exception as exc:
+            raise BackupError(
+                "恢复失败；控制面保持停机，请检查并使用安全备份回退") from exc
+
+        _compose(runner, "start", "nats")
+        if stopped_apps:
+            _compose(runner, "start", *stopped_apps)
+        return {
+            "restored_from": str(archive),
+            "safety_backup": str(safety_archive),
+            "preserved_workspace": (
+                str(preserved_workspace) if preserved_workspace else None),
+        }
