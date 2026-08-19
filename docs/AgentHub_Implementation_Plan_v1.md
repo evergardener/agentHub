@@ -95,7 +95,9 @@ revision 写许可失效。
 - [x] WebUI/Orchestrator readiness、State Writer/Janitor 依赖探针、Gateway
   端口探针、Compose 健康依赖、资源上限与容器日志轮换；
 - 告警路由与通知升级；
-- PostgreSQL/JetStream 备份恢复；
+- [x] PostgreSQL custom dump、JetStream、agent-data、宿主机 Workspace 一致性
+  备份与离线完整性校验；
+- 自动化恢复与实际恢复演练；
 - 数据库迁移前备份；
 - 故障注入、升级和回滚演练。
 

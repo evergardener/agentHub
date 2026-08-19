@@ -10,3 +10,4 @@ runtime/
 .DS_Store
 infra/agentgateway/bin/
 .env
+backups/

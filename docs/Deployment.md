@@ -300,6 +300,26 @@ codex/kimi。临时绕过：`LAS_GATEWAY_URL=` 置空走直连；长期方案是
 | 任务产物 | docker volume `agent-data` + 宿主机 `$LAS_WORKSPACE` | 双份（adapter 侧为准） |
 | 配置与密钥 | `.env`（600） | 单独妥善备份，勿入仓 |
 
+创建一致性备份：
+
+```bash
+python3 scripts/control-plane-backup.py create \
+  --output /path/to/local-backups \
+  --workspace "$HOME/AgentWorkspace"
+python3 scripts/control-plane-backup.py verify \
+  /path/to/local-backups/agenthub-backup-*.tar.gz
+```
+
+脚本要求 PostgreSQL、NATS、State Writer 正在运行。它只暂停当前实际运行的写入
+相关控制面服务，生成 PostgreSQL custom dump，再停 NATS 后复制一致的
+JetStream 卷、`agent-data` 和宿主机 Workspace；随后先启动 NATS、再恢复原先
+运行的服务。归档在校验所有文件大小、SHA-256 和 `PGDMP` 头后才原子发布，权限
+固定为 600。`.env` 和其他密钥不会进入归档，必须通过独立的机密备份渠道保存。
+
+`verify` 是离线操作，应定期在另一台机器和异地副本上执行。SHA-256 用于发现
+损坏，不代表来源签名；在镜像签名批次完成前只能信任来自受控备份目录的归档。
+当前批次完成一致性创建与离线校验，自动化恢复及实际恢复演练仍是发布阻断项。
+
 ## 8. 安全基线
 
 - 所有端口绑 `127.0.0.1`（Web UI / gateway / Jaeger 默认不暴露局域网）

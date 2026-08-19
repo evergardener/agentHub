@@ -48,6 +48,8 @@ docker compose run --rm agentctl chat   # 与 hermes 对话
   （`LAS_OTEL_ENDPOINT` 置空即关闭 tracing，默认 NoOp 零开销）
 - Compose 生产模式对 WebUI 与 Orchestrator 认证 fail-closed；缺失或弱密钥时
   相应服务拒绝启动。使用 `scripts/production-preflight.py` 在启动前一次检查。
+- 一致性数据保护使用 `scripts/control-plane-backup.py create|verify`；备份不含
+  `.env` 密钥，详见部署文档。
 
 宿主机 worker 接入容器栈：
 
