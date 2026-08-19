@@ -175,7 +175,7 @@ def create_app(tm: TaskManager | None = None,
 
     @app.middleware("http")
     async def _require_auth(request: Request, call_next):
-        if request.url.path != "/health":
+        if request.url.path not in {"/health", "/ready"}:
             identity = _authenticate(request)
             if identity is None:
                 return JSONResponse({"error": "unauthorized"},
@@ -227,6 +227,14 @@ def create_app(tm: TaskManager | None = None,
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok", "agent": "orchestrator"}
+
+    @app.get("/ready")
+    async def ready():
+        try:
+            tm.conn.execute("SELECT 1;").fetchone()
+            return {"status": "ready", "agent": "orchestrator"}
+        except Exception:
+            return JSONResponse({"status": "not-ready"}, status_code=503)
 
     @app.post("/a2a")
     async def a2a(request: Request) -> JSONResponse:

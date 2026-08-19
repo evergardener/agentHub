@@ -61,6 +61,8 @@ def _login(client, token):
 
 
 def test_overview(client):
+    assert client.get("/health").json()["status"] == "ok"
+    assert client.get("/ready").json()["status"] == "ready"
     ov = client.get("/api/overview").json()
     assert ov["task_counts"]["blocked"] == 1
     assert ov["agents"][0]["id"] == "codex"
@@ -166,6 +168,8 @@ def test_artifact_content(client, tmp_path, monkeypatch):
 
 def test_secure_webui_login_cookie_and_csrf(secure_client):
     assert secure_client.get("/").status_code == 200
+    assert secure_client.get("/health").status_code == 200
+    assert secure_client.get("/ready").status_code == 200
     assert secure_client.get("/api/overview").status_code == 401
     assert secure_client.get("/api/auth/status").status_code == 401
     assert _login(secure_client, "wrong-token-012345")[0].status_code == 401

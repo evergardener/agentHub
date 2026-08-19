@@ -84,6 +84,12 @@ docker compose up -d
 docker compose ps          # 全部 Up / healthy
 ```
 
+`state-writer` 会同时探测数据库与 NATS，`janitor` 探测数据库，WebUI 和
+Orchestrator 的 `/ready` 会验证数据库，agentgateway 则验证监听端口。依赖服务
+未 ready 时，下游不会提前启动；连续失败会在 `docker compose ps` 显示
+`unhealthy`。所有容器使用有界 `json-file` 日志（单文件 10MB、保留 5 个），
+并配置 CPU、内存和 PID 上限，避免单一控制面组件拖垮宿主机。
+
 入口：
 - Web UI（看板/审批/事件流/复审记录）：http://127.0.0.1:18070；首次打开输入 `.env` 中某个 `LAS_WEBUI_TOKENS` key
 - Jaeger：http://127.0.0.1:16686
@@ -229,6 +235,7 @@ compose 默认 `LAS_WEBUI_REQUIRE_AUTH=true`，缺 token 或 session secret 会�
 | worker 日志 | `~/Library/Logs/agenthub-<agent>.log`（macOS launchd） |
 | worker 重启 | `launchctl kickstart -k gui/$(id -u)/top.evergardenviolet.agenthub.<agent>` |
 | 控制面日志 | `docker compose logs -f state-writer`（等） |
+| 健康状态 | `docker compose ps`；详细探针：`docker inspect --format '{{json .State.Health}}' <container>` |
 
 ## 5. 升级与回滚
 
@@ -290,3 +297,5 @@ codex/kimi。临时绕过：`LAS_GATEWAY_URL=` 置空走直连；长期方案是
 - gateway `apiKey.agents` ACL 控制 hermes 可访问的 agent 列表
 - WebUI 使用高熵 token、签名 HttpOnly Cookie、CSRF 与 `viewer/operator/admin`
   RBAC；跨主机只允许经带登录限流的 HTTPS 反向代理访问
+- 关键控制面服务具备 dependency-aware readiness，容器设 CPU/内存/PID 上限，
+  `json-file` 日志自动轮换（10MB × 5）

@@ -88,7 +88,9 @@ revision 写许可失效。
   无认证启动失败；compose 默认 fail-closed；
 - gateway TLS/JWT/ACL/限流；
 - 固定镜像版本、SBOM、签名和漏洞扫描；
-- readiness、资源限制、日志轮换和告警；
+- [x] WebUI/Orchestrator readiness、State Writer/Janitor 依赖探针、Gateway
+  端口探针、Compose 健康依赖、资源上限与容器日志轮换；
+- 告警路由与通知升级；
 - PostgreSQL/JetStream 备份恢复；
 - 数据库迁移前备份；
 - 故障注入、升级和回滚演练。

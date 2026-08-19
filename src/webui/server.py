@@ -140,7 +140,8 @@ def create_app() -> FastAPI:
             return await call_next(request)
 
         # The login form and shell must be reachable before a session exists.
-        if request.url.path in {"/", "/api/auth/login"}:
+        if request.url.path in {"/", "/health", "/ready",
+                                "/api/auth/login"}:
             return await call_next(request)
 
         claims = _verify_session(
@@ -170,6 +171,22 @@ def create_app() -> FastAPI:
     @app.get("/")
     async def index():
         return FileResponse(STATIC / "index.html")
+
+    @app.get("/health")
+    async def health():
+        return {"status": "ok", "service": "webui"}
+
+    @app.get("/ready")
+    async def ready():
+        try:
+            conn = _conn()
+            try:
+                conn.execute("SELECT 1;").fetchone()
+            finally:
+                conn.close()
+            return {"status": "ready", "service": "webui"}
+        except Exception:
+            return JSONResponse({"status": "not-ready"}, status_code=503)
 
     # ---------- 登录 / 会话 ----------
 

@@ -15,6 +15,14 @@
 x-agenthub: &agenthub
   image: agenthub:latest
   build: .
+  mem_limit: 512m
+  cpus: "1.0"
+  pids_limit: 256
+  logging: &default-logging
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
 
 x-agenthub-env: &agenthub-env
   LAS_NATS_URL: nats://nats:4222
@@ -31,6 +39,10 @@ services:
       - nats-data:/data
     ports:
       - "127.0.0.1:4222:4222"   # 宿主机 worker 经此接入
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 256
+    logging: *default-logging
     restart: unless-stopped
 
   postgres:
@@ -43,6 +55,11 @@ services:
       - pg-data:/var/lib/postgresql/data
     ports:
       - "127.0.0.1:5432:5432"   # 宿主机工具/调试可直连
+    mem_limit: 1g
+    cpus: "2.0"
+    pids_limit: 256
+    shm_size: 256mb
+    logging: *default-logging
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U agenthub -d agenthub"]
       interval: 2s
@@ -63,6 +80,12 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "common.healthcheck", "database-nats"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
     restart: unless-stopped
 
   janitor:
@@ -73,7 +96,13 @@ services:
       - agent-data:/data
     depends_on:
       state-writer:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "common.healthcheck", "database"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 10s
     restart: unless-stopped
 
   agentgateway:
@@ -88,6 +117,12 @@ services:
       - "127.0.0.1:8300:8300"
     depends_on:
       - nats
+    healthcheck:
+      test: ["CMD", "python", "-m", "common.healthcheck", "tcp", "127.0.0.1", "8300"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
     restart: unless-stopped
 
   # 外部总控（用户自建 hermes）的 A2A 接入端点（Evolution v3 §6 延伸）
@@ -106,9 +141,15 @@ services:
       - "127.0.0.1:8310:8310"
     depends_on:
       state-writer:
-        condition: service_started
+        condition: service_healthy
       agentgateway:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "common.healthcheck", "http", "http://127.0.0.1:8310/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
     restart: unless-stopped
 
   # Web UI（Evolution v3 §5.2）：看板 / 任务详情 / 事件流 / 审批中心
@@ -138,9 +179,15 @@ services:
       - "127.0.0.1:18070:8080"  # 仍仅 loopback；另有应用层认证/CSRF/RBAC
     depends_on:
       state-writer:
-        condition: service_started
+        condition: service_healthy
       agentgateway:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "common.healthcheck", "http", "http://127.0.0.1:8080/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
     restart: unless-stopped
 
   # OTel 收集 + 查询界面（Evolution v3 §5.1）；应用经 LAS_OTEL_ENDPOINT 上报
@@ -149,6 +196,10 @@ services:
     ports:
       - "127.0.0.1:16686:16686"  # 查询 UI
       - "4318:4318"              # OTLP HTTP（宿主机进程也可上报）
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 256
+    logging: *default-logging
     restart: unless-stopped
 
   # 交互式 CLI：docker compose run --rm agentctl chat

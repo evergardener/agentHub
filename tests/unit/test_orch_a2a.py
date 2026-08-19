@@ -119,6 +119,7 @@ def test_auth_enforced_when_token_set(tmp_path, monkeypatch):
     tm = TaskManager(db_path=tmp_path / "s.db", workspace=tmp_path / "ws")
     client = TestClient(create_app(tm=tm))
     assert client.get("/health").status_code == 200
+    assert client.get("/ready").status_code == 200
     assert client.get("/.well-known/agent-card.json").status_code == 401
     ok = client.get("/.well-known/agent-card.json",
                     headers={"X-Agent-Token": "orch-tok"})
