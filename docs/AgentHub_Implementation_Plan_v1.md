@@ -99,7 +99,8 @@ revision 写许可失效。
   备份与离线完整性校验；
 - [x] 受显式确认保护的自动化恢复：恢复前 safety backup、PG exit-on-error、
   卷替换、原 Workspace 可恢复保留、失败保持停机；
-- 隔离 Compose 栈实际恢复演练；
+- [x] 隔离 Compose 栈真实恢复演练：PostgreSQL、NATS、agent-data、Workspace
+  mutated→original，safety backup/旧 Workspace 可读，临时资源完整清理；
 - [x] 数据库 migration 前强制验证一次性、新鲜备份回执；迁移前原子消费，
   成功删除，异常恢复供重试，崩溃遗留 consuming 状态拒绝复用；
 - 故障注入、升级和回滚演练。

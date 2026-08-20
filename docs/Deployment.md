@@ -345,8 +345,22 @@ python3 scripts/control-plane-backup.py restore \
 --exit-on-error` 恢复数据库，并替换 JetStream/agent-data 卷。现有宿主机
 Workspace 不删除，而是重命名为同级 `AgentWorkspace.pre-restore-<时间>` 后再
 恢复目标版本。任何破坏性阶段错误都会让控制面保持停机，禁止半恢复状态继续
-处理任务；应根据错误检查并用输出的 safety backup 回退。自动化恢复已有离线
-测试，但在隔离 Compose 栈完成一次真实恢复演练前仍不得标记生产发布通过。
+处理任务；应根据错误检查并用输出的 safety backup 回退。
+
+隔离恢复演练使用随机 `COMPOSE_PROJECT_NAME`、独立临时卷且结束后 `down -v`，
+不会连接默认 agentHub project：
+
+```bash
+LAS_RUN_RESTORE_DRILL=1 \
+  .venv/bin/python -m pytest -q \
+  tests/integration/test_backup_restore_drill.py
+```
+
+2026-08-20 已完成一次真实隔离演练：PostgreSQL 行、NATS 卷文件、agent-data
+卷文件和宿主机 Workspace 均先改写为 mutated，再成功恢复为 original；恢复前
+safety backup 与旧 Workspace 可读取，最后确认随机项目的容器、网络和卷全部
+删除。该测试现作为显式集成门禁保留。正式部署到另一台目标主机时仍须在其维护
+窗口再执行一次，验证当地 Docker、磁盘权限和备份介质，而不是拿本次结果替代。
 
 ## 8. 安全基线
 
