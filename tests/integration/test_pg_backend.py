@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -54,7 +55,7 @@ def test_pg_migrations_and_core_flow(pg_url):
     # 迁移：全部版本已应用，含 Profile、Session recovery 与 Task Plan
     versions = [r[0] for r in conn.execute(
         "SELECT version FROM schema_migrations ORDER BY version;").fetchall()]
-    assert versions == list(range(1, 10))
+    assert versions == list(range(1, 11))
 
     from orchestrator import collaboration_store
 
@@ -98,8 +99,9 @@ def test_pg_migrations_and_core_flow(pg_url):
         state_store.record_event(conn, {"event_id": "e1",
                                         "event_type": "task.x", "task_id": t1})
     seqs = [r[0] for r in conn.execute(
-        "SELECT seq FROM events ORDER BY seq;").fetchall()]
-    assert seqs == [1, 2]
+        "SELECT seq FROM events WHERE id IN ('e1', 'e2')"
+        " ORDER BY seq;").fetchall()]
+    assert len(seqs) == 2 and seqs[1] > seqs[0]
 
     # 心跳注册（endpoint/skills）
     state_store.update_heartbeat(conn, "codex", lease_ttl_seconds=90,
@@ -117,6 +119,37 @@ def test_pg_migrations_and_core_flow(pg_url):
     assert ApprovalPolicy.revoke(conn, gid) is True
 
     conn.close()
+
+
+@requires_pg
+def test_pg_event_sequence_is_safe_across_concurrent_writers(pg_url):
+    from orchestrator import state_store
+    from state.db import connect, init_db
+
+    init_db(pg_url).close()
+
+    def write(index: int) -> None:
+        conn = connect(pg_url)
+        try:
+            state_store.record_event(conn, {
+                "event_id": f"E-concurrent-{index}",
+                "event_type": "task.concurrent",
+                "source": "test",
+            })
+        finally:
+            conn.close()
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        list(pool.map(write, range(96)))
+
+    conn = connect(pg_url)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT seq), MIN(seq), MAX(seq)"
+            " FROM events;").fetchone()
+        assert tuple(row[index] for index in range(4)) == (96, 96, 1, 96)
+    finally:
+        conn.close()
 
 
 @requires_pg

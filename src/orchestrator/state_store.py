@@ -139,15 +139,28 @@ def record_event(conn: sqlite3.Connection, event: dict, *,
     events --follow 跨后端使用）。
     """
     try:
-        conn.execute(
-            "INSERT INTO events (id, seq, subject, task_id, agent_id,"
-            " event_type, payload_json, created_at) VALUES (?,"
-            " (SELECT COALESCE(MAX(seq), 0) + 1 FROM events),?,?,?,?,?,?);",
-            (event["event_id"], event["event_type"], event.get("task_id"),
-             event.get("source"), event["event_type"],
-             json.dumps(event.get("payload", {}), ensure_ascii=False),
-             event.get("timestamp", now_iso())),
+        params = (
+            event["event_id"], event["event_type"], event.get("task_id"),
+            event.get("source"), event["event_type"],
+            json.dumps(event.get("payload", {}), ensure_ascii=False),
+            event.get("timestamp", now_iso()),
         )
+        if getattr(conn, "backend", "sqlite") == "pg":
+            # Migration 010 supplies a PostgreSQL sequence.  MAX(seq)+1 is
+            # racy across state-writer, janitor, notifier and WebUI writers.
+            conn.execute(
+                "INSERT INTO events (id, subject, task_id, agent_id,"
+                " event_type, payload_json, created_at)"
+                " VALUES (?,?,?,?,?,?,?);",
+                params,
+            )
+        else:
+            conn.execute(
+                "INSERT INTO events (id, seq, subject, task_id, agent_id,"
+                " event_type, payload_json, created_at) VALUES (?,"
+                " (SELECT COALESCE(MAX(seq), 0) + 1 FROM events),?,?,?,?,?,?);",
+                params,
+            )
         if commit:
             conn.commit()
     except Exception as e:  # 双后端唯一约束冲突 → DuplicateEvent

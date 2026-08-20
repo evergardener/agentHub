@@ -68,6 +68,34 @@ def test_duplicate_event_rejected(conn):
         state_store.record_event(conn, event)
 
 
+def test_postgres_event_insert_uses_database_sequence():
+    class RecordingPg:
+        backend = "pg"
+
+        def __init__(self):
+            self.sql = ""
+            self.committed = False
+
+        def execute(self, statement, params=()):
+            self.sql = statement
+
+        def commit(self):
+            self.committed = True
+
+        def rollback(self):
+            pass
+
+    conn = RecordingPg()
+    state_store.record_event(conn, {
+        "event_id": "E-pg", "event_type": "task.started",
+        "task_id": "T-pg", "source": "codex", "payload": {},
+    })
+
+    assert "MAX(seq)" not in conn.sql
+    assert "(id, subject" in conn.sql
+    assert conn.committed is True
+
+
 def test_heartbeat_sets_lease(conn):
     state_store.update_heartbeat(conn, "codex", lease_ttl_seconds=90)
     row = conn.execute("SELECT * FROM agents WHERE id='codex';").fetchone()
