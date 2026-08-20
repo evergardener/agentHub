@@ -40,6 +40,14 @@ def test_agentctl_compose_service_preserves_cli_entrypoint_for_subcommands():
     assert service["command"] == ["chat"]
 
 
+def test_release_smoke_targets_codex_and_dsh_without_kimi():
+    smoke = (ROOT / "scripts" / "e2e_phase_a.py").read_text()
+    assert '"codex"' in smoke
+    assert '"dsh"' in smoke
+    assert 'TOKENS["kimi"]' not in smoke
+    assert '"tasks/reject"' in smoke
+
+
 def test_agentgateway_download_is_verified_per_supported_architecture():
     dockerfile = (ROOT / "Dockerfile").read_text()
     assert "agentgateway/releases/download/v1.4.1" in dockerfile
