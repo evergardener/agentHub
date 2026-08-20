@@ -214,8 +214,9 @@ revision 写许可失效。
     只落一条 Event/Run 的隔离进程测试。两项待授权网络环境执行，PostgreSQL
     连接故障现会替换 State Writer 的失效连接并继续依赖 JetStream NAK 重投；
     已增加 `LAS_RUN_PG_FAULTS=1` 显式门控的随机 Compose 项目故障测试：停库期间
-    验证 durable message NAK，恢复后验证同 event_id 只落一条 Event/Run；该真实
-    容器矩阵待授权 Docker 环境执行。
+    验证 durable message NAK，恢复后验证同 event_id 只落一条 Event/Run；该
+    PostgreSQL 隔离容器门禁已于 2026-08-20 在本机真实执行通过（1 passed），
+    gateway 与 NATS 隔离进程门禁仍待授权环境执行。
 
 ## 当前迭代（Iteration 6）
 
