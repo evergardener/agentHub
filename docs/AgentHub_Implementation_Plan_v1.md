@@ -347,10 +347,22 @@ revision 写许可失效。
     idempotency、Codex expected turn、DSH 原生 steer、Hermes 上下文同步及
     WebUI 介入 API。
 
+## 2026-08-20 WebUI 信息架构收敛
+
+- [x] 告警从主控制台左栏移入顶栏独立抽屉，严重/警告/提示可筛选且列表内部
+  滚动，Agents、审批中心、原生交互和常驻授权不再被历史告警挤出首屏；
+- [x] 为 artifact 缺失、租约过期、任务超时、重试耗尽和 Adapter 不可用提供
+  中文问题解释、影响及建议动作；历史测试临时产物单独识别，未知 kind 保持
+  fail-safe 提示；「确认」改为语义准确的「标记已知」，明确它不会修复、重试
+  或取消任务；
+- [x] 移除浏览器原生 prompt/alert/confirm，改为页面内登录、确认框和 toast；
+  应用内浏览器以临时 SQLite、模拟告警和假 Token 完成登录、布局和控制台零错误
+  验收；全量回归 365 passed、30 skipped。
+
 ## 2026-08-20 当前发布基线与外部阻塞项
 
-- 当前源码全量 unit+contract：340 passed；默认 integration：10 passed、
-  29 skipped。默认跳过项均维持显式门控；gateway、远程安全剖面、NATS、
+- 当前源码默认全量：365 passed、30 skipped。默认跳过项均维持显式门控；
+  gateway、远程安全剖面、NATS、
   PostgreSQL、DSH 无模型重启、HTTPS 告警及备份恢复等已执行的隔离门禁结果，
   以各节记录为准；
 - 本机可安全完成的实现与隔离故障注入已收敛。后续不应继续以 mock 或仅健康检查

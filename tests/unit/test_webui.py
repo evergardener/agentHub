@@ -172,6 +172,20 @@ def test_index_page(client):
     assert "归还 Hermes 并重新规划" in r.text
 
 
+def test_index_has_bounded_alert_center_and_in_page_dialogs(client):
+    page = client.get("/").text
+    assert 'id="alert-drawer"' in page
+    assert 'class="alert-list" id="alerts"' in page
+    assert "标记已知仅关闭此告警" in page
+    assert "历史测试产物已被清理" in page
+    assert "先处理问题，再标记已知" in page
+    assert 'id="login-token"' in page
+    assert "/api/alerts?status=open&limit=1000" in page
+    assert "prompt(" not in page
+    assert "confirm(" not in page
+    assert "alert(" not in page
+
+
 def test_intervention_api(client, monkeypatch):
     from orchestrator.task_manager import TaskManager
 

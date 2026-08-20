@@ -179,9 +179,12 @@ Orchestrator 的 `/ready` 会验证数据库，agentgateway 则验证监听端�
 ### 3.3.1 告警与通知
 
 Janitor 的租约过期、执行超时、产物缺失，以及重试耗尽的任务会写入持久
-`alerts` outbox，并产生 `system.alert` 审计事件。WebUI「告警中心」实时显示未确认
-告警；`operator`/`admin` 可确认，`viewer` 只读。同一 kind/task/detail 只建立一条
-告警，重复发生增加 `occurrences`，不会形成通知风暴。
+`alerts` outbox，并产生 `system.alert` 审计事件。WebUI 顶栏显示未处理数量，点击
+后在独立告警抽屉中按严重程度筛选；每条记录给出问题解释、影响、建议动作和折叠的
+技术详情，不会把 Agents、审批和任务卡片向下挤出首屏。`operator`/`admin` 可
+「标记已知」，`viewer` 只读；标记已知只从待处理列表移除，**不会**修复、重试或
+取消任务，应先按建议完成处置。同一 kind/task/detail 只建立一条告警，重复发生
+增加 `occurrences`，不会形成通知风暴。
 
 外部通知是显式启用的：
 

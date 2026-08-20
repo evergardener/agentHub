@@ -52,6 +52,22 @@
   .conn.off .dot { background: var(--bad); }
   #clock { font-size: 12px; color: var(--faint);
            font-variant-numeric: tabular-nums; }
+  .alert-nav {
+    display: inline-flex; align-items: center; gap: 7px; min-height: 32px;
+    padding: 4px 6px 4px 11px; border: 1px solid var(--line);
+    border-radius: 999px; background: var(--card); color: var(--mut);
+    font: inherit; font-size: 12px; cursor: pointer; transition: all .15s;
+  }
+  .alert-nav:hover, .alert-nav.has-critical {
+    border-color: #efb3b3; color: var(--bad); background: var(--bad-soft);
+  }
+  .alert-nav-count {
+    min-width: 22px; height: 22px; padding: 0 6px; border-radius: 999px;
+    display: inline-grid; place-items: center; color: #fff;
+    background: var(--mut); font-size: 11px; font-weight: 700;
+  }
+  .alert-nav.has-alerts .alert-nav-count { background: var(--warn); }
+  .alert-nav.has-critical .alert-nav-count { background: var(--bad); }
 
   /* ── 布局 ── */
   .layout {
@@ -61,6 +77,14 @@
   }
   @media (max-width: 1100px) {
     .layout { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 600px) {
+    header { padding: 0 12px; gap: 8px; }
+    #clock { display: none; }
+    .layout { padding: 12px; }
+    .alert-summary { grid-template-columns: 1fr; }
+    .alert-footer { align-items: stretch; flex-direction: column; }
+    .alert-footer .btn { width: 100%; }
   }
   .col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 
@@ -76,6 +100,127 @@
   }
   .card .body { padding: 10px 16px 14px; }
   .empty { color: var(--faint); font-size: 13px; padding: 10px 0; }
+
+  /* ── 告警中心 ── */
+  .panel-scrim {
+    position: fixed; inset: 0; z-index: 49; background: rgba(18,22,34,.3);
+    opacity: 0; pointer-events: none; transition: opacity .18s;
+  }
+  .panel-scrim.show { opacity: 1; pointer-events: auto; }
+  .alert-drawer {
+    position: fixed; inset: 0 0 0 auto; z-index: 50;
+    width: min(680px, 96vw); background: var(--bg);
+    box-shadow: -10px 0 36px rgba(18,22,34,.16);
+    transform: translateX(100%); transition: transform .22s ease;
+    display: flex; flex-direction: column;
+  }
+  .alert-drawer.show { transform: translateX(0); }
+  .alert-head {
+    display: flex; gap: 18px; align-items: flex-start; padding: 22px 24px 18px;
+    background: var(--card); border-bottom: 1px solid var(--line);
+  }
+  .alert-head > div { flex: 1; min-width: 0; }
+  .alert-head h2 { margin: 2px 0 3px; font-size: 20px; letter-spacing: -.01em; }
+  .alert-head p { margin: 0; color: var(--mut); font-size: 12.5px; }
+  .alert-eyebrow { color: var(--acc); font-size: 10px; font-weight: 700;
+                   letter-spacing: .14em; }
+  .icon-btn {
+    border: 0; background: var(--line-soft); color: var(--mut); cursor: pointer;
+    width: 32px; height: 32px; border-radius: 8px; font-size: 16px;
+  }
+  .icon-btn:hover { background: var(--line); color: var(--fg); }
+  .alert-summary {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px; padding: 14px 24px 8px;
+  }
+  .alert-metric {
+    border: 1px solid var(--line); border-radius: 9px; padding: 9px 12px;
+    background: var(--card); cursor: pointer; text-align: left;
+  }
+  .alert-metric:hover { border-color: var(--acc); }
+  .alert-metric strong { display: block; font-size: 20px; line-height: 1.25; }
+  .alert-metric span { color: var(--mut); font-size: 11.5px; }
+  .alert-metric.critical strong { color: var(--bad); }
+  .alert-metric.warning strong { color: var(--warn); }
+  .alert-metric.info strong { color: var(--run); }
+  .alert-filters { display: flex; gap: 6px; padding: 8px 24px 10px; }
+  .alert-list { overflow-y: auto; padding: 0 24px 24px; flex: 1; }
+  .alert-item {
+    background: var(--card); border: 1px solid var(--line);
+    border-left: 4px solid var(--warn); border-radius: 10px;
+    padding: 14px 16px; margin-bottom: 10px; box-shadow: var(--shadow);
+  }
+  .alert-item.critical { border-left-color: var(--bad); }
+  .alert-item.info { border-left-color: var(--run); }
+  .alert-item-head { display: flex; align-items: flex-start; gap: 10px; }
+  .alert-item-head > div { flex: 1; min-width: 0; }
+  .alert-item h3 { margin: 0; font-size: 14px; }
+  .alert-impact { margin: 5px 0 9px; color: var(--mut); font-size: 12.5px; }
+  .alert-action {
+    padding: 8px 10px; border-radius: 7px; background: var(--acc-soft);
+    color: #304cae; font-size: 12.5px;
+  }
+  .alert-action strong { color: var(--acc); }
+  .alert-meta {
+    display: flex; flex-wrap: wrap; gap: 5px 12px; margin-top: 10px;
+    color: var(--faint); font-size: 11.5px;
+  }
+  .alert-tech { margin-top: 9px; color: var(--mut); font-size: 12px; }
+  .alert-tech summary { cursor: pointer; }
+  .alert-tech code { display: block; margin-top: 6px; padding: 7px 9px;
+                     border-radius: 6px; background: var(--line-soft);
+                     color: var(--fg); word-break: break-all; }
+  .alert-footer { display: flex; align-items: center; gap: 8px;
+                  margin-top: 11px; }
+  .alert-footer .hint { color: var(--faint); font-size: 11px; flex: 1; }
+  .severity {
+    flex: none; padding: 1px 8px; border-radius: 999px; font-size: 11px;
+    color: var(--warn); background: var(--warn-soft);
+  }
+  .severity.critical { color: var(--bad); background: var(--bad-soft); }
+  .severity.info { color: var(--run); background: var(--run-soft); }
+
+  /* ── 页面内 Modal / Toast ── */
+  .modal-layer {
+    position: fixed; inset: 0; z-index: 80; display: none; place-items: center;
+    padding: 20px; background: rgba(18,22,34,.42); backdrop-filter: blur(2px);
+  }
+  .modal-layer.show { display: grid; }
+  .modal-card {
+    width: min(420px, 100%); padding: 24px; border-radius: 14px;
+    background: var(--card); box-shadow: 0 20px 60px rgba(18,22,34,.22);
+  }
+  .modal-card h2 { margin: 6px 0 8px; font-size: 18px; }
+  .modal-card p { margin: 0 0 16px; color: var(--mut); font-size: 13px; }
+  .modal-card label { display: block; margin-bottom: 5px; font-size: 12px;
+                      font-weight: 600; color: var(--mut); }
+  .modal-card input {
+    width: 100%; min-height: 40px; padding: 8px 11px; border-radius: 8px;
+    border: 1px solid var(--line); font: inherit; outline: none;
+  }
+  .modal-card input:focus { border-color: var(--acc); box-shadow: 0 0 0 3px var(--acc-soft); }
+  .login-logo { margin-bottom: 16px; }
+  .form-error { min-height: 22px; color: var(--bad); font-size: 12px; padding-top: 3px; }
+  .btn.primary { background: var(--acc); border-color: var(--acc); color: #fff; }
+  .btn.primary:hover { color: #fff; filter: brightness(1.06); }
+  .btn.wide { width: 100%; min-height: 38px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .confirm-icon {
+    width: 36px; height: 36px; display: grid; place-items: center;
+    border-radius: 10px; color: var(--warn); background: var(--warn-soft);
+    font-size: 18px; font-weight: 700;
+  }
+  .toast-region {
+    position: fixed; z-index: 100; right: 20px; bottom: 20px;
+    width: min(380px, calc(100vw - 40px)); display: grid; gap: 8px;
+  }
+  .toast {
+    padding: 10px 13px; border-radius: 8px; color: #fff;
+    background: #394054; box-shadow: 0 8px 24px rgba(18,22,34,.2);
+    font-size: 12.5px;
+  }
+  .toast.error { background: var(--bad); }
+  .toast.ok { background: var(--ok); }
 
   /* ── Agents ── */
   .agent {
@@ -297,6 +442,9 @@
 <header>
   <div class="logo"><span class="mark">aH</span>agentHub 控制台</div>
   <div class="spacer"></div>
+  <button class="alert-nav" id="alert-open" type="button" aria-label="打开告警中心">
+    <span>告警</span><span class="alert-nav-count" id="alert-nav-count">0</span>
+  </button>
   <span class="conn" id="conn"><span class="dot"></span><span id="conn-text">连接中…</span></span>
   <span id="clock"></span>
 </header>
@@ -304,11 +452,6 @@
 <div class="layout">
   <!-- 左栏：Agents + 审批 + 授权 -->
   <div class="col">
-    <section class="card">
-      <h2>告警中心 <span class="badge failed" id="alert-count" style="display:none"></span></h2>
-      <div class="body" id="alerts"></div>
-    </section>
-
     <section class="card">
       <h2>AGENTS</h2>
       <div class="body" id="agents"></div>
@@ -358,6 +501,50 @@
   </div>
 </div>
 
+<!-- 告警中心：独立抽屉，不占用主控制台纵向空间 -->
+<div class="panel-scrim" id="alert-scrim"></div>
+<aside class="alert-drawer" id="alert-drawer" aria-labelledby="alert-title" aria-hidden="true">
+  <div class="alert-head">
+    <div>
+      <div class="alert-eyebrow">OPERATIONS</div>
+      <h2 id="alert-title">告警中心</h2>
+      <p>先处理问题，再标记已知；标记已知不会修复或取消任何任务。</p>
+    </div>
+    <button class="icon-btn" id="alert-close" type="button" aria-label="关闭告警中心">✕</button>
+  </div>
+  <div class="alert-summary" id="alert-summary"></div>
+  <div class="alert-filters" id="alert-filters"></div>
+  <div class="alert-list" id="alerts"></div>
+</aside>
+
+<!-- 页面内登录，兼容受限浏览器环境 -->
+<div class="modal-layer" id="login-layer" aria-hidden="true">
+  <section class="modal-card login-card" role="dialog" aria-modal="true" aria-labelledby="login-title">
+    <div class="logo login-logo"><span class="mark">aH</span>agentHub</div>
+    <h2 id="login-title">登录控制台</h2>
+    <p>输入部署时生成的 WebUI Token。Token 仅发送到当前本机 agentHub。</p>
+    <label for="login-token">WebUI Token</label>
+    <input id="login-token" type="password" autocomplete="current-password" placeholder="粘贴 Token">
+    <div class="form-error" id="login-error" role="alert"></div>
+    <button class="btn primary wide" id="login-submit" type="button">登录</button>
+  </section>
+</div>
+
+<!-- 通用页面内确认框，替代浏览器原生 confirm/alert -->
+<div class="modal-layer" id="confirm-layer" aria-hidden="true">
+  <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <div class="confirm-icon" id="confirm-icon">!</div>
+    <h2 id="confirm-title">确认操作</h2>
+    <p id="confirm-message"></p>
+    <div class="modal-actions">
+      <button class="btn" id="confirm-cancel" type="button">返回</button>
+      <button class="btn primary" id="confirm-accept" type="button">确认</button>
+    </div>
+  </section>
+</div>
+
+<div class="toast-region" id="toasts" aria-live="polite"></div>
+
 <!-- 任务详情抽屉 -->
 <div class="overlay" id="overlay"></div>
 <aside class="drawer" id="drawer">
@@ -382,8 +569,11 @@ const S = {
   EV_CAP: 300,           // 事件流 DOM 上限
   detailId: null,
   interactions: new Map(),
+  alerts: [],
+  alertFilter: "all",
   role: null,
   csrf: null,
+  confirmResolve: null,
 };
 
 const $ = (s) => document.querySelector(s);
@@ -414,6 +604,43 @@ function setConn(on, text) {
   $("#conn-text").textContent = text;
 }
 
+function showToast(message, kind = "") {
+  const el = document.createElement("div");
+  el.className = `toast ${kind}`;
+  el.textContent = message;
+  $("#toasts").appendChild(el);
+  setTimeout(() => el.remove(), 4500);
+}
+
+function requestConfirmation({title, message, label = "确认", danger = false}) {
+  if (S.confirmResolve) S.confirmResolve(false);
+  $("#confirm-title").textContent = title;
+  $("#confirm-message").textContent = message;
+  $("#confirm-accept").textContent = label;
+  $("#confirm-accept").className = `btn ${danger ? "no" : "primary"}`;
+  $("#confirm-icon").style.color = danger ? "var(--bad)" : "var(--warn)";
+  $("#confirm-icon").style.background = danger ? "var(--bad-soft)" : "var(--warn-soft)";
+  $("#confirm-layer").classList.add("show");
+  $("#confirm-layer").setAttribute("aria-hidden", "false");
+  return new Promise(resolve => {
+    S.confirmResolve = resolve;
+    $("#confirm-accept").focus();
+  });
+}
+
+function finishConfirmation(value) {
+  $("#confirm-layer").classList.remove("show");
+  $("#confirm-layer").setAttribute("aria-hidden", "true");
+  const resolve = S.confirmResolve;
+  S.confirmResolve = null;
+  if (resolve) resolve(value);
+}
+$("#confirm-cancel").onclick = () => finishConfirmation(false);
+$("#confirm-accept").onclick = () => finishConfirmation(true);
+$("#confirm-layer").onclick = e => {
+  if (e.target === $("#confirm-layer")) finishConfirmation(false);
+};
+
 /* ── 渲染：Agents ── */
 function renderAgents(agents) {
   const now = new Date().toISOString();
@@ -430,21 +657,136 @@ function renderAgents(agents) {
   }).join("") || `<div class="empty">（无注册 agent）</div>`;
 }
 
-function renderAlerts(alerts) {
-  const c = $("#alert-count");
-  c.style.display = alerts.length ? "" : "none";
-  c.textContent = alerts.length;
-  $("#alerts").innerHTML = alerts.map(a =>
-    `<div class="appr">
-      <div class="top"><span class="tid">${esc(a.kind)}</span><span class="badge ${a.severity === "critical" ? "failed" : "blocked"}">${esc(a.severity)}</span></div>
-      <div class="obj2">${esc(a.detail || a.task_id || "系统告警")}</div>
-      <div class="sub" style="margin-bottom:8px;color:var(--mut)">${esc(a.task_id || "system")} · ${esc(a.last_seen_at)} · ×${a.occurrences}</div>
-      ${S.role !== "viewer" ? `<button class="btn ok" data-alert-ack="${esc(a.id)}">确认</button>` : `<span style="font-size:12px;color:var(--mut)">只读角色</span>`}
-    </div>`
-  ).join("") || `<div class="empty">（无未确认告警）</div>`;
+const ALERT_GUIDANCE = {
+  artifact_missing: {
+    title: "任务产物文件缺失",
+    impact: "数据库保留了产物记录，但对应文件已经不存在。当前任务可能无法查看或验收该产物。",
+    action: "打开任务核对用途；仍需该产物时重新生成，历史或已结束任务核对无影响后可标记已知。",
+  },
+  lease_expired: {
+    title: "Agent 租约已过期",
+    impact: "执行中的 Agent 未按时续约，任务已由对账组件重新排队，原执行结果可能不完整。",
+    action: "检查 Agent 是否在线和 Adapter 日志；恢复后确认任务已重新接管，再标记已知。",
+  },
+  timeout_swept: {
+    title: "任务执行超时",
+    impact: "任务超过允许时限并被标记失败，任务不会自动继续。",
+    action: "打开任务检查最后事件和错误；调整时限、拆分任务或重新委派，处理后再标记已知。",
+  },
+  task_retries_exhausted: {
+    title: "任务重试次数耗尽",
+    impact: "自动重试已停止，继续原方案通常会再次失败。",
+    action: "检查失败原因并修改计划、环境或执行 Agent；确认新处理路径后再标记已知。",
+  },
+  adapter_unavailable: {
+    title: "Agent Adapter 不可用",
+    impact: "控制面暂时无法连接目标 Agent，新任务无法委派或恢复。",
+    action: "检查 Adapter 进程、监听端口和鉴权；恢复在线后再标记已知。",
+  },
+};
+
+function describeAlert(a) {
+  const known = ALERT_GUIDANCE[a.kind];
+  if (a.kind === "artifact_missing" &&
+      /(?:pytest-|\/private\/var\/folders|\/tmp\/las-)/.test(a.detail || "")) {
+    return {
+      title: "历史测试产物已被清理",
+      impact: "测试临时目录已删除，但旧产物记录仍留在数据库；通常不影响当前生产任务。",
+      action: "确认任务属于历史测试且不再需要审计文件后，可直接标记已知。",
+    };
+  }
+  return known || {
+    title: "未分类系统告警",
+    impact: "系统上报了尚未配置中文解释的异常，需要结合来源与技术详情判断影响。",
+    action: "先检查来源、任务和技术详情；无法判断时不要标记已知，交由管理员处理。",
+  };
+}
+
+function severityLabel(severity) {
+  return {critical: "严重", warning: "警告", info: "提示"}[severity] || severity;
+}
+
+function formatTime(value) {
+  if (!value) return "时间未知";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", {hour12: false});
+}
+
+function renderAlerts(alerts, {preserveScroll = true} = {}) {
+  S.alerts = alerts;
+  const list = $("#alerts");
+  const previousScroll = list.scrollTop;
+  const counts = {critical: 0, warning: 0, info: 0};
+  alerts.forEach(a => counts[a.severity] = (counts[a.severity] || 0) + 1);
+  const nav = $("#alert-open");
+  nav.className = "alert-nav" + (alerts.length ? " has-alerts" : "") +
+    (counts.critical ? " has-critical" : "");
+  $("#alert-nav-count").textContent = alerts.length > 999 ? "999+" : alerts.length;
+  $("#alert-summary").innerHTML = [
+    ["critical", "严重"], ["warning", "警告"], ["info", "提示"],
+  ].map(([key, label]) =>
+    `<button class="alert-metric ${key}" type="button" data-alert-filter="${key}">` +
+    `<strong>${counts[key] || 0}</strong><span>${label}</span></button>`
+  ).join("");
+  const filters = [["all", "全部"], ["critical", "严重"],
+                   ["warning", "警告"], ["info", "提示"]];
+  $("#alert-filters").innerHTML = filters.map(([key, label]) =>
+    `<button class="chip ${S.alertFilter === key ? "on" : ""}" ` +
+    `type="button" data-alert-filter="${key}">${label}</button>`).join("");
+  const visible = S.alertFilter === "all" ? alerts :
+    alerts.filter(a => a.severity === S.alertFilter);
+  list.innerHTML = visible.map(a => {
+    const view = describeAlert(a);
+    const severity = ["critical", "warning", "info"].includes(a.severity)
+      ? a.severity : "warning";
+    return `<article class="alert-item ${severity}">
+      <div class="alert-item-head"><div><h3>${esc(view.title)}</h3>
+        <div class="alert-impact">${esc(view.impact)}</div></div>
+        <span class="severity ${severity}">${esc(severityLabel(a.severity))}</span>
+      </div>
+      <div class="alert-action"><strong>建议：</strong>${esc(view.action)}</div>
+      <div class="alert-meta">
+        <span>任务 ${esc(a.task_id || "系统级")}</span>
+        <span>来源 ${esc(a.source || "unknown")}</span>
+        <span>最近 ${esc(formatTime(a.last_seen_at))}</span>
+        <span>出现 ${esc(a.occurrences || 1)} 次</span>
+      </div>
+      <details class="alert-tech"><summary>技术详情 · ${esc(a.kind)}</summary>
+        <code>${esc(a.detail || "无附加详情")}</code></details>
+      <div class="alert-footer">
+        <span class="hint">标记已知仅关闭此告警，不会修复、重试或取消任务。</span>
+        ${a.task_id ? `<button class="btn" type="button" data-alert-task="${esc(a.task_id)}">打开任务</button>` : ""}
+        ${S.role !== "viewer" ? `<button class="btn primary" type="button" data-alert-ack="${esc(a.id)}">标记已知</button>` : `<span class="hint">只读角色</span>`}
+      </div>
+    </article>`;
+  }).join("") || `<div class="empty">当前筛选下没有待处理告警。</div>`;
+  list.scrollTop = preserveScroll ? previousScroll : 0;
+  document.querySelectorAll("[data-alert-filter]").forEach(b =>
+    b.onclick = () => {
+      S.alertFilter = b.dataset.alertFilter;
+      renderAlerts(S.alerts, {preserveScroll: false});
+    });
   document.querySelectorAll("[data-alert-ack]").forEach(b =>
     b.onclick = () => acknowledgeAlert(b.dataset.alertAck, b));
+  document.querySelectorAll("[data-alert-task]").forEach(b =>
+    b.onclick = () => { closeAlerts(); openDetail(b.dataset.alertTask); });
 }
+
+function openAlerts() {
+  $("#alert-scrim").classList.add("show");
+  $("#alert-drawer").classList.add("show");
+  $("#alert-drawer").setAttribute("aria-hidden", "false");
+  $("#alert-close").focus();
+}
+
+function closeAlerts() {
+  $("#alert-scrim").classList.remove("show");
+  $("#alert-drawer").classList.remove("show");
+  $("#alert-drawer").setAttribute("aria-hidden", "true");
+}
+$("#alert-open").onclick = openAlerts;
+$("#alert-close").onclick = closeAlerts;
+$("#alert-scrim").onclick = closeAlerts;
 
 /* ── 渲染：任务 ── */
 function renderChips(counts) {
@@ -568,7 +910,7 @@ async function loadAll() {
       fetchJson("/api/tasks" + (S.filter ? "?status=" + S.filter : "")),
       fetchJson("/api/tasks?status=blocked"),
       fetchJson("/api/interactions?status=pending"),
-      fetchJson("/api/alerts?status=open"),
+      fetchJson("/api/alerts?status=open&limit=1000"),
     ]);
     if (!i.error) renderInteractions(i.interactions || []);
     if (!t.error) renderTasks(t.tasks || []);
@@ -657,7 +999,7 @@ function startStream() {
 async function openDetail(id) {
   S.detailId = id;
   const d = await fetchJson("/api/tasks/" + encodeURIComponent(id));
-  if (d.error) { alert(d.error); return; }
+  if (d.error) { showToast(d.error, "error"); return; }
   $("#d-id").textContent = d.task.id;
   $("#d-badge").innerHTML = badge(d.task.status);
 
@@ -782,7 +1124,10 @@ function closeDetail() {
 $("#overlay").onclick = closeDetail;
 $("#d-close").onclick = closeDetail;
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeDetail();
+  if (e.key !== "Escape") return;
+  if ($("#confirm-layer").classList.contains("show")) finishConfirmation(false);
+  else if ($("#alert-drawer").classList.contains("show")) closeAlerts();
+  else closeDetail();
 });
 
 /* ── 产物内容查看器 ── */
@@ -851,19 +1196,23 @@ async function decide(id, how, btn) {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({notes: how === "approve" ? "webui 批准" : "webui 拒绝"}),
   });
-  if (r.error) alert(r.error);
+  if (r.error) showToast(r.error, "error");
   loadAll();
 }
 
 async function respondInteraction(id, response, btn) {
   if (response.outcome === "allowed-once" &&
-      !confirm("仅允许本次原生工具调用？该决定会关联并审计 ActionIntent。")) return;
+      !await requestConfirmation({
+        title: "逐次允许原生工具调用？",
+        message: "仅允许当前这一次调用；决定将关联 ActionIntent 并写入审计记录。",
+        label: "逐次允许",
+      })) return;
   if (btn) btn.disabled = true;
   const r = await fetchJson(`/api/interactions/${encodeURIComponent(id)}/respond`, {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify(response),
   });
-  if (r.error) alert(r.error);
+  if (r.error) showToast(r.error, "error");
   await loadAll();
   if (S.detailId) openDetail(S.detailId);
 }
@@ -872,15 +1221,18 @@ async function interveneTask(taskId, agentId, mode, btn) {
   const input = $("#d-intervention-text");
   const text = (input?.value || "").trim();
   if (["steer", "comment", "takeover", "return_to_hermes"].includes(mode) && !text) {
-    alert("请先输入介入内容"); return;
+    showToast("请先输入介入内容", "error"); return;
   }
   const confirmations = {
-    interrupt: "确认中断当前 turn？",
-    cancel: "确认取消整个任务？",
-    takeover: "确认中断当前 turn 并由用户接管？",
-    return_to_hermes: "确认把控制权归还 Hermes，并基于最新 revision 重新规划？",
+    interrupt: ["中断当前 turn？", "Agent 当前执行会停止，任务本身不会被取消。", "中断 turn"],
+    cancel: ["取消整个任务？", "任务将进入取消状态，当前执行也会停止。", "取消任务"],
+    takeover: ["接管子 Agent？", "当前 turn 将中断，后续指令由用户直接控制。", "接管"],
+    return_to_hermes: ["归还 Hermes 并重新规划？", "Hermes 将基于最新上下文 revision 重新规划后续工作。", "归还 Hermes"],
   };
-  if (confirmations[mode] && !confirm(confirmations[mode])) return;
+  if (confirmations[mode] && !await requestConfirmation({
+    title: confirmations[mode][0], message: confirmations[mode][1],
+    label: confirmations[mode][2], danger: ["interrupt", "cancel"].includes(mode),
+  })) return;
   if (btn) btn.disabled = true;
   const r = await fetchJson(`/api/tasks/${encodeURIComponent(taskId)}/interventions`, {
     method: "POST", headers: {"Content-Type": "application/json"},
@@ -889,7 +1241,7 @@ async function interveneTask(taskId, agentId, mode, btn) {
       idempotency_key: `webui-${taskId}-${mode}-${Date.now()}`,
     }),
   });
-  if (r.error) alert(r.error);
+  if (r.error) showToast(r.error, "error");
   await openDetail(taskId);
   loadAll();
 }
@@ -908,7 +1260,7 @@ async function answerInteraction(id, btn) {
     return item;
   });
   if (answers.some(a => !a.selected.length && !a.custom)) {
-    alert("请回答所有问题"); return;
+    showToast("请回答所有问题", "error"); return;
   }
   await respondInteraction(id, {answer: {answers}}, btn);
 }
@@ -920,7 +1272,7 @@ $("#grant-add").onclick = async () => {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({pattern, note: "webui"}),
   });
-  if (r.error) alert(r.error);
+  if (r.error) showToast(r.error, "error");
   $("#grant-pattern").value = "";
   loadAll();
 };
@@ -934,12 +1286,20 @@ async function revokeGrant(id) {
 }
 
 async function acknowledgeAlert(id, btn) {
+  const alertItem = S.alerts.find(a => a.id === id);
+  const view = describeAlert(alertItem || {});
+  if (!await requestConfirmation({
+    title: `将“${view.title}”标记为已知？`,
+    message: `${view.action} 标记后只会从待处理列表移除，不会修复、重试或取消任务。`,
+    label: "标记已知",
+  })) return;
   if (btn) btn.disabled = true;
   const r = await fetchJson(`/api/alerts/${encodeURIComponent(id)}/acknowledge`, {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({note: "webui acknowledged"}),
   });
-  if (r.error) alert(r.error);
+  if (r.error) showToast(r.error, "error");
+  else showToast("告警已标记为已知", "ok");
   loadAll();
 }
 
@@ -955,24 +1315,22 @@ hb.onchange = () => {
 setInterval(() => {
   $("#clock").textContent = new Date().toLocaleString("zh-CN", {hour12: false});
 }, 1000);
-async function bootstrap() {
-  let status = await fetchJson("/api/auth/status");
-  if (status.error) {
-    const token = prompt("请输入 AgentHub WebUI 登录 Token");
-    if (!token) {
-      setConn(false, "需要登录");
-      return;
-    }
-    status = await fetchJson("/api/auth/login", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({token}),
-    });
-  }
-  if (status.error) {
-    alert(status.error);
-    setConn(false, "登录失败，刷新后重试");
-    return;
-  }
+
+function showLogin() {
+  setConn(false, "需要登录");
+  $("#login-layer").classList.add("show");
+  $("#login-layer").setAttribute("aria-hidden", "false");
+  setTimeout(() => $("#login-token").focus(), 0);
+}
+
+function hideLogin() {
+  $("#login-layer").classList.remove("show");
+  $("#login-layer").setAttribute("aria-hidden", "true");
+  $("#login-token").value = "";
+  $("#login-error").textContent = "";
+}
+
+function startConsole(status) {
   S.role = status.role || "admin";
   S.csrf = status.csrf || null;
   if (S.role !== "admin") {
@@ -982,6 +1340,53 @@ async function bootstrap() {
   }
   loadAll();
   startStream();
+}
+
+async function submitLogin() {
+  const token = $("#login-token").value.trim();
+  if (!token) {
+    $("#login-error").textContent = "请输入 WebUI Token";
+    return;
+  }
+  const btn = $("#login-submit");
+  btn.disabled = true;
+  btn.textContent = "登录中…";
+  $("#login-error").textContent = "";
+  try {
+    const status = await fetchJson("/api/auth/login", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({token}),
+    });
+    if (status.error) {
+      $("#login-error").textContent = "Token 无效或已失效，请重新输入";
+      return;
+    }
+    hideLogin();
+    startConsole(status);
+  } catch (_) {
+    $("#login-error").textContent = "无法连接 WebUI 服务，请稍后重试";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "登录";
+  }
+}
+$("#login-submit").onclick = submitLogin;
+$("#login-token").addEventListener("keydown", e => {
+  if (e.key === "Enter") submitLogin();
+});
+
+async function bootstrap() {
+  try {
+    const status = await fetchJson("/api/auth/status");
+    if (status.error) {
+      showLogin();
+      return;
+    }
+    startConsole(status);
+  } catch (_) {
+    setConn(false, "连接失败，刷新后重试");
+    showToast("无法连接 WebUI 服务", "error");
+  }
 }
 bootstrap();
 </script>
