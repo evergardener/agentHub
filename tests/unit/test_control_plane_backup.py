@@ -16,10 +16,12 @@ from common.control_plane_backup import (
 
 
 class FakeDocker:
-    def __init__(self, fail_dump: bool = False, fail_restore: bool = False):
+    def __init__(self, fail_dump: bool = False, fail_restore: bool = False,
+                 fail_start: bool = False):
         self.calls: list[list[str]] = []
         self.fail_dump = fail_dump
         self.fail_restore = fail_restore
+        self.fail_start = fail_start
         self.restored_receipt = False
 
     def __call__(self, args, check, **kwargs):
@@ -35,6 +37,8 @@ class FakeDocker:
                 raise subprocess.CalledProcessError(1, args)
             kwargs["stdout"].write(b"PGDMP\x01fake-custom-dump")
         if "pg_restore" in args and self.fail_restore:
+            raise subprocess.CalledProcessError(1, args)
+        if args[:2] == ["docker", "start"] and self.fail_start:
             raise subprocess.CalledProcessError(1, args)
         if args[:3] == ["docker", "compose", "run"] and "state-writer" in args:
             mount = args[args.index("-v") + 1].split(":/restore:ro", 1)[0]
@@ -65,10 +69,10 @@ def test_create_backup_quiesces_copies_restarts_and_verifies(tmp_path):
                and call[-1].endswith("migration-backup-receipt.json")
                for call in docker.calls)
     assert any(call[:3] == ["docker", "compose", "stop"] for call in docker.calls)
-    nats_start = docker.calls.index(["docker", "compose", "start", "nats"])
+    nats_start = docker.calls.index(["docker", "start", "nats-cid"])
     app_start = next(i for i, call in enumerate(docker.calls)
-                     if call[:3] == ["docker", "compose", "start"]
-                     and call[-1] != "nats")
+                     if call[:2] == ["docker", "start"]
+                     and call[-1] != "nats-cid")
     assert nats_start < app_start
 
 
@@ -78,8 +82,23 @@ def test_create_backup_restarts_apps_when_dump_fails(tmp_path):
     docker = FakeDocker(fail_dump=True)
     with pytest.raises(BackupError, match="命令失败"):
         create_backup(tmp_path / "out", workspace, runner=docker)
-    assert any(call[:3] == ["docker", "compose", "start"]
+    assert any(call[:2] == ["docker", "start"]
                for call in docker.calls)
+
+
+def test_create_backup_preserves_verified_archive_when_restart_fails(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "artifact.md").write_text("result", encoding="utf-8")
+
+    with pytest.raises(BackupError, match="已验证备份保留在"):
+        create_backup(
+            tmp_path / "out", workspace, runner=FakeDocker(fail_start=True))
+
+    archives = list((tmp_path / "out").glob("agenthub-backup-*.tar.gz"))
+    assert len(archives) == 1
+    assert verify_backup(archives[0])["workspace_included"] is True
+    assert not list((tmp_path / "out").glob(".*.part"))
 
 
 def _write_archive(path: Path, payload: bytes, checksum: str | None = None):

@@ -50,6 +50,26 @@ def _compose(runner: Runner, *args: str, **kwargs) -> subprocess.CompletedProces
     return _run(runner, ["docker", "compose", *args], **kwargs)
 
 
+def _container_id(runner: Runner, service: str) -> str:
+    container_id = _compose(
+        runner, "ps", "-aq", service,
+        stdout=subprocess.PIPE, text=True).stdout.strip()
+    if not container_id:
+        raise BackupError(f"无法解析 {service} 容器 ID")
+    return container_id
+
+
+def _start_existing(runner: Runner, container_ids: list[str]) -> None:
+    """Restart the exact containers stopped by the backup.
+
+    Using ``docker compose start`` here makes recovery depend on the current
+    Compose dependency graph.  That is unsafe during an upgrade backup because
+    the running containers can legitimately predate newly added healthchecks.
+    """
+    if container_ids:
+        _run(runner, ["docker", "start", *container_ids])
+
+
 def _write_migration_receipt(runner: Runner, writer_id: str,
                              archive: Path) -> None:
     receipt = {
@@ -103,18 +123,15 @@ def create_backup(output_dir: Path, workspace: Path | None,
     missing = sorted(required - running)
     if missing:
         raise BackupError(f"以下服务未运行: {', '.join(missing)}")
-    nats_id = _compose(runner, "ps", "-aq", "nats",
-                       stdout=subprocess.PIPE, text=True).stdout.strip()
-    writer_id = _compose(runner, "ps", "-aq", "state-writer",
-                         stdout=subprocess.PIPE, text=True).stdout.strip()
-    if not nats_id or not writer_id:
-        raise BackupError("无法解析 nats/state-writer 容器 ID")
+    nats_id = _container_id(runner, "nats")
+    writer_id = _container_id(runner, "state-writer")
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     archive = output_dir / f"agenthub-backup-{timestamp}.tar.gz"
     archive_part = output_dir / f".{archive.name}.part"
     stage = Path(tempfile.mkdtemp(prefix=".agenthub-backup-", dir=output_dir))
     stopped_apps = [name for name in QUIESCE_SERVICES if name in running]
+    stopped_app_ids = [_container_id(runner, name) for name in stopped_apps]
     nats_stopped = False
     try:
         if stopped_apps:
@@ -158,19 +175,26 @@ def create_backup(output_dir: Path, workspace: Path | None,
         restart_error: BackupError | None = None
         if nats_stopped:
             try:
-                _compose(runner, "start", "nats")
+                _start_existing(runner, [nats_id])
             except BackupError as exc:
                 restart_error = exc
         if stopped_apps:
             try:
-                _compose(runner, "start", *stopped_apps)
+                _start_existing(runner, stopped_app_ids)
             except BackupError as exc:
                 restart_error = restart_error or exc
         shutil.rmtree(stage, ignore_errors=True)
         if restart_error:
-            archive_part.unlink(missing_ok=True)
-            raise BackupError("备份后恢复原运行服务失败，请立即检查 compose") \
-                from restart_error
+            preserved = ""
+            try:
+                verify_backup(archive_part)
+                archive_part.replace(archive)
+                preserved = f"；已验证备份保留在 {archive}"
+            except (BackupError, OSError):
+                archive_part.unlink(missing_ok=True)
+            raise BackupError(
+                "备份后恢复原运行服务失败，请立即检查 compose" + preserved
+            ) from restart_error
     try:
         verify_backup(archive_part)
         archive_part.replace(archive)
