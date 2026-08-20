@@ -438,6 +438,11 @@ LAS_RUN_DSH_RESTART=1 \
 端口、启动隔离进程/容器的环境运行；不要改写测试使用临时资源的设计，也不要
 把它们指向默认栈端口、用户 DSH_HOME 或生产数据目录。
 
+2026-08-20 已在本机执行 DSH 隔离门禁并通过（1 passed）：真实 DSH Web 进程
+在随机端口重启后，临时原生 session 仍可被新 Adapter 实例 list/history/resume。
+这项结果只覆盖 DSH 真实进程与 Adapter 实例重建，不替代 Adapter 服务进程重启
+及真实模型双轮恢复门禁。
+
 ## 8. 安全基线
 
 - 所有端口绑 `127.0.0.1`（Web UI / gateway / Jaeger 默认不暴露局域网）

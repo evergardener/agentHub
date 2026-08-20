@@ -255,8 +255,9 @@ revision 写许可失效。
     对账且不二次发送，均已有离线故障测试；Adapter/DSH 双端真实进程重启仍待
     授权环境故障注入；已增加 `LAS_RUN_DSH_RESTART=1` 门控的无模型真实测试，
     使用随机端口和临时 `DSH_HOME` 验证原生 session 经 DSH 真实进程重启和
-    Adapter 实例重建后仍可 list/history/resume，不触碰用户 `~/.dsh`；真实
-    Adapter 服务进程重启仍待授权环境执行；本批全量 unit+contract 为 323 passed；
+    Adapter 实例重建后仍可 list/history/resume，不触碰用户 `~/.dsh`；该隔离
+    门禁已于 2026-08-20 在本机真实执行通过（1 passed），真实 Adapter 服务
+    进程重启仍待授权环境执行；本批全量 unit+contract 为 323 passed；
 13. [x] 完成 Codex/Kimi ToolCall/ActionIntent 拦截与用户介入实时 UI，
     再进入生产安全评审。
 
