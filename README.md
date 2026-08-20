@@ -38,7 +38,8 @@ pytest
 控制面一体化镜像（hermes-brain / state-writer / janitor / notifier /
 agentgateway / agentctl）。
 Worker agent（codex / kimi / dsh / pi ...）**不打包进镜像**——宿主机自装后经心跳注册，
-没注册就不可用（`agentctl agent list` 查看在线状态）。
+没注册就不可用（`agentctl agent list` 合并静态 catalog 与心跳租约，显示
+`disabled/static/online/offline`）。
 
 ```bash
 cp .env.example .env && chmod 600 .env

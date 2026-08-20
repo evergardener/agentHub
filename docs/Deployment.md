@@ -205,7 +205,7 @@ dsh web --host 127.0.0.1 --port 3080
 验证：
 
 ```bash
-docker compose run --rm agentctl agent list    # codex/kimi 应 online；dsh 应 disabled
+docker compose run --rm agentctl agent list    # 合并 catalog/租约；codex/kimi online，dsh disabled
 curl -H "X-Agent-Token: $(grep ^LAS_ADAPTER_TOKEN= .env | cut -d= -f2)" \
      http://127.0.0.1:8201/health              # {"status":"ok",...}
 ```

@@ -63,18 +63,45 @@ def cmd_status(db_path: Path) -> int:
     return 0
 
 
-def cmd_agent_list(db_path: Path) -> int:
+def cmd_agent_list(db_path: Path, agents_path: Path | None = None) -> int:
+    from datetime import datetime
+
+    from hermes.tools import load_agents
+    from state.db import CST
+
     conn = _conn(db_path)
     rows = conn.execute(
         "SELECT id, role, status, endpoint, last_seen_at, lease_expires_at"
         " FROM agents ORDER BY id;").fetchall()
-    if not rows:
+    live = {row["id"]: row for row in rows}
+    static = load_agents(agents_path)
+    agent_ids = sorted(set(static) | set(live))
+    if not agent_ids:
         print("(no agents)")
         return 0
-    print(f"{'ID':<12} {'ROLE':<14} {'STATUS':<10} {'LAST SEEN':<26} LEASE EXPIRES")
-    for r in rows:
-        print(f"{r['id']:<12} {r['role']:<14} {r['status']:<10}"
-              f" {str(r['last_seen_at']):<26} {r['lease_expires_at']}")
+    print(f"{'ID':<12} {'ROLE':<14} {'STATUS':<10}"
+          f" {'LAST SEEN':<26} LEASE EXPIRES")
+    now = datetime.now(CST).isoformat(timespec="seconds")
+    for agent_id in agent_ids:
+        row = live.get(agent_id)
+        spec = static.get(agent_id) or {}
+        online = bool(
+            row is not None and row["lease_expires_at"]
+            and row["lease_expires_at"] > now
+        )
+        if online:
+            status = "online"
+        elif spec.get("enabled", True) is False:
+            status = "disabled"
+        elif row is not None:
+            status = "offline"
+        else:
+            status = "static"
+        role = row["role"] if row is not None else spec.get("role", "worker")
+        last_seen = row["last_seen_at"] if row is not None else None
+        lease = row["lease_expires_at"] if row is not None else None
+        print(f"{agent_id:<12} {role:<14} {status:<10}"
+              f" {str(last_seen):<26} {lease}")
     return 0
 
 
@@ -284,6 +311,9 @@ def cmd_chat(db_path: Path, one_shot: str | None,
 def main() -> int:
     parser = argparse.ArgumentParser(prog="agentctl")
     parser.add_argument("--db", type=Path, default=None)
+    parser.add_argument(
+        "--agents-file", type=Path, default=None,
+        help="Agent catalog used by list/discovery (default: bundled config)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
 
@@ -332,7 +362,7 @@ def main() -> int:
     if args.command == "status":
         return cmd_status(args.db)
     if args.command == "agent" and args.sub == "list":
-        return cmd_agent_list(args.db)
+        return cmd_agent_list(args.db, args.agents_file)
     if args.command == "task" and args.sub == "list":
         return cmd_task_list(args.db, args.status)
     if args.command == "task" and args.sub == "show":

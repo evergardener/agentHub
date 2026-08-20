@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -10,6 +11,7 @@ from cli.agentctl import main
 from common.models import TaskStatus
 from orchestrator.task_manager import TaskManager
 from orchestrator import state_store
+from state.db import CST
 
 
 @pytest.fixture
@@ -53,6 +55,35 @@ def test_task_retry(env, capsys):
     assert run_cli("task", "retry", t1) == 0
     assert state_store.get_task(tm.conn, t1)["status"] == "queued"
     assert "queued" in capsys.readouterr().out
+
+
+def test_agent_list_merges_catalog_and_live_lease(env, capsys, tmp_path):
+    tm, run_cli = env
+    agents_file = tmp_path / "agents.yaml"
+    agents_file.write_text(
+        "agents:\n"
+        "  codex:\n    enabled: true\n    endpoint: http://static:8201\n"
+        "  dsh:\n    enabled: false\n    endpoint: http://static:8203\n",
+        encoding="utf-8")
+    state_store.update_heartbeat(
+        tm.conn, "codex", endpoint="http://live:8201",
+        lease_ttl_seconds=90)
+    state_store.update_heartbeat(
+        tm.conn, "kimi", endpoint="http://stale:8202",
+        lease_ttl_seconds=1)
+    tm.conn.execute(
+        "UPDATE agents SET lease_expires_at = ? WHERE id = 'kimi';",
+        ((datetime.now(CST) - timedelta(seconds=10)).isoformat(
+            timespec="seconds"),))
+    tm.conn.commit()
+
+    assert run_cli(
+        "--agents-file", str(agents_file), "agent", "list") == 0
+    output = capsys.readouterr().out
+    lines = {line.split()[0]: line for line in output.splitlines()[1:]}
+    assert "online" in lines["codex"]
+    assert "disabled" in lines["dsh"]
+    assert "offline" in lines["kimi"]
 
 
 def test_task_retry_rejects_non_failed(env, capsys):

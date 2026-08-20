@@ -351,7 +351,7 @@ revision 写许可失效。
 
 ## 2026-08-20 当前发布基线与外部阻塞项
 
-- 当前源码全量 unit+contract：335 passed；默认 integration：10 passed、
+- 当前源码全量 unit+contract：336 passed；默认 integration：10 passed、
   28 skipped。默认跳过项均维持显式门控；gateway、远程安全剖面、NATS、
   PostgreSQL、DSH 无模型重启、HTTPS 告警及备份恢复等已执行的隔离门禁结果，
   以各节记录为准；
