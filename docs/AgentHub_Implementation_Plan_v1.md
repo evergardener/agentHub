@@ -299,6 +299,9 @@ revision 写许可失效。
    和任务详情可实时显示 assistant delta、工具生命周期、计划与原生交互，
    断线后继续由现有 `seq/after` SSE 游标补发；
 8. [ ] 执行真实 Kimi approval 挂起/拒绝/允许、双轮 load 和 Adapter 重启故障注入；
+   2026-08-20 已尝试真实只读研究任务，ACP 正确返回终态失败，但 Kimi 服务端以
+   HTTP 403 拒绝：当前计费周期额度已耗尽。该项是外部配额阻塞，额度恢复或升级
+   前不得用重复调用代替验收；
 9. [x] 全量 unit+contract 226 passed；集成 9 passed/12 skipped；另行启用
    `LAS_RUN_KIMI_ACP=1` 的真实无模型 ACP session/new 检查 1 passed；本批次
    按自动提交约定记录独立 commit。
@@ -333,5 +336,7 @@ revision 写许可失效。
 - 发布前仍阻塞于四类外部验收：Codex/Kimi/DSH 真实 approval、双轮恢复与
   Adapter 服务进程重启；真实 CA/OIDC 和第二主机 gateway；首次远端供应链
   workflow 与 Cosign/attestation 验证；目标环境正式 HTTPS webhook 失败/恢复；
+- Kimi 真实模型门禁当前另受服务端配额阻塞（2026-08-20 HTTP 403 usage limit）；
+  额度恢复后从只读单轮门禁重新开始，再执行 approval/双轮/重启矩阵；
 - 建议进入 release-candidate 验收阶段，而不是继续扩展功能。取得相应凭据、模型
   调用授权及维护窗口后，按上述四类门禁逐项执行；全部通过后再进行生产部署审批。

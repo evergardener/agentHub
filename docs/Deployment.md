@@ -236,6 +236,11 @@ printf '%s\n' \
   | kimi acp
 ```
 
+2026-08-20 真实 Kimi 只读研究门禁被服务端 HTTP 403 阻塞：当前计费周期 usage
+limit 已耗尽。ACP/Adapter 能把错误转换为可追溯的任务终态，但这不算模型验收
+通过；额度恢复或升级前不要自动重试，恢复后重新运行
+`LAS_RUN_LLM=1 ... test_kimi_research_task`。
+
 Codex Adapter 使用 `codex app-server --stdio`。所有 thread（包括恢复的旧
 thread）均由 Adapter 覆盖为 `read-only`、`approvalPolicy=on-request`、
 `approvalsReviewer=user`。命令、文件变更和附加权限请求在原生 JSON-RPC 上
