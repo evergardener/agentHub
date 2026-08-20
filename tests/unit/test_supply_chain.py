@@ -25,6 +25,14 @@ def test_all_external_runtime_images_are_digest_pinned():
     assert re.search(rf"ARG PYTHON_DIGEST={SHA256}$", dockerfile, re.MULTILINE)
 
 
+def test_all_published_control_plane_ports_bind_loopback():
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    for service_name, service in compose["services"].items():
+        for published in service.get("ports", []):
+            assert str(published).startswith("127.0.0.1:"), (
+                service_name, published)
+
+
 def test_agentgateway_download_is_verified_per_supported_architecture():
     dockerfile = (ROOT / "Dockerfile").read_text()
     assert "agentgateway/releases/download/v1.4.1" in dockerfile

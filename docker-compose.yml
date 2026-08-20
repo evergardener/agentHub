@@ -221,7 +221,7 @@ services:
     image: jaegertracing/jaeger:2.20.0@sha256:46a886260e04002d8f45e213fc39063fa11a50446048fdaa64786fc0840cb9f8
     ports:
       - "127.0.0.1:16686:16686"  # 查询 UI
-      - "4318:4318"              # OTLP HTTP（宿主机进程也可上报）
+      - "127.0.0.1:4318:4318"    # OTLP HTTP（宿主机进程也可上报，仅回环）
     mem_limit: 512m
     cpus: "1.0"
     pids_limit: 256
