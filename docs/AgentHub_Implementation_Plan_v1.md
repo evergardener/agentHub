@@ -318,3 +318,17 @@ revision 写许可失效。
     9 passed/13 skipped；覆盖 A2A same-turn steer、TaskManager revision/
     idempotency、Codex expected turn、DSH 原生 steer、Hermes 上下文同步及
     WebUI 介入 API。
+
+## 2026-08-20 当前发布基线与外部阻塞项
+
+- 当前源码全量 unit+contract：323 passed；默认 integration：10 passed、
+  24 skipped。默认跳过项均维持显式门控；gateway、远程安全剖面、NATS、
+  PostgreSQL、DSH 无模型重启、HTTPS 告警及备份恢复等已执行的隔离门禁结果，
+  以各节记录为准；
+- 本机可安全完成的实现与隔离故障注入已收敛。后续不应继续以 mock 或仅健康检查
+  替代真实验收，也不应在未授权时调用模型、外部身份系统或发布流水线；
+- 发布前仍阻塞于四类外部验收：Codex/Kimi/DSH 真实 approval、双轮恢复与
+  Adapter 服务进程重启；真实 CA/OIDC 和第二主机 gateway；首次远端供应链
+  workflow 与 Cosign/attestation 验证；目标环境正式 HTTPS webhook 失败/恢复；
+- 建议进入 release-candidate 验收阶段，而不是继续扩展功能。取得相应凭据、模型
+  调用授权及维护窗口后，按上述四类门禁逐项执行；全部通过后再进行生产部署审批。
