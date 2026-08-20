@@ -239,6 +239,10 @@
     font-size: 11.5px; color: var(--faint);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  .agent-disabled {
+    margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line-soft);
+    color: var(--faint); font-size: 11.5px;
+  }
   .live { display: inline-flex; align-items: center; gap: 5px;
           font-size: 11.5px; color: var(--mut); flex: none; }
   .live i { width: 7px; height: 7px; border-radius: 50%; font-style: normal; }
@@ -289,6 +293,22 @@
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
     overflow: hidden; word-break: break-all;
   }
+  .conversation-list { padding: 4px 0; }
+  .conversation {
+    display: block; width: 100%; padding: 11px 16px; border: 0;
+    border-bottom: 1px solid var(--line-soft); background: transparent;
+    color: inherit; text-align: left; cursor: pointer; font: inherit;
+  }
+  .conversation:last-child { border-bottom: 0; }
+  .conversation:hover { background: #f7f9fd; }
+  .conversation .top { display: flex; gap: 8px; align-items: center; }
+  .conversation .title { font-size: 13px; font-weight: 600; flex: 1;
+                         overflow: hidden; text-overflow: ellipsis;
+                         white-space: nowrap; }
+  .conversation .desc { margin-top: 3px; color: var(--mut); font-size: 12px;
+                        display: -webkit-box; -webkit-line-clamp: 2;
+                        -webkit-box-orient: vertical; overflow: hidden; }
+  .conversation .stats { margin-top: 5px; color: var(--faint); font-size: 11px; }
 
   /* ── 审批 ── */
   .appr {
@@ -383,6 +403,23 @@
     margin: 0 0 8px; font-size: 12px; font-weight: 600;
     color: var(--mut); letter-spacing: .06em;
   }
+  .instruction {
+    padding: 12px 14px; border: 1px solid #cfd9ff; border-radius: 9px;
+    background: var(--acc-soft); white-space: pre-wrap; word-break: break-word;
+    font-size: 13px;
+  }
+  .source-note { margin-top: 6px; color: var(--mut); font-size: 11.5px; }
+  .message-list { display: grid; gap: 8px; }
+  .message { border: 1px solid var(--line-soft); border-radius: 9px;
+             background: #f8f9fb; padding: 9px 11px; }
+  .message.user { background: var(--acc-soft); border-color: #dce4ff; }
+  .message.hermes { background: var(--ok-soft); border-color: #cfeadb; }
+  .message.tool { background: var(--warn-soft); border-color: #f2dfb9; }
+  .message .mh { display: flex; flex-wrap: wrap; gap: 5px 10px;
+                 color: var(--faint); font-size: 10.5px; margin-bottom: 4px; }
+  .message .mh strong { color: var(--fg); font-size: 11.5px; }
+  .message .mc { font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace;
+                 white-space: pre-wrap; word-break: break-word; }
   .kv { font-size: 13px; }
   .kv .row { display: flex; gap: 10px; padding: 3px 0; }
   .kv .k { color: var(--faint); flex: none; width: 76px; }
@@ -399,6 +436,8 @@
   /* ── 过程查看器（transcript） ── */
   .chip.art { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
               font-size: 11.5px; }
+  .chip.art.active { background: var(--acc); border-color: var(--acc); color: #fff; }
+  .chip.art.missing { text-decoration: line-through; }
   .tk { display: flex; flex-direction: column; gap: 8px; }
   .tk-msg {
     background: var(--acc-soft); border-radius: 8px; padding: 8px 12px;
@@ -485,6 +524,11 @@
       <h2>任务</h2>
       <div class="chips" id="status-chips"></div>
       <table class="tasks"><tbody id="tasks"></tbody></table>
+    </section>
+
+    <section class="card">
+      <h2>协作会话 <span class="tid">Hermes 多轮上下文</span></h2>
+      <div class="conversation-list" id="collaborations"></div>
     </section>
   </div>
 
@@ -643,9 +687,10 @@ $("#confirm-layer").onclick = e => {
 
 /* ── 渲染：Agents ── */
 function renderAgents(agents) {
-  const now = new Date().toISOString();
-  $("#agents").innerHTML = agents.map(a => {
-    const on = a.lease_expires_at && a.lease_expires_at > now;
+  const active = agents.filter(a => a.enabled !== false);
+  const disabled = agents.filter(a => a.enabled === false);
+  $("#agents").innerHTML = active.map(a => {
+    const on = !!a.online;
     return `<div class="agent">
       <span class="ava" style="background:${agentColor(a.id)}">${esc((a.id || "?")[0].toUpperCase())}</span>
       <div class="meta">
@@ -654,7 +699,11 @@ function renderAgents(agents) {
       </div>
       <span class="live"><i style="background:${on ? "var(--ok)" : "var(--bad)"}"></i>${on ? "在线" : "离线"}</span>
     </div>`;
-  }).join("") || `<div class="empty">（无注册 agent）</div>`;
+  }).join("") || `<div class="empty">（无已启用 agent）</div>`;
+  if (disabled.length) {
+    $("#agents").insertAdjacentHTML("beforeend",
+      `<div class="agent-disabled">已停用：${disabled.map(a => esc(a.id)).join("、")}</div>`);
+  }
 }
 
 const ALERT_GUIDANCE = {
@@ -754,8 +803,10 @@ function renderAlerts(alerts, {preserveScroll = true} = {}) {
       <details class="alert-tech"><summary>技术详情 · ${esc(a.kind)}</summary>
         <code>${esc(a.detail || "无附加详情")}</code></details>
       <div class="alert-footer">
-        <span class="hint">标记已知仅关闭此告警，不会修复、重试或取消任务。</span>
-        ${a.task_id ? `<button class="btn" type="button" data-alert-task="${esc(a.task_id)}">打开任务</button>` : ""}
+        <span class="hint">${a.task_id && !a.task_exists
+          ? "关联任务记录已不存在；可依据技术详情判断是否标记已知。"
+          : "标记已知仅关闭此告警，不会修复、重试或取消任务。"}</span>
+        ${a.task_exists ? `<button class="btn" type="button" data-alert-task="${esc(a.task_id)}">打开任务</button>` : ""}
         ${S.role !== "viewer" ? `<button class="btn primary" type="button" data-alert-ack="${esc(a.id)}">标记已知</button>` : `<span class="hint">只读角色</span>`}
       </div>
     </article>`;
@@ -812,6 +863,18 @@ function renderTasks(tasks) {
   ).join("") || `<tr><td class="empty" colspan="4">（无任务）</td></tr>`;
   document.querySelectorAll("[data-task]").forEach(tr =>
     tr.onclick = () => openDetail(tr.dataset.task));
+}
+
+function renderCollaborations(rows) {
+  $("#collaborations").innerHTML = rows.map(x =>
+    `<button class="conversation" type="button" data-collaboration="${esc(x.id)}">
+      <div class="top"><span class="title">${esc(x.title || x.objective || x.id)}</span>${badge(x.phase)}</div>
+      <div class="desc">${esc(x.objective || "（无目标）")}</div>
+      <div class="stats">${esc(x.message_count)} 条消息 · ${esc(x.task_count)} 个任务 · revision ${esc(x.context_revision)}</div>
+    </button>`
+  ).join("") || `<div class="empty" style="padding:12px 16px">（暂无持久协作会话）</div>`;
+  document.querySelectorAll("[data-collaboration]").forEach(b =>
+    b.onclick = () => openCollaboration(b.dataset.collaboration));
 }
 
 /* ── 渲染：审批与授权 ── */
@@ -906,16 +969,18 @@ async function loadAll() {
     renderAgents(ov.agents || []);
     renderChips(ov.task_counts || {});
     renderGrants(ov.grants || []);
-    const [t, b, i, a] = await Promise.all([
+    const [t, b, i, a, c] = await Promise.all([
       fetchJson("/api/tasks" + (S.filter ? "?status=" + S.filter : "")),
       fetchJson("/api/tasks?status=blocked"),
       fetchJson("/api/interactions?status=pending"),
       fetchJson("/api/alerts?status=open&limit=1000"),
+      fetchJson("/api/collaborations?limit=30"),
     ]);
     if (!i.error) renderInteractions(i.interactions || []);
     if (!t.error) renderTasks(t.tasks || []);
     if (!b.error) renderBlocked(b.tasks || []);
     if (!a.error) renderAlerts(a.alerts || []);
+    if (!c.error) renderCollaborations(c.collaborations || []);
     setConn(true, "已连接");
     S.backoff = 8000;
   } catch (e) {
@@ -995,7 +1060,39 @@ function startStream() {
   };
 }
 
-/* ── 任务详情抽屉 ── */
+function messageContent(message) {
+  let value = message.content_json || "";
+  try { value = JSON.parse(value); } catch (_) { return String(value); }
+  if (typeof value === "string") return value;
+  const parts = [];
+  if (typeof value.content === "string" && value.content.trim())
+    parts.push(value.content);
+  for (const call of value.tool_calls || []) {
+    const fn = call.function || {};
+    parts.push(`调用 ${fn.name || "tool"}\n${fn.arguments || "{}"}`);
+  }
+  if (parts.length) return parts.join("\n\n");
+  return JSON.stringify(value, null, 2);
+}
+
+function renderMessageList(messages) {
+  if (!messages?.length) return `<div class="empty">（无持久消息）</div>`;
+  const labels = {user: "用户", hermes: "Hermes", system: "工具/系统", agent: "子 Agent"};
+  return `<div class="message-list">` + messages.map(m => {
+    const css = m.sender_type === "user" ? "user" :
+      m.sender_type === "hermes" ? "hermes" :
+      m.sender_type === "system" ? "tool" : "";
+    const route = m.recipient_id ? ` → ${m.recipient_id}` : "";
+    return `<article class="message ${css}">
+      <div class="mh"><strong>#${esc(m.sequence)} ${esc(labels[m.sender_type] || m.sender_id)}${esc(route)}</strong>
+        <span>${esc(m.message_type)}</span><span>revision ${esc(m.based_on_revision ?? "-")}</span>
+        <span>${esc(formatTime(m.created_at))}</span></div>
+      <div class="mc">${esc(messageContent(m))}</div>
+    </article>`;
+  }).join("") + `</div>`;
+}
+
+/* ── 任务 / 协作详情抽屉 ── */
 async function openDetail(id) {
   S.detailId = id;
   const d = await fetchJson("/api/tasks/" + encodeURIComponent(id));
@@ -1006,7 +1103,7 @@ async function openDetail(id) {
   const t = d.task;
   const collaboration = d.collaboration || {};
   const kv = [
-    ["目标", t.objective], ["执行体", t.assigned_to || "-"],
+    ["执行体", t.assigned_to || "-"],
     ["控制权", collaboration.controller || "-"],
     ["协作阶段", collaboration.phase || "-"],
     ["上下文 revision", collaboration.context_revision || "-"],
@@ -1054,15 +1151,11 @@ async function openDetail(id) {
   let sessionCaps = {};
   try { sessionCaps = JSON.parse(currentSession?.capabilities_json || "{}"); }
   catch (_) {}
-  const msgs = (d.messages || []).filter(m =>
-    m.message_type?.startsWith("user.")).map(m => {
-      let content = m.content_json || "";
-      try {
-        const parsed = JSON.parse(content);
-        content = typeof parsed === "string" ? parsed : parsed.text || JSON.stringify(parsed);
-      } catch (_) {}
-      return `#${m.sequence} ${m.message_type} · rev ${m.based_on_revision}\n${content}`;
-    }).join("\n\n");
+  const sourceNotes = {
+    task_plan_step: "Hermes 结构化 Task Plan 当前步骤的数据库原文；WebUI 未做总结。",
+    hermes_collaboration: "Hermes 创建任务时保存的数据库原文；WebUI 未做总结。",
+    legacy_task_record: "旧版任务只保存了这段数据库原值，未关联完整 Hermes 会话，因此无法还原更长的上游指令。",
+  };
   const canControl = S.role !== "viewer" && currentSession && ![
     "completed", "reviewed", "accepted", "failed", "cancelled"
   ].includes(t.status);
@@ -1082,6 +1175,9 @@ async function openDetail(id) {
     `</div></div>` : "";
 
   $("#d-body").innerHTML =
+    `<div class="d-sec"><h3>委派指令（原文）</h3>` +
+    `<div class="instruction">${esc(t.objective || "（空）")}</div>` +
+    `<div class="source-note">${esc(sourceNotes[d.instruction_source] || "数据库原值；WebUI 未做总结。")}</div></div>` +
     `<div class="d-sec"><h3>概要</h3><div class="kv">${kv}</div></div>` +
     planHtml +
     reviewHtml +
@@ -1090,7 +1186,7 @@ async function openDetail(id) {
     (t.result_summary
       ? `<div class="d-sec"><h3>结果摘要</h3><div class="mono">${esc(t.result_summary)}</div></div>` : "") +
     controls +
-    `<div class="d-sec"><h3>用户介入记录</h3><div class="mono">${esc(msgs) || "（无）"}</div></div>` +
+    `<div class="d-sec"><h3>协作消息（用户 / Hermes / 工具）</h3>${renderMessageList(d.messages || [])}</div>` +
     `<div class="d-sec"><h3>AGENT 交互</h3><div class="mono">${esc(interactions) || "（无）"}</div></div>` +
     `<div class="d-sec"><h3>事件时间线（实时）</h3><div class="mono" id="d-events-live">${esc(evs) || "（无）"}</div></div>` +
     `<div class="d-sec"><h3>RUNS</h3><div class="mono">${esc(runs) || "（无）"}</div></div>` +
@@ -1098,7 +1194,9 @@ async function openDetail(id) {
     (arts.length
       ? `<div style="display:flex;gap:6px;flex-wrap:wrap">` +
         arts.map(a =>
-          `<button class="chip art" data-art="${esc(a.name)}">${esc(a.name)}</button>`
+          `<button class="chip art ${a.available ? "" : "missing"}" data-art="${esc(a.name)}" ` +
+          `${a.available ? "" : "disabled title=\"文件已缺失或路径不可访问\""}>` +
+          `${esc(a.name)}${a.available ? "" : "（不可用）"}</button>`
         ).join("") + `</div>`
       : `<div class="empty">（无产物——任务进行中时过程未落盘，完成后可见）</div>`) +
     `</div>` +
@@ -1112,6 +1210,37 @@ async function openDetail(id) {
     b.onclick = () => interveneTask(
       t.id, currentSession.agent_id, b.dataset.intervene, b));
 
+  $("#overlay").classList.add("show");
+  $("#drawer").classList.add("show");
+}
+
+async function openCollaboration(id) {
+  S.detailId = null;
+  const d = await fetchJson("/api/collaborations/" + encodeURIComponent(id));
+  if (d.error) { showToast(d.error, "error"); return; }
+  const c = d.collaboration;
+  $("#d-id").textContent = c.id;
+  $("#d-badge").innerHTML = badge(c.phase);
+  const tasks = (d.tasks || []).map(t =>
+    `<button class="conversation" style="padding:8px 0" type="button" data-linked-task="${esc(t.id)}">` +
+    `<div class="top"><span class="tid">${esc(t.id)}</span>${badge(t.status)}</div>` +
+    `<div class="desc">${esc(t.objective)}</div></button>`).join("");
+  const sessions = (d.sessions || []).map(s =>
+    `${s.agent_id} · task=${s.task_id} · native=${s.native_session_id || "未建立"} · ${s.status} · resume=${s.resume_capability}`
+  ).join("\n");
+  $("#d-body").innerHTML =
+    `<div class="d-sec"><h3>会话目标（原文）</h3><div class="instruction">${esc(c.objective)}</div></div>` +
+    `<div class="d-sec"><h3>上下文</h3><div class="kv">` +
+      [["conversation", c.conversation_id], ["标题", c.title || "-"],
+       ["控制权", c.controller], ["revision", c.context_revision],
+       ["创建", c.created_at], ["更新", c.updated_at]].map(([k, v]) =>
+        `<div class="row"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join("") +
+    `</div></div>` +
+    `<div class="d-sec"><h3>完整多轮消息</h3>${renderMessageList(d.messages || [])}</div>` +
+    `<div class="d-sec"><h3>关联任务</h3>${tasks || `<div class="empty">（无关联任务）</div>`}</div>` +
+    `<div class="d-sec"><h3>可恢复 Agent Session</h3><div class="mono">${esc(sessions) || "（尚未建立子 Agent session）"}</div></div>`;
+  document.querySelectorAll("[data-linked-task]").forEach(b =>
+    b.onclick = () => openDetail(b.dataset.linkedTask));
   $("#overlay").classList.add("show");
   $("#drawer").classList.add("show");
 }
@@ -1132,14 +1261,18 @@ document.addEventListener("keydown", (e) => {
 
 /* ── 产物内容查看器 ── */
 async function viewArtifact(taskId, name) {
+  document.querySelectorAll("[data-art]").forEach(button =>
+    button.classList.toggle("active", button.dataset.art === name));
   $("#d-viewer-sec").style.display = "";
   $("#d-viewer-title").textContent = name;
   $("#d-viewer").innerHTML = `<div class="empty">加载中…</div>`;
+  $("#d-viewer-sec").scrollIntoView({behavior: "auto", block: "nearest"});
   const r = await fetchJson(
     `/api/tasks/${encodeURIComponent(taskId)}/artifact-content?name=` +
     encodeURIComponent(name));
   if (r.error) {
     $("#d-viewer").innerHTML = `<div class="empty">${esc(r.error)}</div>`;
+    showToast(`无法查看 ${name}：${r.error}`, "error");
     return;
   }
   let html = name.endsWith(".jsonl")
@@ -1148,7 +1281,7 @@ async function viewArtifact(taskId, name) {
   if (r.truncated)
     html += `<div class="empty">（内容过大，仅显示前 256KB）</div>`;
   $("#d-viewer").innerHTML = html;
-  $("#d-viewer-sec").scrollIntoView({behavior: "smooth", block: "nearest"});
+  showToast(`已打开产物：${name}`, "ok");
 }
 
 /* stream-json → 可读过程：assistant 文本 / 工具调用 / 可折叠工具结果 */

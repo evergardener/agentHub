@@ -117,6 +117,34 @@ def _is_under(path: Path, root: Path) -> bool:
         return False
 
 
+def _artifact_roots() -> list[Path]:
+    """Return the read-only roots the WebUI is allowed to inspect."""
+    import os
+
+    from common import config as cfg
+
+    roots = [cfg.workspace().resolve()]
+    roots += [Path(root).resolve() for root in
+              os.environ.get("LAS_WEBUI_ARTIFACT_ROOTS", "").split(",")
+              if root.strip()]
+    return roots
+
+
+def _artifact_availability(artifact: dict, roots: list[Path]) -> dict:
+    """Add a non-secret availability hint without reading artifact content."""
+    path = Path(artifact["path"]).resolve()
+    allowed = any(_is_under(path, root) for root in roots)
+    return {
+        **artifact,
+        "available": allowed and path.is_file(),
+        "availability_reason": (
+            None if allowed and path.is_file()
+            else "path_not_allowed" if not allowed
+            else "file_missing"
+        ),
+    }
+
+
 def create_app() -> FastAPI:
     from common import config as cfg
 
@@ -254,11 +282,43 @@ def create_app() -> FastAPI:
 
     @app.get("/api/overview")
     def overview():
+        from datetime import datetime
+
+        from hermes.tools import load_agents
+        from state.db import CST
+
         conn = _conn()
         try:
-            agents = _rows(conn.execute(
+            live_rows = _rows(conn.execute(
                 "SELECT id, role, endpoint, status, skills_json,"
                 " last_seen_at, lease_expires_at FROM agents ORDER BY id;"))
+            live = {row["id"]: row for row in live_rows}
+            catalog = load_agents()
+            now = datetime.now(CST).isoformat(timespec="seconds")
+            agents = []
+            # The production catalog is authoritative. Registry-only rows are
+            # commonly integration-test workers (for example `fake`) and must
+            # not be presented as deployable Agents in the control console.
+            for agent_id, spec in catalog.items():
+                row = live.get(agent_id) or {}
+                enabled = spec.get("enabled", True) is not False
+                online = bool(
+                    enabled and row.get("lease_expires_at")
+                    and row["lease_expires_at"] > now
+                )
+                agents.append({
+                    "id": agent_id,
+                    "role": row.get("role") or spec.get("role", "worker"),
+                    "endpoint": row.get("endpoint") or spec.get("endpoint"),
+                    "status": ("online" if online else
+                               "disabled" if not enabled else "offline"),
+                    "enabled": enabled,
+                    "online": online,
+                    "skills_json": row.get("skills_json")
+                    or json.dumps(spec.get("skills", []), ensure_ascii=False),
+                    "last_seen_at": row.get("last_seen_at"),
+                    "lease_expires_at": row.get("lease_expires_at"),
+                })
             counts = {
                 r["status"]: r["n"] for r in conn.execute(
                     "SELECT status, COUNT(*) AS n FROM tasks GROUP BY status;")
@@ -304,6 +364,10 @@ def create_app() -> FastAPI:
             artifacts = _rows(conn.execute(
                 "SELECT * FROM artifacts WHERE task_id = ?"
                 " ORDER BY created_at;", (task_id,)))
+            artifacts = [
+                _artifact_availability(artifact, _artifact_roots())
+                for artifact in artifacts
+            ]
             events = _rows(conn.execute(
                 "SELECT seq, event_type, payload_json, created_at FROM events"
                 " WHERE task_id = ? ORDER BY seq;", (task_id,)))
@@ -351,12 +415,75 @@ def create_app() -> FastAPI:
             collaboration = ({key: collaboration_row[key]
                               for key in collaboration_row.keys()}
                              if collaboration_row else None)
+            instruction_source = (
+                "task_plan_step" if plan_step else
+                "hermes_collaboration" if row["collaboration_id"] else
+                "legacy_task_record"
+            )
             return {"task": {k: row[k] for k in keys}, "runs": runs,
                     "artifacts": artifacts, "events": events,
                     "interactions": interactions, "sessions": sessions,
                     "messages": messages, "plan_step": plan_step,
                     "plan_steps": plan_steps,
-                    "collaboration": collaboration}
+                    "collaboration": collaboration,
+                    "instruction_source": instruction_source}
+        finally:
+            conn.close()
+
+    @app.get("/api/collaborations")
+    def collaborations(limit: int = 50):
+        """List durable Hermes conversations for live audit and resume checks."""
+        limit = min(max(int(limit), 1), 200)
+        conn = _conn()
+        try:
+            rows = _rows(conn.execute(
+                "SELECT co.id, co.conversation_id, co.objective, co.status,"
+                " co.phase, co.controller, co.context_revision, co.created_at,"
+                " co.updated_at, c.title, c.project, c.status AS conversation_status,"
+                " (SELECT COUNT(*) FROM conversation_messages m"
+                "   WHERE m.collaboration_id = co.id) AS message_count,"
+                " (SELECT COUNT(*) FROM tasks t"
+                "   WHERE t.collaboration_id = co.id) AS task_count"
+                " FROM collaborations co JOIN conversations c"
+                " ON c.id = co.conversation_id"
+                " ORDER BY co.updated_at DESC LIMIT ?;", (limit,)))
+            return {"collaborations": rows}
+        finally:
+            conn.close()
+
+    @app.get("/api/collaborations/{collaboration_id}")
+    def collaboration_detail(collaboration_id: str):
+        conn = _conn()
+        try:
+            row = conn.execute(
+                "SELECT co.*, c.title, c.project,"
+                " c.status AS conversation_status"
+                " FROM collaborations co JOIN conversations c"
+                " ON c.id = co.conversation_id WHERE co.id = ?;",
+                (collaboration_id,),
+            ).fetchone()
+            if row is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            collaboration = {key: row[key] for key in row.keys()}
+            messages = _rows(conn.execute(
+                "SELECT id, conversation_id, collaboration_id, task_id,"
+                " agent_id, sender_type, sender_id, recipient_type,"
+                " recipient_id, message_type, content_json, sequence,"
+                " based_on_revision, delivery_status, created_at"
+                " FROM conversation_messages WHERE collaboration_id = ?"
+                " ORDER BY sequence;", (collaboration_id,)))
+            tasks = _rows(conn.execute(
+                "SELECT id, objective, status, assigned_to, created_at,"
+                " updated_at FROM tasks WHERE collaboration_id = ?"
+                " ORDER BY created_at;", (collaboration_id,)))
+            sessions = _rows(conn.execute(
+                "SELECT id, task_id, agent_id, native_session_id, status,"
+                " resume_capability, context_revision, is_current,"
+                " created_at, last_active_at FROM agent_session_bindings"
+                " WHERE collaboration_id = ? ORDER BY created_at;",
+                (collaboration_id,)))
+            return {"collaboration": collaboration, "messages": messages,
+                    "tasks": tasks, "sessions": sessions}
         finally:
             conn.close()
 
@@ -367,8 +494,6 @@ def create_app() -> FastAPI:
         安全：仅允许读取工作区根目录内的文件；超出 max_bytes（上限 1MB）
         截断并标记 truncated。
         """
-        from common import config as cfg
-
         max_bytes = min(max_bytes, 1024 * 1024)
         conn = _conn()
         try:
@@ -384,11 +509,7 @@ def create_app() -> FastAPI:
         # 允许的根：容器工作区 + LAS_WEBUI_ARTIFACT_ROOTS（宿主机工作区，
         # host adapter 写的产物路径以宿主机绝对路径入库，compose 以相同
         # 路径只读挂载进来，见 docker-compose.yml webui 服务）
-        import os
-        roots = [cfg.workspace().resolve()]
-        roots += [Path(r).resolve() for r in
-                  os.environ.get("LAS_WEBUI_ARTIFACT_ROOTS", "").split(",")
-                  if r.strip()]
+        roots = _artifact_roots()
         if not any(_is_under(p, root) for root in roots):
             return JSONResponse({"error": "artifact 路径不在允许的工作区内"},
                                 status_code=403)
@@ -417,7 +538,19 @@ def create_app() -> FastAPI:
 
         conn = _conn()
         try:
-            return {"alerts": list_alerts(conn, status=status, limit=limit)}
+            rows = list_alerts(conn, status=status, limit=limit)
+            task_ids = {row["task_id"] for row in rows if row.get("task_id")}
+            existing = set()
+            if task_ids:
+                placeholders = ",".join("?" for _ in task_ids)
+                existing = {row["id"] for row in conn.execute(
+                    f"SELECT id FROM tasks WHERE id IN ({placeholders});",
+                    tuple(task_ids),
+                ).fetchall()}
+            for row in rows:
+                row["task_exists"] = bool(
+                    row.get("task_id") and row["task_id"] in existing)
+            return {"alerts": rows}
         finally:
             conn.close()
 

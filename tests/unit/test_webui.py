@@ -95,6 +95,11 @@ def test_overview(client):
     assert ov["task_counts"]["blocked"] == 1
     assert ov["agents"][0]["id"] == "codex"
     assert ov["agents"][0]["endpoint"] == "http://x:8201"
+    assert ov["agents"][0]["online"] is True
+    assert "fake" not in {agent["id"] for agent in ov["agents"]}
+    kimi = next(agent for agent in ov["agents"] if agent["id"] == "kimi")
+    assert kimi["enabled"] is False
+    assert kimi["status"] == "disabled"
     assert ov["alert_counts"] == {"warning": 1}
 
 
@@ -132,6 +137,7 @@ def test_alerts_can_be_acknowledged(client):
     alerts = client.get("/api/alerts?status=open").json()["alerts"]
     assert len(alerts) == 1
     assert alerts[0]["occurrences"] == 1
+    assert alerts[0]["task_exists"] is True
     response = client.post(
         f"/api/alerts/{alerts[0]['id']}/acknowledge",
         json={"note": "investigating"})
@@ -171,6 +177,9 @@ def test_index_page(client):
     assert "用户介入" in r.text
     assert "接管子 Agent" in r.text
     assert "归还 Hermes 并重新规划" in r.text
+    assert "协作会话" in r.text
+    assert "委派指令（原文）" in r.text
+    assert "完整多轮消息" in r.text
 
 
 def test_index_has_bounded_alert_center_and_in_page_dialogs(client):
@@ -223,6 +232,12 @@ def test_artifact_content(client, tmp_path, monkeypatch):
                              sha256="0" * 64)
     conn.close()
 
+    detail = client.get("/api/tasks/T-2").json()
+    availability = {item["name"]: item["available"]
+                    for item in detail["artifacts"]}
+    assert availability["last.md"] is True
+    assert availability["evil"] is False
+
     ok = client.get("/api/tasks/T-2/artifact-content?name=last.md")
     assert ok.status_code == 200
     assert "正文内容" in ok.json()["content"]
@@ -232,6 +247,54 @@ def test_artifact_content(client, tmp_path, monkeypatch):
         "/api/tasks/T-2/artifact-content?name=evil").status_code == 403
     assert client.get(
         "/api/tasks/T-2/artifact-content?name=nope").status_code == 404
+
+
+def test_orphan_alert_has_no_task_link(client):
+    from state import alert_store
+    from state.db import connect
+
+    conn = connect()
+    alert_store.upsert_alert(
+        conn, kind="artifact_missing", severity="warning", source="janitor",
+        task_id="T-DELETED", detail="old-result.md")
+    conn.close()
+
+    alerts = client.get("/api/alerts?status=open").json()["alerts"]
+    orphan = next(alert for alert in alerts if alert["task_id"] == "T-DELETED")
+    assert orphan["task_exists"] is False
+
+
+def test_collaboration_multi_turn_api(client):
+    from orchestrator import collaboration_store
+    from state.db import connect
+
+    conn = connect()
+    collaboration = conn.execute(
+        "SELECT id, conversation_id, context_revision FROM collaborations"
+        " ORDER BY created_at LIMIT 1;").fetchone()
+    for sender_type, sender_id, message_type, text in [
+        ("user", "user", "llm.user", "第一轮：先分析风险"),
+        ("hermes", "hermes", "llm.assistant", "已分析，等待下一轮"),
+        ("user", "user", "llm.user", "第二轮：继续同一上下文"),
+    ]:
+        collaboration_store.append_message(
+            conn, conversation_id=collaboration["conversation_id"],
+            collaboration_id=collaboration["id"], sender_type=sender_type,
+            sender_id=sender_id, message_type=message_type,
+            content={"role": sender_type, "content": text},
+            based_on_revision=collaboration["context_revision"])
+    conn.close()
+
+    rows = client.get("/api/collaborations").json()["collaborations"]
+    item = next(row for row in rows if row["id"] == collaboration["id"])
+    assert item["message_count"] == 3
+    assert item["task_count"] == 1
+    detail = client.get(f"/api/collaborations/{collaboration['id']}").json()
+    assert [m["sequence"] for m in detail["messages"]] == [1, 2, 3]
+    assert detail["messages"][2]["content_json"].endswith(
+        '"content":"第二轮：继续同一上下文"}')
+    assert detail["tasks"][0]["id"] == "T-2"
+    assert client.get("/api/collaborations/COL-NOPE").status_code == 404
 
 
 def test_secure_webui_login_cookie_and_csrf(secure_client):
