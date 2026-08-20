@@ -438,6 +438,10 @@ LAS_RUN_DSH_RESTART=1 \
 端口、启动隔离进程/容器的环境运行；不要改写测试使用临时资源的设计，也不要
 把它们指向默认栈端口、用户 DSH_HOME 或生产数据目录。
 
+2026-08-20 已在本机执行 NATS 隔离门禁并通过（2 passed）：每个用例使用独立
+随机 loopback 端口与临时 JetStream 存储，覆盖端到端状态落库，以及 NATS 进程
+携持久存储重启后 durable consumer 恢复、重复 `event_id` 只落一条 Event/Run。
+
 2026-08-20 已在本机执行 PostgreSQL 隔离门禁并通过（1 passed）：停库期间
 JetStream durable delivery 未被错误 ACK，数据库恢复后同一 `event_id` 仅落一条
 Event/Run；测试结束时唯一 Compose project、容器、网络及临时卷均由清理阶段销毁。

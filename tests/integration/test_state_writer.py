@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import shutil
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -27,23 +28,26 @@ from state.writer import StateWriter
 pytestmark = pytest.mark.anyio
 
 NATS_BIN = shutil.which("nats-server")
-TEST_PORT = 14223
-TEST_URL = f"nats://127.0.0.1:{TEST_PORT}"
 
 requires_nats = pytest.mark.skipif(not NATS_BIN, reason="nats-server not installed")
 
 
-def _start_nats(store_dir: Path) -> subprocess.Popen:
+def _free_loopback_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _start_nats(store_dir: Path, port: int) -> subprocess.Popen:
     proc = subprocess.Popen(
-        [NATS_BIN, "-js", "-p", str(TEST_PORT), "--store_dir", str(store_dir)],
+        [NATS_BIN, "-js", "-p", str(port), "--store_dir", str(store_dir)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    import socket
 
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         try:
-            with socket.create_connection(("127.0.0.1", TEST_PORT), timeout=0.5):
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
                 return proc
         except OSError:
             time.sleep(0.2)
@@ -51,8 +55,8 @@ def _start_nats(store_dir: Path) -> subprocess.Popen:
     raise RuntimeError("nats-server did not start")
 
 
-async def _fetch_events(durable: str) -> list[dict]:
-    nc = await nats.connect(TEST_URL, connect_timeout=2,
+async def _fetch_events(durable: str, nats_url: str) -> list[dict]:
+    nc = await nats.connect(nats_url, connect_timeout=2,
                             max_reconnect_attempts=1, allow_reconnect=False)
     events = []
     try:
@@ -71,8 +75,8 @@ async def _fetch_events(durable: str) -> list[dict]:
     return events
 
 
-async def _publish(event: dict) -> None:
-    nc = await nats.connect(TEST_URL, connect_timeout=2,
+async def _publish(event: dict, nats_url: str) -> None:
+    nc = await nats.connect(nats_url, connect_timeout=2,
                             max_reconnect_attempts=1, allow_reconnect=False)
     try:
         await nc.jetstream().publish(
@@ -92,17 +96,19 @@ async def _wait_status(conn, task_id: str, expected: str) -> None:
 
 @requires_nats
 async def test_state_plane_end_to_end(tmp_path, monkeypatch):
+    nats_port = _free_loopback_port()
+    nats_url = f"nats://127.0.0.1:{nats_port}"
     ws = tmp_path / "ws"
     (ws / "logs").mkdir(parents=True)
     monkeypatch.setenv("AGENT_WORKSPACE", str(ws))
-    monkeypatch.setenv("NATS_URL", TEST_URL)
+    monkeypatch.setenv("NATS_URL", nats_url)
     db_path = tmp_path / "agent-state.db"
 
     from orchestrator.nats_client import ensure_stream
 
-    proc = _start_nats(tmp_path / "jetstream")
+    proc = _start_nats(tmp_path / "jetstream", nats_port)
     try:
-        await ensure_stream(TEST_URL)
+        await ensure_stream(nats_url)
 
         # ── Hermes 建任务（counters ID，§22.1）──
         conn = init_db(db_path)
@@ -139,7 +145,7 @@ async def test_state_plane_end_to_end(tmp_path, monkeypatch):
 
         # ── State Writer 消费落库 ──
         writer = StateWriter(db_path)
-        events = await _fetch_events("p3-test")
+        events = await _fetch_events("p3-test", nats_url)
         task_events = [e for e in events if e.get("task_id") == task_id]
         results = [writer.apply(e) for e in task_events]
         assert "rejected" not in results
@@ -183,11 +189,13 @@ async def test_state_plane_end_to_end(tmp_path, monkeypatch):
 async def test_durable_writer_recovers_after_nats_restart_and_dedupes(
         tmp_path, monkeypatch):
     """Consumer/NATS restart must resume durable delivery without duplicate Run."""
+    nats_port = _free_loopback_port()
+    nats_url = f"nats://127.0.0.1:{nats_port}"
     monkeypatch.setenv("AGENT_WORKSPACE", str(tmp_path / "ws"))
-    monkeypatch.setenv("NATS_URL", TEST_URL)
+    monkeypatch.setenv("NATS_URL", nats_url)
     store_dir = tmp_path / "jetstream-restart"
     db_path = tmp_path / "restart.db"
-    proc = _start_nats(store_dir)
+    proc = _start_nats(store_dir, nats_port)
     from orchestrator.nats_client import durable_consume, ensure_stream
 
     writer = StateWriter(db_path)
@@ -201,16 +209,16 @@ async def test_durable_writer_recovers_after_nats_restart_and_dedupes(
     async def consume(current_writer, stop):
         async def apply(event):
             current_writer.apply(event)
-        await durable_consume(durable, apply, TEST_URL, stop_event=stop)
+        await durable_consume(durable, apply, nats_url, stop_event=stop)
 
     try:
-        await ensure_stream(TEST_URL)
+        await ensure_stream(nats_url)
         stop = asyncio.Event()
         consumer = asyncio.create_task(consume(writer, stop))
         await _publish({
             "event_id": "E-NATS-STARTED", "event_type": "task.started",
             "task_id": task_id, "source": "codex", "payload": {"attempt": 1},
-        })
+        }, nats_url)
         await _wait_status(writer.conn, task_id, "working")
         stop.set()
         await asyncio.wait_for(consumer, timeout=5)
@@ -220,13 +228,13 @@ async def test_durable_writer_recovers_after_nats_restart_and_dedupes(
             "task_id": task_id, "source": "codex",
             "payload": {"attempt": 1, "summary": "done"},
         }
-        await _publish(completed)
-        await _publish(completed)
+        await _publish(completed, nats_url)
+        await _publish(completed, nats_url)
         proc.terminate()
         proc.wait(timeout=10)
 
-        proc = _start_nats(store_dir)
-        await ensure_stream(TEST_URL)
+        proc = _start_nats(store_dir, nats_port)
+        await ensure_stream(nats_url)
         resumed = StateWriter(db_path)
         stop = asyncio.Event()
         consumer = asyncio.create_task(consume(resumed, stop))
