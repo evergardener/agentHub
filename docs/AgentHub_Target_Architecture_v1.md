@@ -204,11 +204,13 @@ Workspace/Git 保存实际文件产物；数据库保存路径、哈希、版本
   Artifact 只保存有界脱敏副本。`/api/respond` 传输失败必须保持控制面可重试；
   重试前按原生 history 的 approval id/outcome 对账，已生效的相同决定视为幂等
   成功，冲突决定 fail-closed，不得重复放行工具调用；
-- Kimi 生产 Adapter 使用 `kimi acp`，不使用无法回传逐工具审批的 prompt
+- Kimi Adapter 使用 `kimi acp`，不使用无法回传逐工具审批的 prompt
   CLI。ACP `session/request_permission` 进入同一 PendingInteraction/
   ActionIntent/签名 receipt 链，`allow_once` 或 `reject_once` 回应原 RPC 后
   继续同一 native session/turn；`session/update` 仅保存有界、脱敏的工具摘要
-  与 assistant 输出，不保存隐藏思维链；
+  与 assistant 输出，不保存隐藏思维链。2026-08-20 真实调用因 HTTP 403 配额
+  耗尽未通过，当前发布候选暂从 catalog/peer 排除 Kimi，保留 Adapter 供额度
+  恢复后重新验收；
 - Codex 生产 Adapter 使用 `codex app-server`，不使用只能事后观察工具事件的
   `exec --json`。thread 新建与恢复均固定 read-only，并将
   `item/commandExecution/requestApproval`、`item/fileChange/requestApproval`、

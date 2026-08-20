@@ -266,10 +266,10 @@ revision 写许可失效。
     解析为任务工作区内绝对路径；未知、越界、含变量/重定向或已脱敏命令只可
     拒绝。State Writer 在控制面独立重算语义，不信任 Adapter 声明的 operation；
     实时事件、history JSON 与 assistant Artifact 均有界脱敏；修改 approval
-    只使用绑定原 RPC 的 `allowed-once`，不开放持久授权。rc.7 原生 read-only
-    preset 尚未验证，因此 DSH 修改能力继续作为生产阻塞；本批全量 unit+contract
-    为 320 passed；
-12. [ ] SSE 断线退避重连、Adapter 恢复后从 history 重建 pending view、控制面
+    只使用绑定原 RPC 的 `allowed-once`，不开放持久授权。rc.7 的
+    `commands.execute('/permission read-only')`、standard preset、原生拒绝与
+    signed allowed-once 均已真实验证；
+12. [x] WebSocket 断线退避重连、Adapter 恢复后从 history 重建 pending view、控制面
     `/api/respond` 失败后重试，以及“DSH 已接收但响应丢失”按 approval/outcome
     对账且不二次发送，均已有离线故障测试；Adapter/DSH 双端真实进程重启仍待
     授权环境故障注入；已增加 `LAS_RUN_DSH_RESTART=1` 门控的无模型真实测试，
@@ -349,18 +349,20 @@ revision 写许可失效。
 
 ## 2026-08-20 当前发布基线与外部阻塞项
 
-- 当前源码全量 unit+contract：336 passed；默认 integration：10 passed、
-  28 skipped。默认跳过项均维持显式门控；gateway、远程安全剖面、NATS、
+- 当前源码全量 unit+contract：340 passed；默认 integration：10 passed、
+  29 skipped。默认跳过项均维持显式门控；gateway、远程安全剖面、NATS、
   PostgreSQL、DSH 无模型重启、HTTPS 告警及备份恢复等已执行的隔离门禁结果，
   以各节记录为准；
 - 本机可安全完成的实现与隔离故障注入已收敛。后续不应继续以 mock 或仅健康检查
   替代真实验收，也不应在未授权时调用模型、外部身份系统或发布流水线；
 - Codex 真实 approval 允许/拒绝、双轮恢复及 HTTP Adapter 服务重启矩阵已完成；
-  DSH 双进程恢复已完成，但生产仍阻塞于官方 permission API/可审计 preset；
-- 发布前仍阻塞于 Kimi 真实 approval/双轮/重启矩阵、DSH 原生权限接口、真实
+  DSH 已完成 commands.execute 权限强制、WebSocket replay、真实拒绝/允许及
+  双进程恢复，当前生产候选为 Codex + DSH；
+- Kimi 因配额耗尽暂时从 catalog/peer 生产路由排除。其恢复仍阻塞于真实
+  approval/双轮/重启矩阵；其余发布阻塞为真实
   CA/OIDC 和第二主机 gateway、首次远端供应链
   workflow 与 Cosign/attestation 验证；目标环境正式 HTTPS webhook 失败/恢复；
-- Kimi 真实模型门禁当前另受服务端配额阻塞（2026-08-20 HTTP 403 usage limit）；
+- Kimi 真实模型门禁受服务端配额阻塞（2026-08-20 HTTP 403 usage limit）；
   额度恢复后从只读单轮门禁重新开始，再执行 approval/双轮/重启矩阵；
 - 建议进入 release-candidate 验收阶段，而不是继续扩展功能。取得相应凭据、模型
   调用授权及维护窗口后，按上述四类门禁逐项执行；全部通过后再进行生产部署审批。

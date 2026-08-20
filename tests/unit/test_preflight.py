@@ -23,8 +23,11 @@ def _secure_env() -> str:
         "LAS_API_TOKEN=" + "i" * 48,
         "LAS_A2A_PEERS=",
         "LAS_PRODUCTION_MODE=true",
-        "LAS_DSH_PRODUCTION_ENABLED=false",
+        "LAS_DSH_PRODUCTION_ENABLED=true",
         "LAS_DSH_ALLOW_UNVERIFIED_RUNTIME=false",
+        "LAS_DSH_PERMISSION_PRESET=read-only",
+        "LAS_DSH_AGENT_PRESET=standard",
+        "LAS_KIMI_PRODUCTION_ENABLED=false",
         "LAS_WEBUI_REQUIRE_AUTH=true",
         "LAS_ORCH_REQUIRE_AUTH=true",
         "LAS_REQUIRE_MIGRATION_BACKUP=true",
@@ -150,17 +153,17 @@ def test_production_mode_must_be_explicitly_enabled(tmp_path):
     assert {item.key for item in findings} == {"LAS_PRODUCTION_MODE"}
 
 
-def test_dsh_production_route_is_blocked_until_native_enforcement(tmp_path):
+def test_dsh_production_route_must_be_explicitly_enabled(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(_secure_env().replace(
-        "LAS_DSH_PRODUCTION_ENABLED=false",
-        "LAS_DSH_PRODUCTION_ENABLED=true"), encoding="utf-8")
+        "LAS_DSH_PRODUCTION_ENABLED=true",
+        "LAS_DSH_PRODUCTION_ENABLED=false"), encoding="utf-8")
     env_file.chmod(0o600)
     findings = check_production_env(env_file)
     assert {item.key for item in findings} == {"LAS_DSH_PRODUCTION_ENABLED"}
 
 
-def test_dsh_peer_route_is_blocked_until_native_enforcement(tmp_path):
+def test_dsh_peer_route_is_allowed_with_verified_production_config(tmp_path):
     token = "d" * 48
     peers = json.dumps({token: {"peer": "reviewer", "worker": "dsh"}})
     env_file = tmp_path / ".env"
@@ -168,17 +171,47 @@ def test_dsh_peer_route_is_blocked_until_native_enforcement(tmp_path):
         "LAS_A2A_PEERS=", f"LAS_A2A_PEERS={peers}"), encoding="utf-8")
     env_file.chmod(0o600)
     findings = check_production_env(env_file)
-    assert {item.key for item in findings} == {"LAS_DSH_PRODUCTION_ENABLED"}
+    assert findings == []
 
 
-def test_agent_catalog_requires_dsh_static_route_disabled(tmp_path):
+def test_agent_catalog_requires_release_candidate_enablement(tmp_path):
     agents_file = tmp_path / "agents.yaml"
     agents_file.write_text(
-        "agents:\n  dsh:\n    enabled: true\n    endpoint: http://dsh:8203\n",
+        "agents:\n"
+        "  codex:\n    enabled: true\n"
+        "  kimi:\n    enabled: false\n"
+        "  dsh:\n    enabled: false\n",
         encoding="utf-8")
     findings = check_agent_catalog(agents_file)
     assert [item.key for item in findings] == [
         "config/agents.yaml:dsh.enabled"]
+
+
+def test_kimi_peer_and_production_flag_remain_blocked(tmp_path):
+    token = "k" * 48
+    peers = json.dumps({token: {"peer": "frontend", "worker": "kimi"}})
+    env_file = tmp_path / ".env"
+    env_file.write_text(_secure_env().replace(
+        "LAS_A2A_PEERS=", f"LAS_A2A_PEERS={peers}").replace(
+        "LAS_KIMI_PRODUCTION_ENABLED=false",
+        "LAS_KIMI_PRODUCTION_ENABLED=true"), encoding="utf-8")
+    env_file.chmod(0o600)
+    findings = check_production_env(env_file)
+    assert {item.key for item in findings} == {
+        "LAS_KIMI_PRODUCTION_ENABLED"}
+
+
+def test_dsh_native_policy_values_are_pinned(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(_secure_env().replace(
+        "LAS_DSH_PERMISSION_PRESET=read-only",
+        "LAS_DSH_PERMISSION_PRESET=workspace-write").replace(
+        "LAS_DSH_AGENT_PRESET=standard",
+        "LAS_DSH_AGENT_PRESET=minimal"), encoding="utf-8")
+    env_file.chmod(0o600)
+    findings = check_production_env(env_file)
+    assert {item.key for item in findings} == {
+        "LAS_DSH_PERMISSION_PRESET", "LAS_DSH_AGENT_PRESET"}
 
 
 def test_production_env_audits_selected_agent_catalog(tmp_path):

@@ -90,12 +90,15 @@ def check_agent_catalog(path: Path = DEFAULT_AGENTS_FILE) -> list[Finding]:
     if not isinstance(agents, dict):
         return [Finding(
             "error", "config/agents.yaml", "必须包含 agents 映射")]
-    dsh = agents.get("dsh")
-    if not isinstance(dsh, dict) or dsh.get("enabled") is not False:
-        return [Finding(
-            "error", "config/agents.yaml:dsh.enabled",
-            "当前构建必须显式为 false，禁止静态 DSH 生产路由")]
-    return []
+    expected = {"codex": True, "kimi": False, "dsh": True}
+    findings: list[Finding] = []
+    for agent_id, enabled in expected.items():
+        agent = agents.get(agent_id)
+        if not isinstance(agent, dict) or agent.get("enabled") is not enabled:
+            findings.append(Finding(
+                "error", f"config/agents.yaml:{agent_id}.enabled",
+                f"当前发布候选要求 {agent_id}.enabled={str(enabled).lower()}"))
+    return findings
 
 
 def check_production_env(
@@ -266,11 +269,29 @@ def check_production_env(
         findings.append(Finding(
             "error", "LAS_DSH_ALLOW_UNVERIFIED_RUNTIME",
             "仅限开发；生产不得绕过 DSH 原生权限门禁"))
-    if (_enabled(env.get("LAS_DSH_PRODUCTION_ENABLED", ""))
-            or "dsh" in peer_workers):
+    dsh_enabled = _enabled(env.get("LAS_DSH_PRODUCTION_ENABLED", ""))
+    if not dsh_enabled:
         findings.append(Finding(
             "error", "LAS_DSH_PRODUCTION_ENABLED",
-            "当前 DSH 版本无可验证的原生权限强制；本构建禁止生产任务路由"))
+            "当前发布候选包含已验证 DSH Adapter，生产必须显式启用"))
+    if env.get("LAS_DSH_PERMISSION_PRESET", "") != "read-only":
+        findings.append(Finding(
+            "error", "LAS_DSH_PERMISSION_PRESET",
+            "DSH 生产会话必须使用原生 read-only preset"))
+    if env.get("LAS_DSH_AGENT_PRESET", "") != "standard":
+        findings.append(Finding(
+            "error", "LAS_DSH_AGENT_PRESET",
+            "DSH 生产会话必须使用已审计的 standard preset"))
+    if "dsh" in peer_workers and not dsh_enabled:
+        findings.append(Finding(
+            "error", "LAS_A2A_PEERS",
+            "DSH peer 需要 LAS_DSH_PRODUCTION_ENABLED=true"))
+
+    if (_enabled(env.get("LAS_KIMI_PRODUCTION_ENABLED", ""))
+            or "kimi" in peer_workers):
+        findings.append(Finding(
+            "error", "LAS_KIMI_PRODUCTION_ENABLED",
+            "Kimi 当前因真实 ACP 调用配额耗尽而排除生产路由"))
 
     if not _enabled(env.get("LAS_WEBUI_COOKIE_SECURE", "false")):
         findings.append(Finding(
