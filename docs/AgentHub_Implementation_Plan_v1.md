@@ -90,7 +90,8 @@ revision 写许可失效。
   失败，并使用常量时间凭据比对；
 - [x] 生产配置预检覆盖 `.env` 权限、默认/弱密钥、WebUI roles 和 A2A peer
   映射，检查输出不泄露 secret value；
-- gateway TLS/JWT/ACL/限流；
+- [ ] gateway：loopback 剖面已完成 strict API key、路由 ACL、独立 token-bucket
+  限流；跨主机 HTTPS/mTLS + strict JWT 剖面待实施；
 - 固定镜像版本、SBOM、签名和漏洞扫描；
 - [x] WebUI/Orchestrator readiness、State Writer/Janitor 依赖探针、Gateway
   端口探针、Compose 健康依赖、资源上限与容器日志轮换；

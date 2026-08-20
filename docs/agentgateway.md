@@ -18,7 +18,7 @@ gateway 地址（`AGENT_GATEWAY_URL`）。
 
 - `infra/agentgateway/bin/agentgateway` — v1.4.1 darwin-arm64
   （sha256 已对照 GitHub release 校验，未入 git，.gitignore 排除）
-- `infra/agentgateway/config.yaml` — 路由 / auth / ACL / timeout / retry
+- `infra/agentgateway/config.yaml` — 路由 / auth / ACL / 限流 / timeout / retry
 
 ## 启动
 
@@ -37,6 +37,8 @@ key 只经环境变量注入（M2 起 env-only，不再使用 macOS Keychain）�
 - **ACL**：路由级 `authorization` 规则校验 key 元数据 `agents` 列表。
   禁用某 Agent = 从 `agents` 中移除其名字；agentgateway 热加载，
   无需重启。被拒请求返回 403。
+- **限流**：每条 Agent 路由有独立的本地 token bucket，初始最多突发 30 次，
+  每 60 秒补充 30 次。超过额度返回 429；不同 Agent 的额度互不影响。
 - **超时/重试**：路由级 `timeout.requestTimeout`（codex/dsh 900s / kimi 300s）
   与 `retry`（2 attempts，仅 502/503，backoff 500ms）。
 
@@ -53,11 +55,14 @@ Bearer key），否则保持 Phase 1-4 的直连行为。task_manager 与 recove
 LAS_RUN_GW=1 .venv/bin/python -m pytest tests/integration/test_agentgateway.py
 ```
 
-覆盖：无 key 401 / 经 gateway 委派成功 / 禁用 Agent 后 403 / 直连回退。
+覆盖：配置 schema / 无 key 401 / 经 gateway 委派成功 / 禁用 Agent 后 403 /
+路由限流 429 / 直连回退。
 
 ## 已知限制
 
-- TLS/mTLS 未启用：全 loopback，第一阶段可接受；跨机部署前必须加。
+- TLS/mTLS 未启用：当前 gateway 与调用方均在同一主机、只监听 loopback；
+  跨机部署前必须切换到独立 HTTPS/mTLS 配置，禁止直接修改本剖面为非 loopback。
 - tracing（OTel）未接：§29 后置项。
 - ACL 粒度是"key → agent 列表"，没有 per-task 策略；需要时引入
-  JWT + CEL 细化。
+  strict JWT（固定 issuer/audience/JWKS）+ CEL 细化。当前 loopback 剖面不叠加
+  JWT，避免同时维护两套身份源却没有获得新的信任边界。

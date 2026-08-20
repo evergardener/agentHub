@@ -7,6 +7,7 @@
 #   （env-only，不入库不落盘；M2 起不再使用 macOS Keychain）
 # - ACL：路由级 authorization 规则按 apiKey metadata 的 agents 列表放行；
 #   要禁用某 Agent，把它的名字从该 key 的 agents 中移除即可（热加载生效）
+# - 限流：每个 Agent 路由使用独立 token bucket，允许 30 次突发并每分钟补充 30 次
 # - timeout/retry：路由级策略（retry 仅对连接失败与 502/503 重试一次）
 
 gateways:
@@ -33,6 +34,11 @@ routes:
     authorization:
       rules:
       - require: 'apiKey.agents.split(",").exists(a, a == "codex")'
+    localRateLimit:
+    - maxTokens: 30
+      tokensPerFill: 30
+      fillInterval: 60s
+      type: requests
     timeout:
       requestTimeout: 900s   # codex 任务可能很长
     retry:
@@ -53,6 +59,11 @@ routes:
     authorization:
       rules:
       - require: 'apiKey.agents.split(",").exists(a, a == "kimi")'
+    localRateLimit:
+    - maxTokens: 30
+      tokensPerFill: 30
+      fillInterval: 60s
+      type: requests
     timeout:
       requestTimeout: 300s
     retry:
@@ -73,6 +84,11 @@ routes:
     authorization:
       rules:
       - require: 'apiKey.agents.split(",").exists(a, a == "dsh")'
+    localRateLimit:
+    - maxTokens: 30
+      tokensPerFill: 30
+      fillInterval: 60s
+      type: requests
     timeout:
       requestTimeout: 900s
     retry:

@@ -3,7 +3,7 @@
 #
 # 与 config.yaml（宿主机版）的差异：backends 指向 host.docker.internal ——
 # worker adapter 由用户装在宿主机，容器经此回连宿主机。
-# 认证/ACL/超时策略与宿主机版一致；key 经 $GATEWAY_API_KEY 注入。
+# 认证/ACL/限流/超时策略与宿主机版一致；key 经 $GATEWAY_API_KEY 注入。
 
 gateways:
   default:
@@ -29,6 +29,11 @@ routes:
     authorization:
       rules:
       - require: 'apiKey.agents.split(",").exists(a, a == "codex")'
+    localRateLimit:
+    - maxTokens: 30
+      tokensPerFill: 30
+      fillInterval: 60s
+      type: requests
     timeout:
       requestTimeout: 900s   # codex 任务可能很长
     retry:
@@ -49,6 +54,11 @@ routes:
     authorization:
       rules:
       - require: 'apiKey.agents.split(",").exists(a, a == "kimi")'
+    localRateLimit:
+    - maxTokens: 30
+      tokensPerFill: 30
+      fillInterval: 60s
+      type: requests
     timeout:
       requestTimeout: 300s
     retry:
@@ -69,6 +79,11 @@ routes:
     authorization:
       rules:
       - require: 'apiKey.agents.split(",").exists(a, a == "dsh")'
+    localRateLimit:
+    - maxTokens: 30
+      tokensPerFill: 30
+      fillInterval: 60s
+      type: requests
     timeout:
       requestTimeout: 900s
     retry:

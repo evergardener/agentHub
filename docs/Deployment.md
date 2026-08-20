@@ -368,6 +368,8 @@ safety backup 与旧 Workspace 可读取，最后确认随机项目的容器、�
 - worker 需要容器回连时才加 LAN IP 到 `LAS_ADAPTER_BIND`，且必须配 `LAS_ADAPTER_TOKEN`
 - `never_grant` 高危操作（删库、 force push 等）只能逐次人工批准，见 `src/hermes/policy.py`
 - gateway `apiKey.agents` ACL 控制 hermes 可访问的 agent 列表
+- gateway 每条 Agent 路由有独立本地 token bucket（30 次突发、每分钟补充
+  30 次）；超过额度返回 429，避免失控协作循环持续放大调用
 - WebUI 使用高熵 token、签名 HttpOnly Cookie、CSRF 与 `viewer/operator/admin`
   RBAC；跨主机只允许经带登录限流的 HTTPS 反向代理访问
 - Orchestrator A2A 入口在 compose 中强制认证；认证全空、生产 token 少于

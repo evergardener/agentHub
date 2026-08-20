@@ -1516,6 +1516,7 @@ agentctl agent list
 - [x] Worker 不直接向公网暴露。（全部 loopback；gateway 是唯一认证入口）
 - [x] 加入 auth。（gateway 级 apiKey strict，key 存 Keychain 经 env 注入）
 - [x] 加入 ACL。（路由级 CEL authorization，按 key 元数据 agents 列表放行，热加载）
+- [x] 加入限流。（每条 Agent 路由独立 token bucket，30 次突发 / 每分钟补充 30 次）
 - [x] 加入 timeout/retry。（路由级 requestTimeout + retry attempts=2）
 - [ ] 加入 tracing。（OTel 后置，见 §29）
 
