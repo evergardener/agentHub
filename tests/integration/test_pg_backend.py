@@ -51,10 +51,10 @@ def test_pg_migrations_and_core_flow(pg_url):
 
     conn = init_db(pg_url)
 
-    # 迁移：六版全部应用，含 Profile 与 Session recovery metadata
+    # 迁移：全部版本已应用，含 Profile、Session recovery 与 Task Plan
     versions = [r[0] for r in conn.execute(
         "SELECT version FROM schema_migrations ORDER BY version;").fetchall()]
-    assert versions == [1, 2, 3, 4, 5, 6]
+    assert versions == list(range(1, 10))
 
     from orchestrator import collaboration_store
 

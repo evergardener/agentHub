@@ -174,6 +174,8 @@ State Writer 对每个 JetStream event 必须在单一数据库事务中同时�
 使同一 event_id 的 JetStream 重投能够安全完成。只有事务提交后才允许 ACK。
 PostgreSQL transport 失效时 State Writer 必须丢弃旧连接、尝试重连并让当前消息
 保持 NAK；不得在数据库恢复后继续复用永久失效的连接，也不得 ACK 未落库事件。
+对应故障门禁使用随机 Compose 项目、临时端口和临时卷，显式设置
+`LAS_RUN_PG_FAULTS=1` 才会执行；不得以默认项目或生产数据库作为测试目标。
 
 Workspace/Git 保存实际文件产物；数据库保存路径、哈希、版本、来源和可见性。
 
