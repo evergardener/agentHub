@@ -176,6 +176,18 @@ Orchestrator 的 `/ready` 会验证数据库，agentgateway 则验证监听端�
     自动把 .env 翻译为宿主机视角（PG/gateway 地址改写）。前提是宿主机
     已 `pip install -e .`（注册 `agentctl` 入口点）。
 
+WebUI 的 `AGENTS` 卡片以 `config/agents.yaml` 生产目录为权威来源：仅显示目录内
+Agent，已停用 Agent 单独标注，Registry 中遗留的集成测试 worker（例如 `fake`）
+不会混入生产列表。任务详情的「委派指令（原文）」直接显示 `tasks.objective`，不做
+前端总结；结构化 Task Plan 会同时显示步骤、预期操作和验收条件。未绑定持久
+collaboration 的旧任务只能展示当时保存的单条目标，WebUI 会明确标注无法还原更长
+的上游会话。
+
+「协作会话」卡片按持久 Collaboration 展示完整的用户、Hermes 与工具消息序列、
+`context_revision`、关联任务和可恢复 Agent Session，适合核验跨天续接是否仍在同一
+上下文。Artifact 按钮会先标识文件可用性，点击后在任务抽屉内显示加载状态、选中
+状态和内容；缺失或越界文件不会伪装成可点击产物。
+
 ### 3.3.1 告警与通知
 
 Janitor 的租约过期、执行超时、产物缺失，以及重试耗尽的任务会写入持久
@@ -185,6 +197,8 @@ Janitor 的租约过期、执行超时、产物缺失，以及重试耗尽的任
 「标记已知」，`viewer` 只读；标记已知只从待处理列表移除，**不会**修复、重试或
 取消任务，应先按建议完成处置。同一 kind/task/detail 只建立一条告警，重复发生
 增加 `occurrences`，不会形成通知风暴。
+若历史告警引用的任务记录已经不存在，WebUI 会保留告警及技术详情用于审计，但不再
+显示「打开任务」按钮，避免跳转到必然返回 `not found` 的页面。
 
 外部通知是显式启用的：
 
