@@ -126,3 +126,41 @@ def test_psycopg_operational_subclasses_are_connection_failures(tmp_path):
     writer = StateWriter(tmp_path / "writer.db")
     assert writer._is_connection_failure(
         psycopg.errors.AdminShutdown("server restarting"))
+
+
+def test_disabled_agent_heartbeat_is_audited_but_not_registered(tmp_path):
+    agents_path = tmp_path / "agents.yaml"
+    agents_path.write_text(
+        "agents:\n"
+        "  codex:\n"
+        "    enabled: true\n"
+        "  kimi:\n"
+        "    enabled: false\n",
+        encoding="utf-8",
+    )
+    writer = StateWriter(tmp_path / "writer.db", agents_path=agents_path)
+    event = {
+        "event_id": "E-kimi-heartbeat",
+        "event_type": "agent.kimi.heartbeat",
+        "source": "kimi",
+        "payload": {
+            "lease_ttl_seconds": 90,
+            "endpoint": "http://127.0.0.1:8202",
+            "skills": ["research"],
+        },
+    }
+
+    assert writer.apply(event) == "ignored"
+    assert writer.conn.execute(
+        "SELECT COUNT(*) FROM events WHERE id = 'E-kimi-heartbeat';"
+    ).fetchone()[0] == 1
+    assert writer.conn.execute(
+        "SELECT COUNT(*) FROM agents WHERE id = 'kimi';"
+    ).fetchone()[0] == 0
+
+    enabled = {**event, "event_id": "E-codex-heartbeat",
+               "event_type": "agent.codex.heartbeat", "source": "codex"}
+    assert writer.apply(enabled) == "applied"
+    assert writer.conn.execute(
+        "SELECT status FROM agents WHERE id = 'codex';"
+    ).fetchone()[0] == "online"

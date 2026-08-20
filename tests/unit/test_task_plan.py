@@ -153,3 +153,36 @@ async def test_invalid_plan_fails_before_creating_tasks(tmp_path, steps):
     assert "error" in result
     after = tm.conn.execute("SELECT COUNT(*) FROM tasks;").fetchone()[0]
     assert after == before
+
+
+async def test_disabled_agent_requires_confirmation_before_plan_creation(
+        tmp_path):
+    tm, tools, _ = _setup(tmp_path)
+    before = tm.conn.execute("SELECT COUNT(*) FROM tasks;").fetchone()[0]
+    result = await tools.dispatch("create_task_plan", {
+        "objective": "research with kimi",
+        "steps": [{
+            "key": "research",
+            "objective": "research long context options",
+            "agent_id": "kimi",
+            "expected_operations": ["filesystem.read"],
+            "acceptance_criteria": ["report risks"],
+        }],
+    })
+    assert result["status"] == "needs_confirmation"
+    assert result["reason"] == "agent_disabled"
+    assert result["agent_id"] == "kimi"
+    assert tm.conn.execute("SELECT COUNT(*) FROM tasks;").fetchone()[0] == before
+
+
+async def test_disabled_agent_cannot_be_delegated_after_user_approval(tmp_path):
+    tm, tools, _ = _setup(tmp_path)
+    created = await tools.dispatch("create_task", {"objective": "research"})
+    result = await tools.dispatch("approve_and_delegate", {
+        "task_id": created["task_id"], "agent_id": "kimi",
+        "note": "user asked for kimi",
+    })
+    assert result["status"] == "needs_confirmation"
+    assert result["reason"] == "agent_disabled"
+    task = state_store.get_task(tm.conn, created["task_id"])
+    assert task["assigned_to"] is None

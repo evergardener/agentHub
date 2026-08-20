@@ -147,7 +147,8 @@ class HermesTools:
 
     def _resolve_agents(self) -> dict:
         """发现视图（v3 M2）：静态 agents.yaml 为种子，DB 中心跳注册的
-        agent 覆盖/补充；带 online 标记（lease 未过期）。
+        agent 覆盖/补充；带 online 标记（lease 未过期）。静态启停策略是
+        desired state，优先级高于 worker 心跳；停用 Agent 不参与发现视图。
 
         语义：worker 由用户自装、经心跳自注册；DB 中 lease 过期 = offline，
         未注册的 agent 仅在静态 yaml 显式配置时可用（static）。
@@ -169,11 +170,13 @@ class HermesTools:
             online = bool(r["lease_expires_at"] and r["lease_expires_at"] > now)
             entry = merged.setdefault(
                 r["id"], {"endpoint": "", "skills": [], "enabled": True})
+            if entry.get("enabled") is False:
+                entry["online"] = None
+                continue
             entry["online"] = online
             entry["template_id"] = r["template_id"]
             entry["profile_id"] = r["profile_id"]
             if online:
-                entry["enabled"] = True
                 if r["endpoint"]:
                     entry["endpoint"] = r["endpoint"]
                 if r["skills_json"]:
@@ -191,7 +194,16 @@ class HermesTools:
             return {"error": f"unknown agent: {agent_id}",
                     "known": sorted(agents)}
         if info.get("enabled") is False:
-            return {"error": f"agent disabled: {agent_id}（生产安全门禁）"}
+            return {
+                "error": f"agent disabled: {agent_id}（生产安全门禁）",
+                "status": "needs_confirmation",
+                "reason": "agent_disabled",
+                "agent_id": agent_id,
+                "hint": (
+                    f"{agent_id} 已停用；不要创建、委派或重试任务。"
+                    "请询问用户是否先启用并重新探测，或改派其他已启用 Agent。"
+                ),
+            }
         if info["online"] is False:
             return {"error": f"agent offline: {agent_id}（心跳租约已过期）"}
         if not info.get("endpoint"):
@@ -220,6 +232,8 @@ class HermesTools:
         for step in steps:
             agent = self._agent_or_error(step["agent_id"])
             if "error" in agent:
+                if agent.get("reason") == "agent_disabled":
+                    return agent
                 raise ValueError(agent["error"])
             profile_id = agent.get("profile_id")
             if not profile_id:
@@ -305,13 +319,13 @@ class HermesTools:
         row = self._task_or_error(task_id)
         if "error" in row:
             return row
-        agent = self._agent_or_error(agent_id)
-        if "error" in agent:
-            return agent
         from orchestrator import task_plan_store
 
         task_plan_store.validate_delegation(
             self.tm.conn, task_id=task_id, agent_id=agent_id)
+        agent = self._agent_or_error(agent_id)
+        if "error" in agent:
+            return agent
         decision = self.policy.decide(self.tm.conn, row["objective"])
         if decision.action == "ask":
             return {"status": "needs_approval", "task_id": task_id,
@@ -329,13 +343,13 @@ class HermesTools:
         row = self._task_or_error(task_id)
         if "error" in row:
             return row
-        agent = self._agent_or_error(agent_id)
-        if "error" in agent:
-            return agent
         from orchestrator import task_plan_store
 
         task_plan_store.validate_delegation(
             self.tm.conn, task_id=task_id, agent_id=agent_id)
+        agent = self._agent_or_error(agent_id)
+        if "error" in agent:
+            return agent
         # 对话即审批：记录批准事件后委派
         from orchestrator import state_store
         state_store.record_event(self.tm.conn, {

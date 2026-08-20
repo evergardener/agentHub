@@ -35,9 +35,12 @@ _EVENT_TO_STATUS = {
 
 
 class StateWriter:
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, agents_path: Path | None = None):
         self.db_target = db_path
         self.conn = init_db(db_path)
+        from hermes.tools import load_agents
+
+        self.agent_policies = load_agents(agents_path)
         from orchestrator import agent_profile_store
 
         agent_profile_store.seed_catalog(self.conn)
@@ -158,6 +161,16 @@ class StateWriter:
                     commit=False,
                 )
             elif event_type.startswith("agent.") and event_type.endswith(".heartbeat"):
+                policy = self.agent_policies.get(source)
+                if policy is not None and policy.get("enabled") is False:
+                    # Desired state is authoritative. Keep the heartbeat event
+                    # for audit, but do not register, renew a lease, discover
+                    # capabilities, or bind a profile for a disabled Agent.
+                    self.conn.execute(
+                        "UPDATE agents SET status = 'disabled',"
+                        " lease_expires_at = NULL WHERE id = ?;", (source,))
+                    self.conn.commit()
+                    return "ignored"
                 state_store.update_heartbeat(
                     self.conn, source,
                     lease_ttl_seconds=payload.get("lease_ttl_seconds", 90),

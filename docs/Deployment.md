@@ -22,6 +22,10 @@
 
 核心原则：
 - worker agent **不进容器**——用宿主机原生环境与授权，经心跳自注册，没注册就不可用
+- `agents.yaml` 的 `enabled` 是控制面的目标状态，优先级高于 worker 心跳；
+  停用 Agent 的心跳只保留审计事件，不注册、不续租、不发现能力，也不能委派任务。
+  用户点名停用 Agent 时，Hermes 必须先询问是启用后重新探测，还是改派其他 Agent；
+  确认前不得创建计划任务或静默改派。
 - 密钥只走环境变量 / `.env`（权限 600），不入库、不入仓、不用 Keychain
 - 状态唯一事实源是 PostgreSQL（可选 SQLite）；NATS 只是事件总线
 
@@ -452,6 +456,9 @@ agents 表在线判定按 `lease_expires_at` 动态计算。查 worker 进程与
 当前发布候选的目标状态是 Codex/DSH `online`、Kimi `disabled`。DSH 若显示
 offline，检查 WebSocket 426 修复后的 Adapter 版本、standard preset、read-only
 权限核验和本地 DSH Web；不要用旧开发豁免绕过失败。
+
+`disabled` 不是 `offline`：前者是人工策略门禁，即使 Adapter 仍发送有效心跳也
+不会恢复在线或参与路由；后者表示已启用但当前租约过期。
 
 ### 6.6 委派非 codex/kimi 的 agent 失败
 gateway 路由表（`infra/agentgateway/config.docker.yaml`）目前只静态映射

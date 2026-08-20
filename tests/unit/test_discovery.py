@@ -2,7 +2,7 @@
 
 覆盖：
   - update_heartbeat 携带 endpoint/skills 落库
-  - HermesTools._resolve_agents 合并视图（在线覆盖静态 / 离线标记）
+  - HermesTools._resolve_agents 合并视图（停用策略优先 / 离线标记）
   - delegate 门控：offline 拒绝、unknown 拒绝、static 兜底允许（到策略层）
 """
 
@@ -118,13 +118,14 @@ def test_list_agents_status_view(conn, tmp_path):
     assert "disabled" in tools._agent_or_error("dsh")["error"]
 
 
-def test_ready_heartbeat_overrides_disabled_static_seed(conn, tmp_path):
+def test_disabled_static_policy_overrides_ready_heartbeat(conn, tmp_path):
     tools = _tools(conn, tmp_path, static={
         "dsh": {"enabled": False, "endpoint": "http://static:8203",
                 "skills": ["review"]},
     })
     _heartbeat(conn, "dsh", endpoint="http://dev:8203", skills=["review"])
     dsh = tools._agent_or_error("dsh")
-    assert dsh["enabled"] is True
-    assert dsh["online"] is True
-    assert dsh["endpoint"] == "http://dev:8203"
+    assert dsh["status"] == "needs_confirmation"
+    assert dsh["reason"] == "agent_disabled"
+    assert dsh["agent_id"] == "dsh"
+    assert "不要创建、委派或重试" in dsh["hint"]
