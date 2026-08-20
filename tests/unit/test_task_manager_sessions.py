@@ -24,6 +24,8 @@ class FakeA2aClient:
             "native_resume": self.native,
             "durable_session": self.native,
             "steer": self.native,
+            "interrupt": self.native,
+            "cancel": True,
         }
         return {
             "id": kwargs["task_id"],
@@ -265,6 +267,104 @@ async def test_failed_steer_can_retry_same_idempotency_key(
     result = await tm.intervene_agent_session(task_id, **kwargs)
     assert result["context_revision"] == 2
     assert attempts == 2
+
+
+async def test_user_takeover_interrupts_then_returns_control_to_hermes(
+        tmp_path, monkeypatch):
+    from orchestrator import collaboration_store
+    from orchestrator.a2a_client import A2aClient
+    from orchestrator.task_manager import TaskManager
+
+    client = FakeA2aClient(native=True)
+    monkeypatch.setattr(
+        A2aClient, "for_agent", classmethod(
+            lambda cls, agent_name, direct_endpoint, timeout=30: client))
+    tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
+    task_id, collaboration_id = _task_with_collaboration(tm)
+    await (await tm.delegate_task(task_id, "http://fake", "codex"))
+
+    with pytest.raises(ValueError, match="not under user control"):
+        await tm.intervene_agent_session(
+            task_id, mode="return_to_hermes",
+            content={"text": "尚未接管"}, agent_id="codex",
+            idempotency_key="premature-return")
+    assert tm.conn.execute(
+        "SELECT context_revision FROM collaborations WHERE id = ?;",
+        (collaboration_id,),
+    ).fetchone()[0] == 1
+
+    takeover = await tm.intervene_agent_session(
+        task_id, mode="takeover", content={"text": "停止修改数据库"},
+        agent_id="codex", endpoint="http://fake", user_id="user",
+        idempotency_key="takeover-once")
+    assert takeover["context_revision"] == 2
+    assert client.controls == [(task_id, "interrupt")]
+    binding = collaboration_store.get_current_agent_session(
+        tm.conn, task_id, "codex")
+    assert binding["status"] == "paused"
+    assert binding["context_revision"] == 2
+    collaboration = collaboration_store.get_collaboration(
+        tm.conn, collaboration_id)
+    assert collaboration["phase"] == "needs_replan"
+    assert collaboration["controller"] == "user"
+    takeover_message = tm.conn.execute(
+        "SELECT recipient_type, recipient_id FROM conversation_messages"
+        " WHERE id = ?;", (takeover["message_id"],),
+    ).fetchone()
+    assert (takeover_message["recipient_type"],
+            takeover_message["recipient_id"]) == ("hermes", "hermes")
+
+    duplicate = await tm.intervene_agent_session(
+        task_id, mode="takeover", content={"text": "停止修改数据库"},
+        agent_id="codex", endpoint="http://fake", user_id="user",
+        idempotency_key="takeover-once")
+    assert duplicate["duplicate"] is True
+    assert client.controls == [(task_id, "interrupt")]
+
+    returned = await tm.intervene_agent_session(
+        task_id, mode="return_to_hermes",
+        content={"text": "按最新约束重新规划"}, agent_id="codex",
+        user_id="user", idempotency_key="return-once")
+    assert returned["context_revision"] == 3
+    collaboration = collaboration_store.get_collaboration(
+        tm.conn, collaboration_id)
+    assert collaboration["phase"] == "needs_replan"
+    assert collaboration["controller"] == "hermes"
+    returned_message = tm.conn.execute(
+        "SELECT recipient_type, recipient_id FROM conversation_messages"
+        " WHERE id = ?;", (returned["message_id"],),
+    ).fetchone()
+    assert (returned_message["recipient_type"],
+            returned_message["recipient_id"]) == ("hermes", "hermes")
+    returned_duplicate = await tm.intervene_agent_session(
+        task_id, mode="return_to_hermes",
+        content={"text": "按最新约束重新规划"}, agent_id="codex",
+        user_id="user", idempotency_key="return-once")
+    assert returned_duplicate["duplicate"] is True
+
+
+async def test_takeover_requires_native_interrupt_capability(
+        tmp_path, monkeypatch):
+    from orchestrator.a2a_client import A2aClient
+    from orchestrator.task_manager import TaskManager
+
+    client = FakeA2aClient(native=False)
+    monkeypatch.setattr(
+        A2aClient, "for_agent", classmethod(
+            lambda cls, agent_name, direct_endpoint, timeout=30: client))
+    tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
+    task_id, _ = _task_with_collaboration(tm)
+    await (await tm.delegate_task(task_id, "http://fake", "kimi"))
+
+    with pytest.raises(ValueError, match="safely interrupted"):
+        await tm.intervene_agent_session(
+            task_id, mode="takeover", content={"text": "用户接管"},
+            agent_id="kimi", endpoint="http://fake",
+            idempotency_key="unsafe-takeover")
+    assert tm.conn.execute(
+        "SELECT COUNT(*) FROM conversation_messages"
+        " WHERE idempotency_key = 'unsafe-takeover';"
+    ).fetchone()[0] == 0
 
 
 async def test_blocked_recovery_does_not_mutate_queued_task(

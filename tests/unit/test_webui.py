@@ -112,6 +112,9 @@ def test_tasks_and_detail(client):
     assert detail["plan_step"] is None
     assert detail["plan_steps"] == []
     planned = client.get("/api/tasks/T-2").json()
+    assert planned["collaboration"]["controller"] == "hermes"
+    assert planned["collaboration"]["phase"] == "planning"
+    assert planned["collaboration"]["context_revision"] == 1
     assert planned["plan_step"]["step_key"] == "research"
     assert planned["plan_step"]["profile_id"] == "AP-CODEX-BACKEND"
     assert planned["plan_steps"][0]["task_status"] == "queued"
@@ -165,6 +168,8 @@ def test_index_page(client):
     assert "agentHub" in r.text
     assert "AGENT 交互" in r.text
     assert "用户介入" in r.text
+    assert "接管子 Agent" in r.text
+    assert "归还 Hermes 并重新规划" in r.text
 
 
 def test_intervention_api(client, monkeypatch):

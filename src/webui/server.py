@@ -336,11 +336,20 @@ def create_app() -> FastAPI:
                 " WHERE collaboration_id = ? ORDER BY sequence;",
                 (row["collaboration_id"],))) if row["collaboration_id"]
                 else [])
+            collaboration_row = (conn.execute(
+                "SELECT id, phase, controller, context_revision, updated_at"
+                " FROM collaborations WHERE id = ?;",
+                (row["collaboration_id"],),
+            ).fetchone() if row["collaboration_id"] else None)
+            collaboration = ({key: collaboration_row[key]
+                              for key in collaboration_row.keys()}
+                             if collaboration_row else None)
             return {"task": {k: row[k] for k in keys}, "runs": runs,
                     "artifacts": artifacts, "events": events,
                     "interactions": interactions, "sessions": sessions,
                     "messages": messages, "plan_step": plan_step,
-                    "plan_steps": plan_steps}
+                    "plan_steps": plan_steps,
+                    "collaboration": collaboration}
         finally:
             conn.close()
 

@@ -264,12 +264,20 @@ def record_user_intervention(conn, *, collaboration_id: str,
             raise KeyError(f"collaboration not found: {collaboration_id}")
         revision = rev_row[0]
         seq = _next_message_sequence(conn, conversation_id)
+        recipient_is_hermes = intervention_mode in {
+            InterventionMode.COMMENT,
+            InterventionMode.TAKEOVER,
+            InterventionMode.RETURN_TO_HERMES,
+        }
         _insert_message(
             conn, conversation_id=conversation_id,
             collaboration_id=collaboration_id, task_id=task_id,
             agent_id=agent_id, sender_type="user", sender_id=user_id,
-            recipient_type="session" if agent_id else "hermes",
-            recipient_id=agent_id or "hermes", content=content,
+            recipient_type=("hermes" if recipient_is_hermes or not agent_id
+                            else "session"),
+            recipient_id=("hermes" if recipient_is_hermes or not agent_id
+                          else agent_id),
+            content=content,
             sequence=seq, message_id=message_id,
             message_type=f"user.{intervention_mode.value}",
             based_on_revision=revision,

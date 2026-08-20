@@ -662,8 +662,12 @@ async function openDetail(id) {
   $("#d-badge").innerHTML = badge(d.task.status);
 
   const t = d.task;
+  const collaboration = d.collaboration || {};
   const kv = [
     ["目标", t.objective], ["执行体", t.assigned_to || "-"],
+    ["控制权", collaboration.controller || "-"],
+    ["协作阶段", collaboration.phase || "-"],
+    ["上下文 revision", collaboration.context_revision || "-"],
     ["创建", t.created_at], ["更新", t.updated_at],
   ].map(([k, v]) =>
     `<div class="row"><span class="k">${k}</span><span class="v">${esc(v)}</span></div>`
@@ -727,6 +731,10 @@ async function openDetail(id) {
     `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">` +
     `<button class="btn" data-intervene="comment">备注给 Hermes</button>` +
     (sessionCaps.steer ? `<button class="btn" data-intervene="steer">实时纠正 Agent</button>` : "") +
+    (collaboration.controller !== "user" && sessionCaps.interrupt
+      ? `<button class="btn x" data-intervene="takeover">接管子 Agent</button>` : "") +
+    (collaboration.controller === "user"
+      ? `<button class="btn" data-intervene="return_to_hermes">归还 Hermes 并重新规划</button>` : "") +
     (sessionCaps.interrupt ? `<button class="btn x" data-intervene="interrupt">中断当前 turn</button>` : "") +
     (sessionCaps.cancel ? `<button class="btn x" data-intervene="cancel">取消任务</button>` : "") +
     `</div></div>` : "";
@@ -863,11 +871,16 @@ async function respondInteraction(id, response, btn) {
 async function interveneTask(taskId, agentId, mode, btn) {
   const input = $("#d-intervention-text");
   const text = (input?.value || "").trim();
-  if (["steer", "comment"].includes(mode) && !text) {
+  if (["steer", "comment", "takeover", "return_to_hermes"].includes(mode) && !text) {
     alert("请先输入介入内容"); return;
   }
-  if (["interrupt", "cancel"].includes(mode) &&
-      !confirm(mode === "cancel" ? "确认取消整个任务？" : "确认中断当前 turn？")) return;
+  const confirmations = {
+    interrupt: "确认中断当前 turn？",
+    cancel: "确认取消整个任务？",
+    takeover: "确认中断当前 turn 并由用户接管？",
+    return_to_hermes: "确认把控制权归还 Hermes，并基于最新 revision 重新规划？",
+  };
+  if (confirmations[mode] && !confirm(confirmations[mode])) return;
   if (btn) btn.disabled = true;
   const r = await fetchJson(`/api/tasks/${encodeURIComponent(taskId)}/interventions`, {
     method: "POST", headers: {"Content-Type": "application/json"},

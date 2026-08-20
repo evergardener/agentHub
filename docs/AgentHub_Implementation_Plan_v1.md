@@ -200,8 +200,11 @@ revision 写许可失效。
 9. [x] 为 Codex/Kimi 工具事件建立标准 PendingInteraction/ActionIntent 翻译，
     修改操作执行前必须经过控制面签名回执；
 10. [x] 将用户 comment/steer/pause/interrupt/cancel/takeover 语义接入
-    TaskManager；当前 WebUI 开放 comment/steer/interrupt/cancel，takeover 与
-    return_to_hermes 已有持久控制面语义，待专用 UI；
+    TaskManager；WebUI 已开放专用 takeover/return_to_hermes：接管先提升 revision
+    并中断原生 turn，控制权保持 user；归还后控制权回 Hermes、进入 needs_replan，
+    Hermes 从持久消息读取用户指令，不恢复旧 revision；重复请求不会重复中断，
+    无 interrupt 能力或未接管就归还均 fail-closed；本批全量 unit+contract 为
+    322 passed；
 11. [x] 将 agent session/message/action/tool/artifact 事件统一接入可断线补发的实时 SSE；
 12. [ ] 在授权环境执行 Codex/Kimi 真实双轮 resume、进程重启和 Adapter 重启测试；
 13. [ ] State Writer 已把 event 去重记录、Task transition、run/artifact 写入合并为

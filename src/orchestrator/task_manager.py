@@ -410,6 +410,32 @@ class TaskManager:
                         "context_revision": existing["based_on_revision"],
                         "duplicate": True,
                     }
+        collaboration = collaboration_store.get_collaboration(
+            self.conn, task["collaboration_id"])
+        if collaboration is None:
+            raise KeyError(
+                f"collaboration not found: {task['collaboration_id']}")
+        text = (content.get("text") if isinstance(content, dict)
+                else content)
+        if mode in {"takeover", "return_to_hermes"} and (
+                not isinstance(text, str) or not text.strip()):
+            raise ValueError(f"{mode} content must contain non-empty text")
+        if (mode == "return_to_hermes"
+                and collaboration["controller"] != "user"):
+            raise ValueError("collaboration is not under user control")
+        if mode == "takeover":
+            capabilities = json.loads(binding["capabilities_json"] or "{}")
+            if capabilities.get("interrupt") is not True:
+                raise ValueError(
+                    f"agent {agent_id} cannot be safely interrupted for takeover")
+            if endpoint is None:
+                agent = self.conn.execute(
+                    "SELECT endpoint FROM agents WHERE id = ?;",
+                    (agent_id,),
+                ).fetchone()
+                endpoint = agent["endpoint"] if agent is not None else None
+            if not endpoint:
+                raise RuntimeError(f"agent endpoint unavailable: {agent_id}")
         message = existing or collaboration_store.record_user_intervention(
             self.conn, collaboration_id=task["collaboration_id"],
             user_id=user_id, mode=mode, content=content,
@@ -473,7 +499,19 @@ class TaskManager:
             collaboration_store.set_phase(
                 self.conn, task["collaboration_id"],
                 CollaborationPhase.NEEDS_REPLAN, controller="hermes")
-        elif mode not in {"comment", "takeover"}:
+        elif mode == "takeover":
+            result = await self.control_agent_session(
+                task_id, agent_id=agent_id, endpoint=endpoint,
+                operation="interrupt", requested_by="user")
+            collaboration_store.advance_agent_session(
+                self.conn, binding["id"], message_seq=message["sequence"],
+                context_revision=revision)
+            # Native interruption pauses the binding. Keep collaboration phase
+            # explicit: user owns a revised context until it is returned.
+            collaboration_store.set_phase(
+                self.conn, task["collaboration_id"],
+                CollaborationPhase.NEEDS_REPLAN, controller="user")
+        elif mode != "comment":
             raise ValueError(f"unsupported intervention mode: {mode}")
         self.conn.execute(
             "UPDATE conversation_messages SET delivery_status = 'delivered'"
