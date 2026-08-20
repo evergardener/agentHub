@@ -145,7 +145,7 @@ async def test_dsh_uses_same_native_session_for_multiple_turns(
             "S-dsh", SessionMessage("M-2", "user", "second"))
         assert first.state == second.state == "completed"
         assert fixture.methods.count("session.create") == 1
-        assert fixture.methods.count("session.prompt") == 3
+        assert fixture.methods.count("session.prompt") == 2
         assert fixture.prompts == ["first", "second"]
         assert adapter.get_session("S-dsh").native_session_id == \
             fixture.session_id

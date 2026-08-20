@@ -99,7 +99,7 @@ cp .env.example .env && chmod 600 .env
 | `LAS_WEBUI_TOKENS` | WebUI 登录 token→role JSON；token 用 `openssl rand -hex 24` 生成，role 为 `viewer` / `operator` / `admin` |
 | `LAS_WEBUI_SESSION_SECRET` | WebUI 签名 session cookie 的独立 HMAC 密钥，使用 `openssl rand -hex 32`；未配置时 WebUI 拒绝启动 |
 | `LAS_ADAPTER_BIND` | worker 监听地址，默认 `127.0.0.1`；需容器回连时加宿主机 LAN IP |
-| `LAS_DSH_PERMISSION_PRESET` | 必须为 `read-only`；修改仅允许经语义 target normalization、ActionIntent 签名回执绑定原 RPC 的 `allowed-once`，不开放持久 `workspace-write` |
+| `LAS_DSH_PERMISSION_PRESET` | 兼容性校验值必须为 `read-only`，但 DSH rc.7 无已验证 preset RPC；不得把它视为原生 sandbox，修改能力在正式接口验收前保持生产禁用 |
 | `LAS_DATABASE_URL` | 留空 = compose PG；`sqlite:////path/x.db` = SQLite；外部 PG 直接填 URL |
 | `LAS_OTEL_ENDPOINT` | compose 内已指向 jaeger；置空关闭 tracing |
 
@@ -224,10 +224,11 @@ ActionIntent，再把不可伪造的 receipt 送到 DSH `/api/respond`。问题�
 此时旧的任务级 approve/reject 会明确拒绝，避免只修改数据库状态却没有回应
 原生 Runtime。
 
-2026-08-20 已使用本机现有 DSH 配置短暂启动 loopback Web，完成真实只读模型
-门禁：Adapter 固定 `read-only`，prompt 明确禁止工具调用，turn 最终 completed，
-原生 session ID 可追溯并生成 2 个有界产物；随后已停止临时 Web 进程。该结果
-不覆盖 approval 拒绝/允许、双轮恢复或 Adapter 服务进程重启。
+2026-08-20 真实门禁证实 DSH rc.7 会把 `/permission read-only` 当普通模型
+prompt；该做法既不能强制权限又会与首轮竞态，现已从 Adapter 删除。随后使用
+随机端口同时重启 DSH Web 与 HTTP Adapter，以同一 native session 完成第二轮
+marker 恢复（1 passed）。这只验证无工具 prompt 的双轮/双进程恢复；在 DSH
+官方 permission API 或可审计专用 preset 完成实测前，修改能力不得生产启用。
 
 Kimi Adapter 使用 `kimi acp`，ACP 的 `session/request_permission` 走相同
 `blocked -> ActionIntent -> signed receipt -> native response` 链。允许仅选择
@@ -478,13 +479,18 @@ LAS_RUN_PG_FAULTS=1 \
 LAS_RUN_DSH_RESTART=1 \
   .venv/bin/python -m pytest -q \
   tests/integration/test_dsh_restart_fault.py
+LAS_RUN_DSH_SERVICE_RESTART=1 \
+  .venv/bin/python -m pytest -q \
+  tests/integration/test_dsh_service_restart_llm.py
 ```
 
 前者包含 gateway 进程重启后的 A2A 幂等重放，后者包含 durable consumer 与 NATS
 持久存储重启、重复 event_id 去重。PostgreSQL 用例创建随机 Compose project、
 临时端口和卷，验证停库 NAK 与恢复后单次落库；DSH 用例使用随机端口和临时
 `DSH_HOME`，只调用 session.create/list/history，验证 DSH 进程重启和 Adapter
-实例重建，不调用模型且不改用户 `~/.dsh`。这些测试必须在允许监听 loopback
+实例重建，不调用模型且不改用户 `~/.dsh`。最后一项使用现有 DSH 配置调用模型，
+同时重启随机端口 DSH Web 与 HTTP Adapter，并会新增可追溯测试 session。所有
+这些测试必须在允许监听 loopback
 端口、启动隔离进程/容器的环境运行；不要改写测试使用临时资源的设计，也不要
 把它们指向默认栈端口、用户 DSH_HOME 或生产数据目录。
 

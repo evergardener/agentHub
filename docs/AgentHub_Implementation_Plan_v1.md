@@ -186,9 +186,11 @@ revision 写许可失效。
    生产接入改用 DSH Web 原生 session API；
 2. [x] 增加 DSH Agent Card、持久 Session Adapter、8203 独立 A2A 服务、
    gateway 路由/ACL、心跳注册和启动脚本；
-3. [x] 增加 DSH Template 与默认只读 Reviewer Profile；仅首次心跳自动绑定，
-   已有人工/Profile WebUI 配置不被覆盖；新原生 session 同步执行 DSH
-   `read-only` permission preset，ActionIntent 回执桥完成前拒绝所有更宽 preset；
+3. [ ] 增加 DSH Template 与默认只读 Reviewer Profile；仅首次心跳自动绑定，
+   已有人工/Profile WebUI 配置不被覆盖。2026-08-20 真实门禁证实 rc.7 会把
+   `/permission read-only` 当普通模型 prompt，既不强制权限又与首轮竞态；该
+   prompt 已删除。待 DSH 官方 permission API 或可审计专用 preset 接入并实测前，
+   控制面 read_only Profile 不能被表述为原生 sandbox，DSH 修改能力不得生产放行；
 4. [x] 支持同一 DSH 原生 session 多轮消息、Adapter 重启恢复、历史/工具事件
    Artifact、interrupt/cancel，并把原生审批挂起映射为 `input-required`；
 5. [x] DSH unit+contract 离线测试通过；全量 unit+contract 为 209 passed；
@@ -260,9 +262,10 @@ revision 写许可失效。
     读、测试、文件修改/删除及 Git 操作生成规范化 operation，并把所有目标
     解析为任务工作区内绝对路径；未知、越界、含变量/重定向或已脱敏命令只可
     拒绝。State Writer 在控制面独立重算语义，不信任 Adapter 声明的 operation；
-    实时事件、history JSON 与 assistant Artifact 均有界脱敏；原生层
-    继续固定 `read-only`，修改只使用绑定原 RPC 的 `allowed-once`，不开放持久
-    `workspace-write`；本批全量 unit+contract 为 320 passed；
+    实时事件、history JSON 与 assistant Artifact 均有界脱敏；修改 approval
+    只使用绑定原 RPC 的 `allowed-once`，不开放持久授权。rc.7 原生 read-only
+    preset 尚未验证，因此 DSH 修改能力继续作为生产阻塞；本批全量 unit+contract
+    为 320 passed；
 12. [ ] SSE 断线退避重连、Adapter 恢复后从 history 重建 pending view、控制面
     `/api/respond` 失败后重试，以及“DSH 已接收但响应丢失”按 approval/outcome
     对账且不二次发送，均已有离线故障测试；Adapter/DSH 双端真实进程重启仍待
@@ -270,10 +273,11 @@ revision 写许可失效。
     使用随机端口和临时 `DSH_HOME` 验证原生 session 经 DSH 真实进程重启和
     Adapter 实例重建后仍可 list/history/resume，不触碰用户 `~/.dsh`；该隔离
     门禁已于 2026-08-20 在本机真实执行通过（1 passed），真实 Adapter 服务
-    进程重启仍待授权环境执行。2026-08-20 另以本机现有 DSH 配置短暂启动
-    loopback Web，完成一次固定 `read-only`、明确禁止工具调用的真实模型 turn：
-    状态 completed、原生 session ID 存在并生成 2 个有界产物；approval 拒绝/
-    允许矩阵、双轮及 Adapter 服务进程重启仍待执行；本批全量 unit+contract
+    进程重启仍待授权环境执行。2026-08-20 真实模型检查发现并移除伪 permission
+    prompt 后，`LAS_RUN_DSH_SERVICE_RESTART=1` 已在随机端口同时重启 DSH Web
+    与 HTTP Adapter，并以同一 native session 完成第二轮 marker 恢复（1 passed）。
+    该结果覆盖无工具只读 prompt 的双轮/双进程恢复，不证明原生 read-only sandbox；
+    approval 拒绝/允许矩阵与官方 permission 接口仍待完成；本批全量 unit+contract
     为 323 passed；
 13. [x] 完成 Codex/Kimi ToolCall/ActionIntent 拦截与用户介入实时 UI，
     再进入生产安全评审。

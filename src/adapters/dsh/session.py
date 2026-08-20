@@ -472,12 +472,12 @@ class DshWebSessionAdapter(SessionAdapter):
                 raise DshApiError(
                     "DSH permission preset must remain read-only; modifying "
                     "calls require one ActionIntent-bound allowed-once response")
-            await self._request("session.prompt", {
-                "sessionId": native,
-                "mode": "queue",
-                "content": [{
-                    "type": "text", "text": f"/permission {permission}"}],
-            })
+            # DSH 0.1.0-rc.7 does not expose a verified permission-preset RPC.
+            # Sending `/permission read-only` through session.prompt treats it
+            # as model input, races the first user turn, and is not an
+            # enforcement boundary. Keep the configured value fail-closed for
+            # compatibility, but rely only on native approval interception
+            # until DSH publishes a real preset API.
         handle = SessionHandle(
             session_id=session_id,
             task_id=task.id,
