@@ -185,7 +185,8 @@ Workspace/Git 保存实际文件产物；数据库保存路径、哈希、版本
 - legacy `message/send` 只做迁移兼容，不扩展新能力；
 - 新能力基于稳定 A2A task/context/message 语义；
 - 现有 Codex/Kimi Adapter 逐个迁移到统一 Session Adapter 接口；
-- DSH 作为第一个新 Adapter 验证插件化边界。DSH `headless` 仅用于一次性
+- DSH 作为第一个新 Adapter 验证插件化边界（当前核验版本 0.1.0-rc.7）。
+  DSH `headless` 仅用于一次性
   新会话；生产 Session Adapter 使用回环 DSH Web API，以原生 session id
   实现多轮、历史读取、恢复、事件追踪和取消；新建 Hub session 默认在
   DSH 原生层固定 `read-only`，避免仅有控制面 Profile 而执行层仍可写；命令

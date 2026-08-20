@@ -179,7 +179,7 @@ revision 写许可失效。
 
 ## 当前迭代（Iteration 5）
 
-1. [x] 核验本机 DSH 0.1.0-rc.6：`headless` 是不可恢复的一次性新会话，
+1. [x] 核验本机 DSH 0.1.0-rc.7（最初接入为 rc.6）：`headless` 是不可恢复的一次性新会话，
    生产接入改用 DSH Web 原生 session API；
 2. [x] 增加 DSH Agent Card、持久 Session Adapter、8203 独立 A2A 服务、
    gateway 路由/ACL、心跳注册和启动脚本；
@@ -253,7 +253,10 @@ revision 写许可失效。
 12. [ ] SSE 断线退避重连、Adapter 恢复后从 history 重建 pending view、控制面
     `/api/respond` 失败后重试，以及“DSH 已接收但响应丢失”按 approval/outcome
     对账且不二次发送，均已有离线故障测试；Adapter/DSH 双端真实进程重启仍待
-    授权环境故障注入；本批全量 unit+contract 为 323 passed；
+    授权环境故障注入；已增加 `LAS_RUN_DSH_RESTART=1` 门控的无模型真实测试，
+    使用随机端口和临时 `DSH_HOME` 验证原生 session 经 DSH 真实进程重启和
+    Adapter 实例重建后仍可 list/history/resume，不触碰用户 `~/.dsh`；真实
+    Adapter 服务进程重启仍待授权环境执行；本批全量 unit+contract 为 323 passed；
 13. [x] 完成 Codex/Kimi ToolCall/ActionIntent 拦截与用户介入实时 UI，
     再进入生产安全评审。
 
