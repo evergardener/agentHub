@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import json
 
-from common.preflight import check_production_env, exit_code, parse_env, render
+from common.preflight import (
+    check_agent_catalog,
+    check_production_env,
+    exit_code,
+    parse_env,
+    render,
+)
 
 
 def _secure_env() -> str:
@@ -163,3 +169,22 @@ def test_dsh_peer_route_is_blocked_until_native_enforcement(tmp_path):
     env_file.chmod(0o600)
     findings = check_production_env(env_file)
     assert {item.key for item in findings} == {"LAS_DSH_PRODUCTION_ENABLED"}
+
+
+def test_agent_catalog_requires_dsh_static_route_disabled(tmp_path):
+    agents_file = tmp_path / "agents.yaml"
+    agents_file.write_text(
+        "agents:\n  dsh:\n    enabled: true\n    endpoint: http://dsh:8203\n",
+        encoding="utf-8")
+    findings = check_agent_catalog(agents_file)
+    assert [item.key for item in findings] == [
+        "config/agents.yaml:dsh.enabled"]
+
+
+def test_production_env_audits_selected_agent_catalog(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(_secure_env(), encoding="utf-8")
+    env_file.chmod(0o600)
+    missing = tmp_path / "missing-agents.yaml"
+    findings = check_production_env(env_file, agents_path=missing)
+    assert [item.key for item in findings] == ["config/agents.yaml"]

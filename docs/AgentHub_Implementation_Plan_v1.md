@@ -89,7 +89,8 @@ revision 写许可失效。
 - [x] 外部 Hermes A2A 入口生产强制认证、弱 token/非 loopback 无认证启动
   失败，并使用常量时间凭据比对；
 - [x] 生产配置预检覆盖 `.env` 权限、默认/弱密钥、WebUI roles 和 A2A peer
-  映射，检查输出不泄露 secret value；
+  映射，并审计实际 Agent catalog 中 DSH 静态路由必须 disabled；检查输出不泄露
+  secret value；
 - [ ] gateway：loopback 剖面已完成 strict API key、路由 ACL、独立 token-bucket
   限流；跨主机 TLS 1.3/mTLS + strict JWT/CEL 剖面、Hermes JWT 文件轮换与
   mTLS 客户端、独立 Compose 和 fail-closed 预检已实现；2026-08-20 使用临时 CA、
@@ -350,7 +351,7 @@ revision 写许可失效。
 
 ## 2026-08-20 当前发布基线与外部阻塞项
 
-- 当前源码全量 unit+contract：333 passed；默认 integration：10 passed、
+- 当前源码全量 unit+contract：335 passed；默认 integration：10 passed、
   28 skipped。默认跳过项均维持显式门控；gateway、远程安全剖面、NATS、
   PostgreSQL、DSH 无模型重启、HTTPS 告警及备份恢复等已执行的隔离门禁结果，
   以各节记录为准；

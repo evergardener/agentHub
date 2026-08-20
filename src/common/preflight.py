@@ -9,6 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+import yaml
+
+
+DEFAULT_AGENTS_FILE = (
+    Path(__file__).resolve().parents[2] / "config" / "agents.yaml"
+)
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -72,10 +79,31 @@ def _is_loopback(hostname: str | None) -> bool:
         return False
 
 
-def check_production_env(path: Path) -> list[Finding]:
+def check_agent_catalog(path: Path = DEFAULT_AGENTS_FILE) -> list[Finding]:
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        return [Finding(
+            "error", "config/agents.yaml",
+            f"文件不存在、不可读或 YAML 非法：{type(exc).__name__}")]
+    agents = data.get("agents")
+    if not isinstance(agents, dict):
+        return [Finding(
+            "error", "config/agents.yaml", "必须包含 agents 映射")]
+    dsh = agents.get("dsh")
+    if not isinstance(dsh, dict) or dsh.get("enabled") is not False:
+        return [Finding(
+            "error", "config/agents.yaml:dsh.enabled",
+            "当前构建必须显式为 false，禁止静态 DSH 生产路由")]
+    return []
+
+
+def check_production_env(
+    path: Path, *, agents_path: Path = DEFAULT_AGENTS_FILE
+) -> list[Finding]:
     if not path.is_file():
         return [Finding("error", ".env", "文件不存在；先复制 .env.example")]
-    findings: list[Finding] = []
+    findings: list[Finding] = check_agent_catalog(agents_path)
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode & (stat.S_IRWXG | stat.S_IRWXO):
         findings.append(Finding(

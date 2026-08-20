@@ -19,8 +19,14 @@ def main() -> int:
                         default=ROOT / ".env")
     parser.add_argument("--strict", action="store_true",
                         help="treat warnings as failures")
+    parser.add_argument(
+        "--agents-file", type=Path,
+        default=ROOT / "config" / "agents.yaml",
+        help="Agent catalog to audit for production routing safety",
+    )
     args = parser.parse_args()
-    findings = check_production_env(args.env_file)
+    findings = check_production_env(
+        args.env_file, agents_path=args.agents_file)
     print(render(findings))
     return exit_code(findings, strict=args.strict)
 

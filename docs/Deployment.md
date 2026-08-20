@@ -114,6 +114,10 @@ python3 scripts/production-preflight.py .env
 python3 scripts/production-preflight.py --strict .env
 ```
 
+预检同时读取镜像/仓库的 `config/agents.yaml`，要求当前 DSH 静态种子保持
+`enabled: false`；使用外置 catalog 时通过 `--agents-file` 指定实际部署文件，
+不得只检查仓库样例。
+
 只有显示 `PASS`（或明确接受非 strict 的 loopback cookie / WebUI-only 告警
 warning）后再启动；正式生产建议使用 `--strict` 并配置 HTTPS webhook。
 
