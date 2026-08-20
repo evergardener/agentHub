@@ -1,0 +1,107 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+# 跨主机 agentgateway 剖面。与 loopback API-key 剖面分离，禁止混用。
+#
+# 信任边界：
+# - TLS 1.3 + client CA 强制校验调用方证书（mTLS）；
+# - strict JWT 固定 issuer/audience/JWKS；
+# - 路由 ACL 同时要求 orchestrator role 与 agents claim；
+# - 证书、JWKS 和后端地址只经部署环境注入，不写入仓库。
+
+gateways:
+  remote:
+    port: 8443
+    protocol: HTTPS
+    tls:
+      cert: "$GATEWAY_TLS_CERT_FILE"
+      key: "$GATEWAY_TLS_KEY_FILE"
+      root: "$GATEWAY_CLIENT_CA_FILE"
+      minTLSVersion: TLS_V1_3
+      maxTLSVersion: TLS_V1_3
+    jwtAuth:
+      mode: strict
+      issuer: "$GATEWAY_JWT_ISSUER"
+      audiences:
+      - "$GATEWAY_JWT_AUDIENCE"
+      jwks:
+        file: "$GATEWAY_JWKS_FILE"
+      jwtValidationOptions:
+        requiredClaims: [exp, nbf, aud, iss, sub]
+
+routes:
+- name: agent-codex
+  gateways: [remote]
+  matches:
+  - path:
+      pathPrefix: /agents/codex
+  policies:
+    urlRewrite:
+      path:
+        prefix: /
+    authorization:
+      rules:
+      - require: 'jwt.role == "orchestrator" && jwt.agents.split(",").exists(a, a == "codex")'
+    localRateLimit:
+    - maxTokens: 30
+      tokensPerFill: 30
+      fillInterval: 60s
+      type: requests
+    timeout:
+      requestTimeout: 900s
+    retry:
+      attempts: 2
+      backoff: 500ms
+      codes: [502, 503]
+  backends:
+  - host: "$AGENT_CODEX_BACKEND"
+
+- name: agent-kimi
+  gateways: [remote]
+  matches:
+  - path:
+      pathPrefix: /agents/kimi
+  policies:
+    urlRewrite:
+      path:
+        prefix: /
+    authorization:
+      rules:
+      - require: 'jwt.role == "orchestrator" && jwt.agents.split(",").exists(a, a == "kimi")'
+    localRateLimit:
+    - maxTokens: 30
+      tokensPerFill: 30
+      fillInterval: 60s
+      type: requests
+    timeout:
+      requestTimeout: 300s
+    retry:
+      attempts: 2
+      backoff: 500ms
+      codes: [502, 503]
+  backends:
+  - host: "$AGENT_KIMI_BACKEND"
+
+- name: agent-dsh
+  gateways: [remote]
+  matches:
+  - path:
+      pathPrefix: /agents/dsh
+  policies:
+    urlRewrite:
+      path:
+        prefix: /
+    authorization:
+      rules:
+      - require: 'jwt.role == "orchestrator" && jwt.agents.split(",").exists(a, a == "dsh")'
+    localRateLimit:
+    - maxTokens: 30
+      tokensPerFill: 30
+      fillInterval: 60s
+      type: requests
+    timeout:
+      requestTimeout: 900s
+    retry:
+      attempts: 2
+      backoff: 500ms
+      codes: [502, 503]
+  backends:
+  - host: "$AGENT_DSH_BACKEND"

@@ -91,7 +91,9 @@ revision 写许可失效。
 - [x] 生产配置预检覆盖 `.env` 权限、默认/弱密钥、WebUI roles 和 A2A peer
   映射，检查输出不泄露 secret value；
 - [ ] gateway：loopback 剖面已完成 strict API key、路由 ACL、独立 token-bucket
-  限流；跨主机 HTTPS/mTLS + strict JWT 剖面待实施；
+  限流；跨主机 TLS 1.3/mTLS + strict JWT/CEL 剖面、Hermes JWT 文件轮换与
+  mTLS 客户端、独立 Compose 和 fail-closed 预检已实现并通过本机 schema/单测；
+  待真实 CA/OIDC 与第二主机完成 401/403/轮换/委派演练后勾选；
 - [ ] 供应链实现已完成：外部镜像 tag + OCI digest、GitHub Actions commit SHA、
   agentgateway 二进制 SHA256 固定；发布生成 SBOM/provenance，经 Trivy 门禁后以
   Cosign OIDC 签名。待首次远端 workflow 成功并验证签名/attestation 后勾选；

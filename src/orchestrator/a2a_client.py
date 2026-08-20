@@ -3,13 +3,16 @@
 Phase 1 范围：Agent Card 获取、message/send、tasks/get。
 Phase 5：支持经 agentgateway 访问（§3.4）——
   for_agent() 按 LAS_GATEWAY_URL（别名 AGENT_GATEWAY_URL）决定直连还是走
-  gateway；走 gateway 时自动拼 /agents/<name> 前缀并注入 Bearer key
-  （LAS_GATEWAY_API_KEY，common.config 统一读取）。
+  gateway；走 gateway 时自动拼 /agents/<name> 前缀并注入 Bearer credential。
+  loopback 使用 LAS_GATEWAY_API_KEY；跨主机剖面从 LAS_GATEWAY_JWT_FILE
+  读取可轮换 JWT，并可配置 CA + client cert/key 完成 mTLS。
 """
 
 from __future__ import annotations
 
+import ssl
 import uuid
+from collections.abc import Callable
 
 import httpx
 
@@ -20,16 +23,38 @@ class A2aError(RuntimeError):
     pass
 
 
-def _gateway_key() -> str:
-    return cfg.gateway_api_key()
+def _gateway_token() -> str:
+    return cfg.gateway_bearer_token()
+
+
+def _gateway_ssl_context(gateway_url: str) -> ssl.SSLContext | None:
+    ca = cfg.gateway_ca_file()
+    cert = cfg.gateway_client_cert_file()
+    key = cfg.gateway_client_key_file()
+    configured = any((ca, cert, key))
+    if not gateway_url.lower().startswith("https://"):
+        if configured:
+            raise ValueError("gateway TLS 文件只能与 https:// URL 一起使用")
+        return None
+    if bool(cert) != bool(key):
+        raise ValueError("mTLS 必须同时配置 client cert 与 client key")
+    context = ssl.create_default_context(cafile=str(ca) if ca else None)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    if cert and key:
+        context.load_cert_chain(certfile=str(cert), keyfile=str(key))
+    return context
 
 
 class A2aClient:
     def __init__(self, base_url: str, timeout: float = 30.0,
-                 auth_token: str | None = None):
+                 auth_token: str | None = None,
+                 ssl_context: ssl.SSLContext | None = None,
+                 auth_token_provider: Callable[[], str] | None = None):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.auth_token = auth_token
+        self.ssl_context = ssl_context
+        self.auth_token_provider = auth_token_provider
 
     @classmethod
     def for_agent(cls, agent_name: str, direct_endpoint: str,
@@ -37,17 +62,35 @@ class A2aClient:
         """按环境决定直连 adapter 还是经 agentgateway（Phase 5）。
 
         LAS_GATEWAY_URL 非空（如 http://127.0.0.1:8300）时：
-        Hermes → gateway/agents/<name>，带 Bearer key；
+        Hermes → gateway/agents/<name>，带 Bearer API key 或 JWT；
         否则保持 Phase 1-4 行为：直连 direct_endpoint。
         """
         gw = cfg.gateway_url()
         if not gw:
             return cls(direct_endpoint, timeout=timeout)
-        return cls(f"{gw.rstrip('/')}/agents/{agent_name}",
-                   timeout=timeout, auth_token=_gateway_key())
+        jwt_file = cfg.gateway_jwt_file()
+        token = _gateway_token()
+        return cls(
+            f"{gw.rstrip('/')}/agents/{agent_name}",
+            timeout=timeout,
+            auth_token=None if jwt_file else token,
+            ssl_context=_gateway_ssl_context(gw),
+            auth_token_provider=_gateway_token if jwt_file else None,
+        )
+
+    def _http_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            timeout=self.timeout,
+            verify=self.ssl_context if self.ssl_context is not None else True,
+        )
 
     def _headers(self) -> dict[str, str]:
-        h = {"Authorization": f"Bearer {self.auth_token}"} if self.auth_token else {}
+        auth_token = (
+            self.auth_token_provider()
+            if self.auth_token_provider is not None
+            else self.auth_token
+        )
+        h = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
         # adapter 侧鉴权（v3 加固）：与 gateway 的 Bearer 互不冲突；
         # 走 gateway 时该头被透传到后端 adapter。
         tok = cfg.adapter_token()
@@ -56,14 +99,14 @@ class A2aClient:
         return h
 
     async def get_agent_card(self) -> dict:
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with self._http_client() as client:
             r = await client.get(f"{self.base_url}/.well-known/agent-card.json",
                                  headers=self._headers())
             r.raise_for_status()
             return r.json()
 
     async def health(self) -> dict:
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with self._http_client() as client:
             r = await client.get(f"{self.base_url}/health",
                                  headers=self._headers())
             r.raise_for_status()
@@ -210,7 +253,7 @@ class A2aClient:
         raise TimeoutError(f"send_and_wait {task['id']} exceeded {timeout}s")
 
     async def _rpc(self, payload: dict) -> dict:
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with self._http_client() as client:
             r = await client.post(f"{self.base_url}/a2a", json=payload,
                                   headers=self._headers())
             r.raise_for_status()

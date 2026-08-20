@@ -114,6 +114,10 @@ python3 scripts/production-preflight.py --strict .env
 只有显示 `PASS`（或明确接受非 strict 的 loopback cookie / WebUI-only 告警
 warning）后再启动；正式生产建议使用 `--strict` 并配置 HTTPS webhook。
 
+上表是默认同机 loopback 剖面。跨主机 gateway 不使用长期 API key，改为 TLS
+1.3/mTLS + strict JWT，并由 `LAS_GATEWAY_JWT_FILE`、CA、client cert/key 文件
+供 Hermes 使用；服务端独立 Compose 与轮换流程见 `docs/agentgateway.md`。
+
 ### 3.3 启动控制面
 
 ```bash
@@ -419,6 +423,8 @@ safety backup 与旧 Workspace 可读取，最后确认随机项目的容器、�
 - gateway `apiKey.agents` ACL 控制 hermes 可访问的 agent 列表
 - gateway 每条 Agent 路由有独立本地 token bucket（30 次突发、每分钟补充
   30 次）；超过额度返回 429，避免失控协作循环持续放大调用
+- 跨主机 gateway 使用独立 TLS 1.3/mTLS + strict JWT 剖面；生产预检拒绝
+  非 loopback HTTP、缺失身份材料或权限过宽的 JWT/client key
 - WebUI 使用高熵 token、签名 HttpOnly Cookie、CSRF 与 `viewer/operator/admin`
   RBAC；跨主机只允许经带登录限流的 HTTPS 反向代理访问
 - Orchestrator A2A 入口在 compose 中强制认证；认证全空、生产 token 少于

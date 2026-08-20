@@ -10,6 +10,10 @@
   LAS_DATABASE_URL      （无别名）              postgresql://… 或 sqlite:///…
   LAS_GATEWAY_URL       → AGENT_GATEWAY_URL    agentgateway 地址（空=直连）
   LAS_GATEWAY_API_KEY   → GATEWAY_API_KEY      gateway Bearer key
+  LAS_GATEWAY_JWT_FILE  （无别名）              可轮换 gateway JWT 文件
+  LAS_GATEWAY_CA_FILE   （无别名）              gateway 服务端 CA
+  LAS_GATEWAY_CLIENT_CERT_FILE（无别名）        mTLS 客户端证书
+  LAS_GATEWAY_CLIENT_KEY_FILE（无别名）         mTLS 客户端私钥
   LAS_LLM_BASE_URL      → KIMI_API_BASE        OpenAI 兼容端点
   LAS_LLM_API_KEY       → CLIPROXY_API_KEY     端点密钥
   LAS_LLM_MODEL         → KIMI_MODEL           模型名
@@ -80,6 +84,48 @@ def gateway_url() -> str:
 
 def gateway_api_key() -> str:
     return _env("LAS_GATEWAY_API_KEY", "GATEWAY_API_KEY")
+
+
+def gateway_jwt_file() -> Path | None:
+    value = _env("LAS_GATEWAY_JWT_FILE").strip()
+    return Path(value) if value else None
+
+
+def gateway_bearer_token() -> str:
+    """Return a rotatable JWT when configured, otherwise the loopback API key.
+
+    The remote A2A client calls this before each request, so atomic replacement
+    rotates credentials without putting token material in the environment or repo.
+    """
+    path = gateway_jwt_file()
+    if path is None:
+        return gateway_api_key()
+    try:
+        if not path.is_file():
+            raise ValueError("LAS_GATEWAY_JWT_FILE 必须指向普通文件")
+        if path.stat().st_size > 16 * 1024:
+            raise ValueError("LAS_GATEWAY_JWT_FILE 超过 16 KiB")
+        token = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("无法读取 LAS_GATEWAY_JWT_FILE") from exc
+    if not token or any(char.isspace() for char in token):
+        raise ValueError("LAS_GATEWAY_JWT_FILE 必须只包含一个非空 token")
+    return token
+
+
+def gateway_ca_file() -> Path | None:
+    value = _env("LAS_GATEWAY_CA_FILE").strip()
+    return Path(value) if value else None
+
+
+def gateway_client_cert_file() -> Path | None:
+    value = _env("LAS_GATEWAY_CLIENT_CERT_FILE").strip()
+    return Path(value) if value else None
+
+
+def gateway_client_key_file() -> Path | None:
+    value = _env("LAS_GATEWAY_CLIENT_KEY_FILE").strip()
+    return Path(value) if value else None
 
 
 def adapter_token() -> str:

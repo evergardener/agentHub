@@ -73,3 +73,48 @@ def test_parser_preserves_json_and_strips_comments(tmp_path):
     values = parse_env(path)
     assert values["LAS_WEBUI_TOKENS"] == '{"token":"admin"}'
     assert values["LAS_VALUE"] == "value # retained"
+
+
+def test_remote_gateway_profile_requires_https_jwt_and_mtls_files(tmp_path):
+    jwt_file = tmp_path / "gateway.jwt"
+    ca_file = tmp_path / "ca.pem"
+    cert_file = tmp_path / "client.pem"
+    key_file = tmp_path / "client-key.pem"
+    for path, content in (
+        (jwt_file, "header.payload.signature"),
+        (ca_file, "ca"),
+        (cert_file, "cert"),
+        (key_file, "key"),
+    ):
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o600)
+
+    remote = (_secure_env()
+              .replace("LAS_GATEWAY_API_KEY=" + "g" * 48,
+                       "LAS_GATEWAY_API_KEY=")
+              + f"LAS_GATEWAY_URL=https://gateway.example.test:8443\n"
+              + f"LAS_GATEWAY_JWT_FILE={jwt_file}\n"
+              + f"LAS_GATEWAY_CA_FILE={ca_file}\n"
+              + f"LAS_GATEWAY_CLIENT_CERT_FILE={cert_file}\n"
+              + f"LAS_GATEWAY_CLIENT_KEY_FILE={key_file}\n")
+    env_file = tmp_path / ".env"
+    env_file.write_text(remote, encoding="utf-8")
+    env_file.chmod(0o600)
+    assert check_production_env(env_file) == []
+
+
+def test_remote_gateway_plaintext_and_missing_credentials_fail(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        _secure_env() + "LAS_GATEWAY_URL=http://gateway.example.test:8300\n",
+        encoding="utf-8")
+    env_file.chmod(0o600)
+    findings = check_production_env(env_file)
+    keys = {item.key for item in findings}
+    assert "LAS_GATEWAY_URL" in keys
+    assert {
+        "LAS_GATEWAY_JWT_FILE",
+        "LAS_GATEWAY_CA_FILE",
+        "LAS_GATEWAY_CLIENT_CERT_FILE",
+        "LAS_GATEWAY_CLIENT_KEY_FILE",
+    }.issubset(keys)

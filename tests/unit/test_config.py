@@ -12,6 +12,8 @@ ALL_KEYS = [
     "LAS_NATS_URL", "NATS_URL",
     "LAS_GATEWAY_URL", "AGENT_GATEWAY_URL",
     "LAS_GATEWAY_API_KEY", "GATEWAY_API_KEY",
+    "LAS_GATEWAY_JWT_FILE", "LAS_GATEWAY_CA_FILE",
+    "LAS_GATEWAY_CLIENT_CERT_FILE", "LAS_GATEWAY_CLIENT_KEY_FILE",
     "LAS_LLM_BASE_URL", "KIMI_API_BASE",
     "LAS_LLM_API_KEY", "CLIPROXY_API_KEY",
     "LAS_LLM_MODEL", "KIMI_MODEL",
@@ -48,7 +50,27 @@ def test_defaults():
     assert cfg.llm_model() == "deepseek-ai/DeepSeek-V4-Flash"
     assert cfg.nats_url() == "nats://127.0.0.1:4222"
     assert cfg.gateway_url() == ""
+    assert cfg.gateway_jwt_file() is None
     assert cfg.llm_api_key() == ""
+
+
+def test_gateway_jwt_file_takes_precedence_and_is_reread(monkeypatch, tmp_path):
+    token_file = tmp_path / "gateway.jwt"
+    token_file.write_text("first.jwt.token\n", encoding="utf-8")
+    monkeypatch.setenv("LAS_GATEWAY_JWT_FILE", str(token_file))
+    monkeypatch.setenv("LAS_GATEWAY_API_KEY", "ignored-api-key")
+    assert cfg.gateway_bearer_token() == "first.jwt.token"
+    token_file.write_text("rotated.jwt.token\n", encoding="utf-8")
+    assert cfg.gateway_bearer_token() == "rotated.jwt.token"
+
+
+@pytest.mark.parametrize("content", ["", "two tokens", "line1\nline2"])
+def test_gateway_jwt_file_rejects_invalid_content(monkeypatch, tmp_path, content):
+    token_file = tmp_path / "gateway.jwt"
+    token_file.write_text(content, encoding="utf-8")
+    monkeypatch.setenv("LAS_GATEWAY_JWT_FILE", str(token_file))
+    with pytest.raises(ValueError, match="LAS_GATEWAY_JWT_FILE"):
+        cfg.gateway_bearer_token()
 
 
 def test_state_db_derived_from_workspace(monkeypatch, tmp_path):

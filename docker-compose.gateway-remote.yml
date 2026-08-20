@@ -1,0 +1,60 @@
+# 独立跨主机 gateway 数据面；不改变默认 loopback compose 栈。
+# 使用前按 docs/agentgateway.md 的“跨主机剖面”准备 PKI、JWKS 与环境变量。
+name: agenthub-remote-gateway
+
+services:
+  agentgateway:
+    image: ${AGENTHUB_IMAGE:-agenthub:latest}
+    command: ["agentgateway", "-f", "/app/infra/agentgateway/config.remote.yaml"]
+    environment:
+      GATEWAY_TLS_CERT_FILE: /run/secrets/gateway-server-cert.pem
+      GATEWAY_TLS_KEY_FILE: /run/secrets/gateway-server-key.pem
+      GATEWAY_CLIENT_CA_FILE: /run/secrets/gateway-client-ca.pem
+      GATEWAY_JWKS_FILE: /run/secrets/gateway-jwks.json
+      GATEWAY_JWT_ISSUER: ${LAS_GATEWAY_JWT_ISSUER:?set LAS_GATEWAY_JWT_ISSUER}
+      GATEWAY_JWT_AUDIENCE: ${LAS_GATEWAY_JWT_AUDIENCE:?set LAS_GATEWAY_JWT_AUDIENCE}
+      AGENT_CODEX_BACKEND: ${LAS_CODEX_BACKEND:-host.docker.internal:8201}
+      AGENT_KIMI_BACKEND: ${LAS_KIMI_BACKEND:-host.docker.internal:8202}
+      AGENT_DSH_BACKEND: ${LAS_DSH_BACKEND:-host.docker.internal:8203}
+    volumes:
+      - type: bind
+        source: ${LAS_GATEWAY_SERVER_CERT_FILE:?set LAS_GATEWAY_SERVER_CERT_FILE}
+        target: /run/secrets/gateway-server-cert.pem
+        read_only: true
+      - type: bind
+        source: ${LAS_GATEWAY_SERVER_KEY_FILE:?set LAS_GATEWAY_SERVER_KEY_FILE}
+        target: /run/secrets/gateway-server-key.pem
+        read_only: true
+      - type: bind
+        source: ${LAS_GATEWAY_CLIENT_CA_FILE:?set LAS_GATEWAY_CLIENT_CA_FILE}
+        target: /run/secrets/gateway-client-ca.pem
+        read_only: true
+      - type: bind
+        source: ${LAS_GATEWAY_JWKS_FILE:?set LAS_GATEWAY_JWKS_FILE}
+        target: /run/secrets/gateway-jwks.json
+        read_only: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${LAS_GATEWAY_BIND_ADDRESS:-0.0.0.0}:${LAS_GATEWAY_REMOTE_PORT:-8443}:8443"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    cpus: "0.5"
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "python", "-m", "common.healthcheck", "tcp", "127.0.0.1", "8443"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped

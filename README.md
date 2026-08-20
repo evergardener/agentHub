@@ -53,6 +53,9 @@ docker compose run --rm agentctl chat   # 与 hermes 对话
   `.env` 密钥，详见部署文档。
 - 告警默认持久化到 WebUI；配置 `LAS_ALERT_WEBHOOK_URL` 后由 notifier 经
   HTTPS 投递，失败自动退避并升级，不会因外部通知不可用而丢告警。
+- gateway 默认仅供同机 loopback 使用；跨主机部署使用独立的 TLS 1.3/mTLS +
+  strict JWT 剖面 `docker-compose.gateway-remote.yml`，详见
+  [`docs/agentgateway.md`](docs/agentgateway.md)，不要直接暴露默认 8300 端口。
 
 宿主机 worker 接入容器栈：
 

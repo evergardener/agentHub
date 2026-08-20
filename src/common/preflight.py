@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import stat
 from dataclasses import dataclass
@@ -60,6 +61,17 @@ def _enabled(value: str) -> bool:
     return value.lower() in {"1", "true", "yes", "on"}
 
 
+def _is_loopback(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
 def check_production_env(path: Path) -> list[Finding]:
     if not path.is_file():
         return [Finding("error", ".env", "文件不存在；先复制 .env.example")]
@@ -83,7 +95,72 @@ def check_production_env(path: Path) -> list[Finding]:
         return value
 
     require_secret("LAS_LLM_API_KEY", 16)
-    require_secret("LAS_GATEWAY_API_KEY", 24)
+
+    gateway_url = env.get("LAS_GATEWAY_URL", "").strip()
+    gateway_api_key = env.get("LAS_GATEWAY_API_KEY", "")
+    gateway_jwt_file = env.get("LAS_GATEWAY_JWT_FILE", "").strip()
+    gateway_tls_keys = (
+        "LAS_GATEWAY_CA_FILE",
+        "LAS_GATEWAY_CLIENT_CERT_FILE",
+        "LAS_GATEWAY_CLIENT_KEY_FILE",
+    )
+
+    def require_file(key: str, *, private: bool = False) -> bool:
+        value = env.get(key, "").strip()
+        if not value:
+            findings.append(Finding("error", key, "未配置"))
+            return False
+        path_value = Path(value)
+        try:
+            if not path_value.is_file():
+                raise OSError
+            with path_value.open("rb") as stream:
+                if not stream.read(1):
+                    findings.append(Finding("error", key, "文件为空"))
+                    return False
+            if private and stat.S_IMODE(path_value.stat().st_mode) & (
+                    stat.S_IRWXG | stat.S_IRWXO):
+                findings.append(Finding(
+                    "error", key, "私密文件权限过宽；应仅 owner 可访问"))
+                return False
+        except OSError:
+            findings.append(Finding("error", key, "文件不存在或不可读"))
+            return False
+        return True
+
+    if gateway_jwt_file:
+        require_file("LAS_GATEWAY_JWT_FILE", private=True)
+        if gateway_api_key:
+            findings.append(Finding(
+                "warning", "LAS_GATEWAY_API_KEY",
+                "JWT 文件已启用；API key 将被忽略，应移除"))
+    else:
+        require_secret("LAS_GATEWAY_API_KEY", 24)
+
+    if gateway_url:
+        parsed_gateway = urlparse(gateway_url)
+        if (parsed_gateway.scheme not in {"http", "https"}
+                or not parsed_gateway.hostname
+                or parsed_gateway.username or parsed_gateway.password):
+            findings.append(Finding(
+                "error", "LAS_GATEWAY_URL",
+                "必须是无内嵌凭据的 http(s) URL"))
+        elif not _is_loopback(parsed_gateway.hostname):
+            if parsed_gateway.scheme != "https":
+                findings.append(Finding(
+                    "error", "LAS_GATEWAY_URL", "跨主机 gateway 必须使用 HTTPS"))
+            if not gateway_jwt_file:
+                findings.append(Finding(
+                    "error", "LAS_GATEWAY_JWT_FILE",
+                    "跨主机 gateway 必须使用可轮换 strict JWT"))
+            require_file("LAS_GATEWAY_CA_FILE")
+            require_file("LAS_GATEWAY_CLIENT_CERT_FILE")
+            require_file("LAS_GATEWAY_CLIENT_KEY_FILE", private=True)
+    elif gateway_jwt_file or any(env.get(key, "").strip()
+                                 for key in gateway_tls_keys):
+        findings.append(Finding(
+            "error", "LAS_GATEWAY_URL", "配置 JWT/TLS 文件时不得为空"))
+
     pg_password = require_secret("LAS_PG_PASSWORD", 16)
     if pg_password == "agenthub-dev-only":
         findings.append(Finding("error", "LAS_PG_PASSWORD", "仍在使用开发默认值"))
