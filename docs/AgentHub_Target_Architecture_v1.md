@@ -188,21 +188,18 @@ Workspace/Git 保存实际文件产物；数据库保存路径、哈希、版本
 - DSH 作为第一个新 Adapter 验证插件化边界（当前核验版本 0.1.0-rc.7）。
   DSH `headless` 仅用于一次性
   新会话；生产 Session Adapter 使用回环 DSH Web API，以原生 session id
-  实现多轮、历史读取、恢复、事件追踪和取消；DSH 0.1.0-rc.7 尚未发现可验证的
-  permission-preset RPC，禁止把 `/permission read-only` 作为聊天 prompt 伪装成
-  原生安全边界。正式部署前必须取得并验证 DSH 官方 permission API 或专用 preset；
-  在此之前 Adapter 默认拒绝所有模型 prompt/steer，Agent Card 与 health 明示
-  `nativePermissionEnforcement=false`，readiness 返回不可用且不发布在线心跳，
-  生产预检阻断 DSH 启用和 peer 路由。显式
-  开发豁免只能用于隔离测试，不能作为安全证明；生产模式还在 Adapter 构造阶段
-  拒绝该豁免，不能靠跳过预检绕过。原生 approval 拦截证据仍保留
-  为未来接口验收基础。命令
+  实现多轮、历史读取、恢复、事件追踪和取消。DSH 0.1.0-rc.7 的浏览器运行时
+  提供 `commands.execute`；Adapter 用它执行 `/permission read-only`，并从原生
+  history 同时核验 `permission=read-only`、`sandbox=read-only`、`approval=ask`，
+  任一不符都在模型 prompt 前失败关闭。AgentHub 只允许已实测的 `standard`
+  preset；本机真实门禁证实 `minimal` 的 `str_replace_editor` 会绕过 read-only，
+  因而不得接入。命令
   只有在无 shell 组合/扩展、影响类型可识别且所有目标解析到任务工作区内时
   才形成结构化 operation/targets；State Writer 必须在控制面根据受限 view
   独立重算，不信任 Adapter 声明的语义。未知命令、越界路径和已脱敏命令均只可拒绝；
   修改 approval 通过绑定原 RPC 的 `allowed-once`，不开放持久授权；
-  DSH 下行使用 `/api/events.mux` SSE（与其 WebSocket carrier 共用相同
-  ServerRequest 语义），`/api/respond` 继续同一原生 turn；待处理交互同时
+  DSH 下行使用 `/api/events.mux` WebSocket（rc.7 对 HTTP/SSE 返回 426），
+  `/api/respond` 继续同一原生 turn；待处理交互同时
   写入 `agent_session_interactions` 并关联 ActionIntent；原生事件与 history
   Artifact 只保存有界脱敏副本。`/api/respond` 传输失败必须保持控制面可重试；
   重试前按原生 history 的 approval id/outcome 对账，已生效的相同决定视为幂等

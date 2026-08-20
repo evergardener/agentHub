@@ -26,28 +26,46 @@ async def test_dsh_a2a_card_and_native_session_metadata(tmp_path, monkeypatch):
         value: dict
         if method == "session.create":
             value = {"sessionId": "session-contract-dsh"}
+        elif method == "session.list":
+            value = {"items": [{
+                "sessionId": "session-contract-dsh",
+                "agentPreset": "standard",
+                "cwd": str(tmp_path / "tasks" / "T-dsh-contract"),
+            }]}
         elif method == "session.history":
             value = {"events": events, "hasMore": False}
+        elif method == "commands/execute":
+            assert body["payload"]["args"] == {
+                "agentId": "session-contract-dsh",
+                "line": "/permission read-only",
+            }
+            events.extend([
+                {"event": {"seq": 0, "type": "permission/preset",
+                            "data": {"preset": "read-only"}}},
+                {"event": {"seq": 1, "type": "sandbox/mode",
+                            "data": {"mode": "read-only"}}},
+                {"event": {"seq": 2, "type": "approval/policy",
+                            "data": {"policy": "ask"}}},
+            ])
+            value = {"commandId": "permission-command", "result": {
+                "kind": "success", "text": "preset read-only"}}
         elif method == "session.prompt":
             prompt = body["payload"]["content"][0]["text"]
-            if prompt.startswith("/permission "):
-                value = {"accepted": True, "command": {"kind": "success"}}
-            else:
-                events.extend([
-                {"event": {"seq": 0, "time": 1, "type": "turn/start",
+            events.extend([
+                {"event": {"seq": 3, "time": 1, "type": "turn/start",
                            "data": {"turn": 1}}},
-                {"event": {"seq": 1, "time": 2,
+                {"event": {"seq": 4, "time": 2,
                            "type": "assistant/message", "data": {
                                "turn": 1, "step": 1, "message": {
                                    "id": "a", "role": "assistant",
                                    "content": [{"type": "text", "text": "ok"}],
                                    "source": {"kind": "model", "provider": "x",
                                               "model": "x"}}}}},
-                {"event": {"seq": 2, "time": 3, "type": "turn/end",
+                {"event": {"seq": 5, "time": 3, "type": "turn/end",
                            "data": {"turn": 1,
                                     "reason": {"kind": "completed"}}}},
-                ])
-                value = {"accepted": True}
+            ])
+            value = {"accepted": True}
         else:
             raise AssertionError(method)
         return httpx.Response(200, json={
@@ -79,8 +97,11 @@ async def test_dsh_a2a_card_and_native_session_metadata(tmp_path, monkeypatch):
             assert caps["durable_session"] is True
             security = card["capabilities"]["extensions"][
                 "agentHubSecurity"]
-            assert security["nativePermissionEnforcement"] is False
-            assert security["modelPromptsDefault"] == "disabled"
+            assert security["nativePermissionEnforcement"] is True
+            assert security["permissionPreset"] == "read-only"
+            assert security["approvalPolicy"] == "ask"
+            assert security["modelPromptsDefault"] == \
+                "after-native-verification"
 
             sent = (await client.post("/a2a", json={
                 "jsonrpc": "2.0", "id": "send", "method": "message/send",
@@ -118,7 +139,7 @@ async def test_dsh_a2a_card_and_native_session_metadata(tmp_path, monkeypatch):
         await native_client.aclose()
 
 
-async def test_dsh_default_health_is_unavailable_without_native_enforcement(
+async def test_dsh_default_health_advertises_fail_closed_native_enforcement(
         tmp_path, monkeypatch):
     monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path))
     monkeypatch.delenv("LAS_DSH_ALLOW_UNVERIFIED_RUNTIME", raising=False)
@@ -142,11 +163,11 @@ async def test_dsh_default_health_is_unavailable_without_native_enforcement(
             transport=httpx.ASGITransport(app=app), base_url="http://adapter"
         ) as client:
             response = await client.get("/health")
-        assert response.status_code == 503
+        assert response.status_code == 200
         payload = response.json()
-        assert payload["status"] == "unavailable"
-        assert payload["dependency"]["ready"] is False
-        assert payload["dependency"]["nativePermissionEnforcement"] is False
+        assert payload["status"] == "ok"
+        assert payload["dependency"]["ready"] is True
+        assert payload["dependency"]["nativePermissionEnforcement"] is True
     finally:
         await native_client.aclose()
 
@@ -165,29 +186,44 @@ async def test_dsh_a2a_native_approval_response_continues_same_turn(
             response_rpc_ids.append(body["rpcId"])
             value = body["result"]["value"]
             events.extend([
-                {"event": {"seq": 2, "type": "approval/decided",
+                {"event": {"seq": 5, "type": "approval/decided",
                             "data": {"id": value["approvalId"],
                                      "outcome": value["outcome"]}}},
-                {"event": {"seq": 3, "type": "turn/end",
+                {"event": {"seq": 6, "type": "turn/end",
                             "data": {"reason": {"kind": "completed"}}}},
             ])
             return httpx.Response(200, json={"accepted": True})
         method = body["method"]
         if method == "session.create":
             value = {"sessionId": "native-approval"}
+        elif method == "session.list":
+            value = {"items": [{
+                "sessionId": "native-approval",
+                "agentPreset": "standard",
+                "cwd": str(tmp_path / "tasks" / "T-approval"),
+            }]}
         elif method == "session.history":
             value = {"events": events, "hasMore": False}
+        elif method == "commands/execute":
+            events.extend([
+                {"event": {"seq": 0, "type": "permission/preset",
+                            "data": {"preset": "read-only"}}},
+                {"event": {"seq": 1, "type": "sandbox/mode",
+                            "data": {"mode": "read-only"}}},
+                {"event": {"seq": 2, "type": "approval/policy",
+                            "data": {"policy": "ask"}}},
+            ])
+            value = {"commandId": "permission-command", "result": {
+                "kind": "success", "text": "preset read-only"}}
         elif method == "session.prompt":
-            prompt = body["payload"]["content"][0]["text"]
-            if not prompt.startswith("/permission "):
-                events.extend([
-                    {"event": {"seq": 0, "type": "turn/start",
+            events.extend([
+                    {"event": {"seq": 3, "type": "turn/start",
                                 "data": {"turn": 1}}},
-                    {"event": {"seq": 1, "type": "approval/asked",
+                    {"event": {"seq": 4, "type": "approval/asked",
                                 "data": {"id": "approval-1",
                                          "toolName": "bash",
                                          "reason": "modify"}}},
-                ])
+            ])
             value = {"accepted": True}
         else:
             raise AssertionError(method)

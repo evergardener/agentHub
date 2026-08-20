@@ -1,6 +1,6 @@
 """Persistent DeepSeek Harness Web API Session Adapter.
 
-DSH 0.1.0-rc.6 ships two relevant surfaces:
+DSH 0.1.0-rc.7 ships three relevant surfaces:
 
 * ``headless`` creates a fresh persisted session for one task and exits.  It
   has no resume argument and therefore must not back a durable AgentHub
@@ -8,6 +8,11 @@ DSH 0.1.0-rc.6 ships two relevant surfaces:
 * ``web`` exposes the native session API used here.  It supports explicit
   session creation, history, additional prompts, cancellation, and durable
   recovery by DSH session id.
+* ``commands.execute`` is the browser runtime's dedicated slash-command RPC.
+  AgentHub uses it to apply ``/permission read-only`` before every new or
+  resumed session becomes prompt-capable.  This is deliberately not sent
+  through ``session.prompt`` because that route treats slash commands as model
+  input rather than an enforcement operation.
 
 The adapter deliberately talks to the loopback Web API instead of importing
 DSH's private Node modules.  This keeps DSH independently deployable and makes
@@ -24,8 +29,10 @@ import uuid
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, AsyncIterator
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+from websockets.asyncio.client import connect as websocket_connect
 
 from adapters.common import A2aTask, save_artifact, workspace_root
 from adapters.dsh.safety import (
@@ -49,6 +56,8 @@ from adapters.session import (
 DEFAULT_DSH_WEB_URL = "http://127.0.0.1:3080"
 DEFAULT_TIMEOUT_SECONDS = 3600
 SAFE_PERMISSION_PRESETS = frozenset({"read-only"})
+REQUIRED_APPROVAL_POLICY = "ask"
+REQUIRED_AGENT_PRESET = "standard"
 
 
 class DshNotAvailable(RuntimeError):
@@ -209,6 +218,7 @@ class DshWebSessionAdapter(SessionAdapter):
         ] = {}
         self._native_to_session: dict[str, str] = {}
         self._turn_baselines: dict[str, int] = {}
+        self._permission_verified: set[str] = set()
         self._tool_call_views: dict[tuple[str, str], dict[str, Any]] = {}
         self._interaction_changed = asyncio.Event()
         self._event_stream_enabled = (
@@ -220,12 +230,11 @@ class DshWebSessionAdapter(SessionAdapter):
     def get_session(self, session_id: str) -> SessionHandle | None:
         return self._handles.get(session_id)
 
-    def _require_prompt_authority(self) -> None:
-        if not self.allow_unverified_runtime:
+    def _require_prompt_authority(self, session_id: str) -> None:
+        if session_id not in self._permission_verified:
             raise SessionCapabilityError(
-                "DSH model prompts are disabled: this DSH version has no "
-                "verified native permission enforcement; "
-                "LAS_DSH_ALLOW_UNVERIFIED_RUNTIME is development-only"
+                "DSH model prompts are disabled until the native read-only "
+                "permission and ask approval policy are verified"
             )
 
     async def start(self) -> None:
@@ -269,26 +278,21 @@ class DshWebSessionAdapter(SessionAdapter):
                 delay = min(delay * 2, 5.0)
 
     async def _consume_event_stream(self) -> None:
-        owned = self._client is None
-        client = self._client or httpx.AsyncClient(
-            base_url=self.base_url, timeout=None)
-        try:
-            async with client.stream("GET", "/api/events.mux") as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if self._event_stream_stop.is_set():
-                        return
-                    if not line.startswith("data:"):
-                        continue
-                    try:
-                        message = json.loads(line[5:].strip())
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(message, dict):
-                        await self.ingest_server_request(message)
-        finally:
-            if owned:
-                await client.aclose()
+        parsed = urlsplit(self.base_url)
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        url = urlunsplit((scheme, parsed.netloc, "/api/events.mux", "", ""))
+        async with websocket_connect(url, open_timeout=30) as socket:
+            async for raw in socket:
+                if self._event_stream_stop.is_set():
+                    return
+                if not isinstance(raw, str):
+                    continue
+                try:
+                    message = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(message, dict):
+                    await self.ingest_server_request(message)
 
     async def ingest_server_request(self, message: dict[str, Any]) -> None:
         """Ingest one DSH mux ServerRequest; public for protocol testing."""
@@ -417,9 +421,12 @@ class DshWebSessionAdapter(SessionAdapter):
         return {
             "runtime": "dsh-web",
             "sessions": len(items),
-            "ready": self.allow_unverified_runtime,
-            "nativePermissionEnforcement": False,
-            "modelPromptsEnabled": self.allow_unverified_runtime,
+            "ready": True,
+            "nativePermissionEnforcement": True,
+            "permissionPreset": self.permission_preset,
+            "approvalPolicy": REQUIRED_APPROVAL_POLICY,
+            "agentPreset": REQUIRED_AGENT_PRESET,
+            "modelPromptsEnabled": True,
         }
 
     def _workspace(self, task_id: str) -> Path:
@@ -479,35 +486,106 @@ class DshWebSessionAdapter(SessionAdapter):
             raise DshApiError("DSH session.history returned invalid events")
         return [entry for entry in entries if isinstance(entry, dict)]
 
+    async def _verify_native_session(
+        self, native_session_id: str, expected_workspace: Path,
+    ) -> None:
+        value = await self._request("session.list", {})
+        items = value.get("items")
+        if not isinstance(items, list):
+            raise DshApiError("DSH session.list returned invalid items")
+        session = next((
+            item for item in items
+            if isinstance(item, dict)
+            and item.get("sessionId") == native_session_id
+        ), None)
+        if session is None:
+            raise DshApiError(
+                "DSH session not found during preset verification: "
+                f"{native_session_id}")
+        if session.get("agentPreset") != REQUIRED_AGENT_PRESET:
+            raise DshApiError(
+                "DSH AgentHub sessions must use the audited standard preset; "
+                f"got {session.get('agentPreset')!r}")
+        cwd = session.get("cwd")
+        if (not isinstance(cwd, str)
+                or Path(cwd).resolve() != expected_workspace.resolve()):
+            raise DshApiError(
+                "DSH native session workspace does not match the AgentHub "
+                "task workspace")
+
+    @staticmethod
+    def _permission_state(entries: list[dict[str, Any]]) -> dict[str, str]:
+        state: dict[str, str] = {}
+        event_keys = {
+            "permission/preset": ("preset", "preset"),
+            "sandbox/mode": ("mode", "sandbox"),
+            "approval/policy": ("policy", "approval"),
+        }
+        for entry in entries:
+            event = _event(entry)
+            mapping = event_keys.get(str(event.get("type")))
+            if mapping is None:
+                continue
+            source_key, state_key = mapping
+            value = (event.get("data") or {}).get(source_key)
+            if isinstance(value, str):
+                state[state_key] = value
+        return state
+
+    async def _enforce_native_permission(
+        self, native_session_id: str, permission: str,
+    ) -> None:
+        value = await self._request(
+            "commands/execute",
+            {"args": {
+                "agentId": native_session_id,
+                "line": f"/permission {permission}",
+            }},
+        )
+        result = value.get("result")
+        if not isinstance(result, dict) or result.get("kind") != "success":
+            raise DshApiError(
+                "DSH commands.execute did not apply the permission preset")
+        entries = await self._history(native_session_id)
+        state = self._permission_state(entries)
+        expected = {
+            "preset": permission,
+            "sandbox": permission,
+            "approval": REQUIRED_APPROVAL_POLICY,
+        }
+        if state != expected:
+            raise DshApiError(
+                "DSH native permission verification failed: expected "
+                f"{expected!r}, got {state!r}")
+
     async def start_session(
         self, task: A2aTask, *, session_id: str, metadata: dict[str, Any]
     ) -> SessionHandle:
-        await self._ensure_event_stream()
         native = metadata.get("nativeSessionId") or task.native_session_id
         if native:
             await self._history(str(native))
         else:
             payload: dict[str, Any] = {"cwd": str(self._workspace(task.id))}
             preset = metadata.get("dshAgentPreset") or os.environ.get(
-                "LAS_DSH_AGENT_PRESET")
-            if preset:
-                payload["agentPreset"] = str(preset)
+                "LAS_DSH_AGENT_PRESET", REQUIRED_AGENT_PRESET)
+            if preset != REQUIRED_AGENT_PRESET:
+                raise DshApiError(
+                    "DSH AgentHub sessions must use the audited standard "
+                    f"preset; got {preset!r}")
+            payload["agentPreset"] = REQUIRED_AGENT_PRESET
             native = (await self._request("session.create", payload)).get(
                 "sessionId")
             if not isinstance(native, str) or not native:
                 raise DshApiError("DSH session.create returned no sessionId")
-            permission = metadata.get(
-                "dshPermissionPreset", self.permission_preset)
-            if permission not in SAFE_PERMISSION_PRESETS:
-                raise DshApiError(
-                    "DSH permission preset must remain read-only; modifying "
-                    "calls require one ActionIntent-bound allowed-once response")
-            # DSH 0.1.0-rc.7 does not expose a verified permission-preset RPC.
-            # Sending `/permission read-only` through session.prompt treats it
-            # as model input, races the first user turn, and is not an
-            # enforcement boundary. Keep the configured value fail-closed for
-            # compatibility, but rely only on native approval interception
-            # until DSH publishes a real preset API.
+        await self._verify_native_session(
+            str(native), self._workspace(task.id))
+        permission = metadata.get(
+            "dshPermissionPreset", self.permission_preset)
+        if permission not in SAFE_PERMISSION_PRESETS:
+            raise DshApiError(
+                "DSH permission preset must remain read-only; modifying "
+                "calls require one ActionIntent-bound allowed-once response")
+        await self._enforce_native_permission(str(native), str(permission))
         handle = SessionHandle(
             session_id=session_id,
             task_id=task.id,
@@ -520,6 +598,8 @@ class DshWebSessionAdapter(SessionAdapter):
         self._event_queues.setdefault(session_id, asyncio.Queue())
         self._pending_interactions.setdefault(session_id, {})
         self._native_to_session[str(native)] = session_id
+        self._permission_verified.add(session_id)
+        await self._ensure_event_stream()
         return handle
 
     async def _emit(
@@ -544,7 +624,7 @@ class DshWebSessionAdapter(SessionAdapter):
             raise KeyError(f"session not found: {session_id}")
         if handle.status == "canceled":
             raise SessionCapabilityError("session is canceled")
-        self._require_prompt_authority()
+        self._require_prompt_authority(session_id)
 
         native = handle.native_session_id
         before = await self._history(native)
@@ -925,7 +1005,7 @@ class DshWebSessionAdapter(SessionAdapter):
         handle = self._handles[session_id]
         if not handle.native_session_id:
             raise SessionCapabilityError("native DSH session ID is missing")
-        self._require_prompt_authority()
+        self._require_prompt_authority(session_id)
         await self._request("session.prompt", {
             "sessionId": handle.native_session_id,
             "mode": "steer",

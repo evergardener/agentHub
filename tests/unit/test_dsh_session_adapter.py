@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+from pathlib import Path
 
 import httpx
 import pytest
 
 from adapters.common import A2aTask
-from adapters.dsh.session import DshNotAvailable, DshWebSessionAdapter
+from adapters.dsh.session import (
+    DshApiError,
+    DshNotAvailable,
+    DshWebSessionAdapter,
+)
 from adapters.session import SessionCapabilityError, SessionMessage
 
 pytestmark = pytest.mark.anyio
@@ -77,20 +83,34 @@ class DshFixture:
         self.methods.append(method)
         value: dict = {}
         if method == "session.create":
+            assert body["payload"]["agentPreset"] == "standard"
             value = {"sessionId": self.session_id}
         elif method == "session.list":
-            value = {"items": [{"sessionId": self.session_id}]}
+            value = {"items": [{
+                "sessionId": self.session_id,
+                "agentPreset": "standard",
+                "cwd": str(Path(os.environ.get("LAS_WORKSPACE", "/tmp"))
+                           / "tasks" / "T-dsh"),
+            }]}
         elif method == "session.history":
             value = {"events": self.events, "hasMore": False}
+        elif method == "commands/execute":
+            args = body["payload"]["args"]
+            assert args == {
+                "agentId": self.session_id,
+                "line": "/permission read-only",
+            }
+            self.events.extend([
+                self._event("permission/preset", {"preset": "read-only"}),
+                self._event("sandbox/mode", {"mode": "read-only"}),
+                self._event("approval/policy", {"policy": "ask"}),
+            ])
+            value = {
+                "commandId": "command-permission",
+                "result": {"kind": "success", "text": "preset read-only"},
+            }
         elif method == "session.prompt":
             prompt = body["payload"]["content"][0]["text"]
-            if prompt.startswith("/permission "):
-                value = {"accepted": True, "command": {"kind": "success"}}
-                return httpx.Response(200, json={
-                    "type": "server-response",
-                    "rpcId": body["rpcId"],
-                    "result": {"ok": True, "value": value},
-                })
             self.prompts.append(prompt)
             if self.approval:
                 self.events.extend([
@@ -186,7 +206,9 @@ async def test_dsh_adapter_restart_validates_and_resumes_native_session(
             metadata={"nativeSessionId": fixture.session_id})
         assert handle.native_session_id == fixture.session_id
         assert "session.create" not in fixture.methods
-        assert fixture.methods == ["session.history"]
+        assert fixture.methods == [
+            "session.history", "session.list", "commands/execute",
+            "session.history"]
         await adapter.resume_session("S-restored")
         assert fixture.methods[-1] == "session.history"
     finally:
@@ -410,8 +432,9 @@ async def test_dsh_health_checks_the_native_runtime():
     try:
         assert await adapter.health() == {
             "runtime": "dsh-web", "sessions": 1,
-            "ready": True,
-            "nativePermissionEnforcement": False,
+            "ready": True, "nativePermissionEnforcement": True,
+            "permissionPreset": "read-only", "approvalPolicy": "ask",
+            "agentPreset": "standard",
             "modelPromptsEnabled": True,
         }
         assert fixture.methods == ["session.list"]
@@ -419,7 +442,7 @@ async def test_dsh_health_checks_the_native_runtime():
         await client.aclose()
 
 
-async def test_dsh_model_prompt_is_disabled_without_development_override(
+async def test_dsh_model_prompt_requires_verified_native_permission(
         tmp_path, monkeypatch):
     monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path))
     monkeypatch.delenv("LAS_DSH_ALLOW_UNVERIFIED_RUNTIME", raising=False)
@@ -430,15 +453,58 @@ async def test_dsh_model_prompt_is_disabled_without_development_override(
     try:
         await adapter.start_session(_task(), session_id="S-dsh", metadata={})
         health = await adapter.health()
-        assert health["ready"] is False
-        assert health["modelPromptsEnabled"] is False
-        with pytest.raises(SessionCapabilityError, match="prompts are disabled"):
-            await adapter.send_message(
-                "S-dsh", SessionMessage("M-1", "user", "review"))
-        with pytest.raises(SessionCapabilityError, match="prompts are disabled"):
-            await adapter.steer(
-                "S-dsh", SessionMessage("M-2", "user", "adjust"))
+        assert health["ready"] is True
+        assert health["nativePermissionEnforcement"] is True
+        result = await adapter.send_message(
+            "S-dsh", SessionMessage("M-1", "user", "review"))
+        assert result.state == "completed"
+        assert fixture.methods.index("commands/execute") < \
+            fixture.methods.index("session.prompt")
+    finally:
+        await client.aclose()
+
+
+async def test_dsh_fails_closed_when_permission_projection_is_incomplete(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path))
+    fixture = DshFixture()
+    original = fixture.__call__
+
+    async def missing_policy(request: httpx.Request) -> httpx.Response:
+        response = await original(request)
+        if json.loads(request.content)["method"] == "commands/execute":
+            fixture.events = [
+                entry for entry in fixture.events
+                if entry["event"]["type"] != "approval/policy"
+            ]
+        return response
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(missing_policy),
+        base_url="http://dsh.test")
+    adapter = DshWebSessionAdapter(client=client, event_stream=False)
+    try:
+        with pytest.raises(DshApiError, match="permission verification failed"):
+            await adapter.start_session(
+                _task(), session_id="S-dsh", metadata={})
         assert "session.prompt" not in fixture.methods
+    finally:
+        await client.aclose()
+
+
+async def test_dsh_rejects_unaudited_agent_preset_before_creation(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path))
+    fixture = DshFixture()
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(fixture), base_url="http://dsh.test")
+    adapter = DshWebSessionAdapter(client=client, event_stream=False)
+    try:
+        with pytest.raises(DshApiError, match="audited standard preset"):
+            await adapter.start_session(
+                _task(), session_id="S-dsh",
+                metadata={"dshAgentPreset": "minimal"})
+        assert fixture.methods == []
     finally:
         await client.aclose()
 

@@ -100,9 +100,10 @@ cp .env.example .env && chmod 600 .env
 | `LAS_WEBUI_TOKENS` | WebUI 登录 token→role JSON；token 用 `openssl rand -hex 24` 生成，role 为 `viewer` / `operator` / `admin` |
 | `LAS_WEBUI_SESSION_SECRET` | WebUI 签名 session cookie 的独立 HMAC 密钥，使用 `openssl rand -hex 32`；未配置时 WebUI 拒绝启动 |
 | `LAS_ADAPTER_BIND` | worker 监听地址，默认 `127.0.0.1`；需容器回连时加宿主机 LAN IP |
-| `LAS_DSH_PRODUCTION_ENABLED` | 当前必须为 `false`；DSH rc.7 没有可验证的原生权限强制，本构建的生产预检会阻断启用或任何指向 dsh 的 A2A peer 路由 |
-| `LAS_DSH_ALLOW_UNVERIFIED_RUNTIME` | 仅限隔离开发/真实模型门禁；生产必须为 `false`，否则预检失败 |
-| `LAS_DSH_PERMISSION_PRESET` | 兼容性校验值必须为 `read-only`，但它不代表 DSH 原生 sandbox |
+| `LAS_DSH_PRODUCTION_ENABLED` | 当前暂为 `false`，待 catalog/peer 切换批次；Adapter 本身已验证原生权限链 |
+| `LAS_DSH_ALLOW_UNVERIFIED_RUNTIME` | 旧版开发兼容项；生产必须为 `false`，新 Adapter 不依赖它放行 prompt |
+| `LAS_DSH_PERMISSION_PRESET` | 必须为 `read-only`；Adapter 用 `commands.execute` 应用并核验原生 permission/sandbox/approval 状态 |
+| `LAS_DSH_AGENT_PRESET` | 必须为 `standard`；`minimal` 的 `str_replace_editor` 已实测绕过 read-only |
 | `LAS_DATABASE_URL` | 留空 = compose PG；`sqlite:////path/x.db` = SQLite；外部 PG 直接填 URL |
 | `LAS_OTEL_ENDPOINT` | compose 内已指向 jaeger；置空关闭 tracing |
 
@@ -231,17 +232,15 @@ ActionIntent，再把不可伪造的 receipt 送到 DSH `/api/respond`。问题�
 此时旧的任务级 approve/reject 会明确拒绝，避免只修改数据库状态却没有回应
 原生 Runtime。
 
-2026-08-20 真实门禁证实 DSH rc.7 会把 `/permission read-only` 当普通模型
-prompt；该做法既不能强制权限又会与首轮竞态，现已从 Adapter 删除。随后使用
-随机端口同时重启 DSH Web 与 HTTP Adapter，以同一 native session 完成第二轮
-marker 恢复（1 passed）。这只是在显式开发豁免下验证无工具 prompt 的双轮/
-双进程恢复。Adapter 现在默认拒绝所有 `session.prompt` 与 steer，Agent Card 和
-health 明示 `nativePermissionEnforcement=false`，`/health` 返回 503 且不发布
-在线心跳；只有
-`LAS_DSH_ALLOW_UNVERIFIED_RUNTIME=true` 才能进行隔离开发测试，而该值会被生产
-预检拒绝；`LAS_PRODUCTION_MODE=true` 时 Adapter 还会直接拒绝启动，避免跳过
-预检绕过。在 DSH 官方 permission API 或可审计专用 preset 完成实测前，DSH
-任务路由整体不得生产启用，不再只把修改能力列为阻塞。
+2026-08-20 真实门禁先证实把 `/permission read-only` 作为 prompt 是错误实现，
+随后从 DSH Web 客户端定位到 `commands.execute` 专用 RPC。Adapter 现在对新建和
+恢复 session 先执行该命令，再从 history 核验 `permission=read-only`、
+`sandbox=read-only`、`approval=ask`；失败时不会发送模型 prompt。真实工具门禁
+同时发现默认 `minimal` preset 的 `str_replace_editor` 可绕过 read-only，而
+`standard` preset 的 write 会先因沙箱拒绝，再携带精确 diff 发出 approval。
+因此 AgentHub 强制 `standard`，并通过 `/api/events.mux` WebSocket 获取稳定
+`rpcId`。真实拒绝已验证文件不落盘；真实 signed ActionIntent `allowed-once` 已
+验证只在批准后创建临时文件。生产 catalog/peer 尚待下一批统一切换。
 
 Kimi Adapter 使用 `kimi acp`，ACP 的 `session/request_permission` 走相同
 `blocked -> ActionIntent -> signed receipt -> native response` 链。允许仅选择
@@ -407,8 +406,8 @@ PyPI 不稳：`--build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simpl
 ### 6.5 worker 显示 offline
 agents 表在线判定按 `lease_expires_at` 动态计算。查 worker 进程与日志；
 心跳间隔/租约由 `LAS_HEARTBEAT_INTERVAL` / `LAS_LEASE_TTL` 控制。
-当前构建的 DSH `disabled` 是预期安全状态：静态种子禁止委派，未验证原生权限
-强制时 `/health` 返回 503 且不发布心跳。不要用开发豁免把它伪装成生产就绪。
+当前构建的 DSH 静态种子仍暂为 `disabled`，用于在 Adapter 权限链验证完成后与
+Kimi 配额排除、peer ACL 一次性切换；不要用旧开发豁免跳过该发布步骤。
 
 ### 6.6 委派非 codex/kimi 的 agent 失败
 gateway 路由表（`infra/agentgateway/config.docker.yaml`）目前只静态映射

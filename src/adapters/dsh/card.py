@@ -20,9 +20,11 @@ def agent_card(base_url: str) -> dict:
             "pushNotifications": False,
             "extensions": {
                 "agentHubSecurity": {
-                    "nativePermissionEnforcement": False,
-                    "modelPromptsDefault": "disabled",
-                    "modifyingOperations": False,
+                    "nativePermissionEnforcement": True,
+                    "permissionPreset": "read-only",
+                    "approvalPolicy": "ask",
+                    "modelPromptsDefault": "after-native-verification",
+                    "modifyingOperations": "approval-required",
                 },
             },
         },

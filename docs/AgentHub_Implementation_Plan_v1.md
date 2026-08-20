@@ -188,14 +188,12 @@ revision 写许可失效。
 2. [x] 增加 DSH Agent Card、持久 Session Adapter、8203 独立 A2A 服务、
    gateway 路由/ACL、心跳注册和启动脚本；
 3. [x] 增加 DSH Template 与默认只读 Reviewer Profile；仅首次心跳自动绑定，
-   已有人工/Profile WebUI 配置不被覆盖。2026-08-20 真实门禁证实 rc.7 会把
-   `/permission read-only` 当普通模型 prompt，既不强制权限又与首轮竞态；该
-   prompt 已删除。待 DSH 官方 permission API 或可审计专用 preset 接入并实测前，
-   控制面 read_only Profile 不能被表述为原生 sandbox；Adapter 已改为默认拒绝
-   所有模型 prompt/steer，Card/health 暴露未验证状态，readiness 返回不可用且
-   停止在线心跳，Hermes 静态种子标记为 disabled，生产预检阻断 DSH 启用与
-   peer 路由；`LAS_PRODUCTION_MODE=true` 还会在运行时拒绝开发豁免，不能靠
-   跳过预检绕过。开发豁免仅允许隔离门禁，DSH 整体仍不得生产放行；
+   已有人工/Profile WebUI 配置不被覆盖。2026-08-20 先证实把
+   `/permission read-only` 作为 prompt 是错误实现，随后从 DSH Web 客户端定位到
+   `commands.execute` 专用 RPC。Adapter 现对每个新建/恢复 session 执行该命令，
+   并核验 permission/sandbox/approval 三项原生状态；真实门禁还证实 `minimal`
+   preset 的 `str_replace_editor` 绕过 read-only，而 `standard` 的 write 工具会先
+   被拒绝、再产生 approval，因此 AgentHub 强制并验证 `standard`；
 4. [x] 支持同一 DSH 原生 session 多轮消息、Adapter 重启恢复、历史/工具事件
    Artifact、interrupt/cancel，并把原生审批挂起映射为 `input-required`；
 5. [x] DSH unit+contract 离线测试通过；全量 unit+contract 为 209 passed；
@@ -242,8 +240,8 @@ revision 写许可失效。
 1. [x] Session Adapter SDK 新增显式 interaction capability、待处理交互查询、
    权威响应与同一 turn continuation；A2A Task metadata 暴露
    `pendingInteractions`；
-2. [x] DSH 使用 `/api/events.mux` SSE 实时接收 `server-request`；WebSocket
-   与 SSE 的 DSH 载荷相同，本实现选择更易重连和测试的 HTTP/SSE carrier；
+2. [x] DSH 使用 `/api/events.mux` WebSocket 实时接收 `server-request`；rc.7
+   对 HTTP/SSE 返回 426，Adapter 已切换到原生 WebSocket carrier；
 3. [x] 原样保留 DSH 稳定 `rpcId`，审批按 `approvalId`、问题按整批
    `answers[]` 经 `/api/respond` 回到原生 session；
 4. [x] `allowed-once` 必须携带已批准、由 user/Hermes 决策的 ActionIntent
