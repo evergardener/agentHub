@@ -91,6 +91,17 @@ cp .env.example .env && chmod 600 .env
 `runtime/production-credentials.json`（被 Git 忽略）。请在部署完成后把其中凭据
 转存到你的密码管理器，再删除该 bootstrap 文件。
 
+已有 PostgreSQL 数据卷时，不要只修改 `.env`。先创建并验证控制面备份，再用
+备份门控的轮换命令同步更新数据库角色和 `.env`；命令不会输出新密码：
+
+```bash
+python3 scripts/rotate-postgres-password.py \
+  --backup backups/pre-production/agenthub-backup-<timestamp>.tar.gz
+```
+
+新密码同时写入仅 owner 可读的 `runtime/production-credentials.json`，部署完成后
+请将它转移到正式的 Secret Manager。
+
 必填项（其余见 .env.example 注释）：
 
 | 变量 | 说明 |
