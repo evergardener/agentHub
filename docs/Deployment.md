@@ -248,6 +248,18 @@ LAS_RUN_CODEX_APP_SERVER=1 \
   .venv/bin/python -m pytest -q tests/integration/test_codex_app_server.py
 ```
 
+真实模型与逐次审批门禁需显式授权后运行：
+
+```bash
+LAS_RUN_CODEX=1 \
+  .venv/bin/python -m pytest -q tests/integration/test_codex_adapter.py
+```
+
+2026-08-20 已在 pytest 临时工作区真实执行通过（1 passed）：Codex 的修改请求
+保持挂起，测试以绑定当前原生 request/thread/context revision 的签名 receipt
+逐次 `allowed-once`，随后验证真实源码产物与 pytest。该用例不覆盖拒绝、双轮
+恢复或 Adapter 服务进程重启。
+
 三类 Adapter 的原生过程事件统一发布为 `agent.session.event`，WebUI 的全局事件
 区与任务详情「事件时间线（实时）」会显示 `nativeEventType` 和脱敏摘要。浏览器
 断线重连时携带最后 `seq`，由 `/api/events/stream?after=...` 补发；NATS 短暂

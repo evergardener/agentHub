@@ -309,7 +309,10 @@ revision 写许可失效。
     会在下一轮对话同步 `user.*` 指令，重复 idempotency key 不会二次下发；
 11. [ ] 执行 Codex/Kimi 真实 approval 挂起/拒绝/允许、双轮恢复和 Adapter
     重启故障注入；Codex 无模型 `initialize + thread/start` 由
-    `LAS_RUN_CODEX_APP_SERVER=1` 单独门控。
+    `LAS_RUN_CODEX_APP_SERVER=1` 单独门控。2026-08-20 已完成 Codex 真实单轮
+    修改门禁（1 passed）：原生 interaction 挂起后使用绑定 task/interaction/
+    native thread/revision 的签名 receipt 逐次 `allowed-once`，真实创建文件并
+    执行 pytest 成功；拒绝分支、双轮恢复和 Adapter 服务进程重启仍待执行。
 12. [x] Codex App Server 批次回归：unit+contract 233 passed；集成
     9 passed/13 skipped；本机无模型 `initialize + thread/start` 1 passed。
     同时修正多轮 handle 的 context revision 同步，以及把 Codex App Server/
