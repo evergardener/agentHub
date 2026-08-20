@@ -172,6 +172,8 @@ Artifact 元数据和事件的事实源。NATS 只负责实时分发和解耦，
 State Writer 对每个 JetStream event 必须在单一数据库事务中同时写入 event_id
 去重记录和对应 Task/Run/Artifact 状态；事务失败不得留下已去重但未应用的 event，
 使同一 event_id 的 JetStream 重投能够安全完成。只有事务提交后才允许 ACK。
+PostgreSQL transport 失效时 State Writer 必须丢弃旧连接、尝试重连并让当前消息
+保持 NAK；不得在数据库恢复后继续复用永久失效的连接，也不得 ACK 未落库事件。
 
 Workspace/Git 保存实际文件产物；数据库保存路径、哈希、版本、来源和可见性。
 

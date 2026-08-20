@@ -36,11 +36,48 @@ _EVENT_TO_STATUS = {
 
 class StateWriter:
     def __init__(self, db_path: str | Path):
+        self.db_target = db_path
         self.conn = init_db(db_path)
         from orchestrator import agent_profile_store
 
         agent_profile_store.seed_catalog(self.conn)
         self.audit_log: list[dict] = []  # 内存留存，另发 system.audit 事件
+
+    @staticmethod
+    def _is_connection_failure(exc: Exception) -> bool:
+        if isinstance(exc, (ConnectionError, BrokenPipeError, EOFError)):
+            return True
+        try:
+            import psycopg
+
+            return isinstance(
+                exc, (psycopg.OperationalError, psycopg.InterfaceError))
+        except ImportError:
+            return False
+
+    def reconnect(self) -> None:
+        """Replace a broken DB connection; JetStream redelivery does the retry."""
+        replacement = init_db(self.db_target)
+        previous = self.conn
+        self.conn = replacement
+        try:
+            previous.close()
+        except Exception:
+            pass
+
+    def apply_resilient(self, event: dict) -> str:
+        """Apply once; reconnect broken PostgreSQL transport, then NAK upstream."""
+        try:
+            return self.apply(event)
+        except Exception as exc:
+            if self._is_connection_failure(exc):
+                try:
+                    self.reconnect()
+                except Exception:
+                    # Database may still be down. The next redelivery retries
+                    # reconnect; the original failure remains visible to NATS.
+                    pass
+            raise
 
     def apply(self, event: dict) -> str:
         """应用单条事件。返回 applied / duplicate / rejected / ignored。"""
@@ -273,7 +310,7 @@ async def main() -> None:
     await ensure_stream(nats_url)
 
     async def handler(event: dict) -> None:
-        result = writer.apply(event)
+        result = writer.apply_resilient(event)
         if result == "rejected":
             # 非法迁移 → system.audit（§5.3）
             from common.events import Event

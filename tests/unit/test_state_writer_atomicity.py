@@ -84,3 +84,45 @@ def test_run_insert_failure_rolls_back_transition_and_event(tmp_path, monkeypatc
     assert writer.conn.execute(
         "SELECT COUNT(*) FROM task_runs WHERE task_id = 'T-atomic-2';"
     ).fetchone()[0] == 1
+
+
+def test_connection_failure_reconnects_but_preserves_nak_signal(
+        tmp_path, monkeypatch):
+    writer = StateWriter(tmp_path / "writer.db")
+    replacement = object()
+    closed = []
+
+    class OldConnection:
+        def close(self):
+            closed.append(True)
+
+    writer.conn = OldConnection()
+    monkeypatch.setattr("state.writer.init_db", lambda target: replacement)
+    failure = ConnectionError("postgres connection dropped")
+    monkeypatch.setattr(writer, "apply", lambda event: (_ for _ in ()).throw(failure))
+
+    with pytest.raises(ConnectionError, match="dropped"):
+        writer.apply_resilient({"event_id": "E-reconnect"})
+    assert writer.conn is replacement
+    assert closed == [True]
+
+
+def test_non_connection_failure_does_not_hide_bug_or_reconnect(
+        tmp_path, monkeypatch):
+    writer = StateWriter(tmp_path / "writer.db")
+    reconnects = []
+    monkeypatch.setattr(writer, "reconnect", lambda: reconnects.append(True))
+    monkeypatch.setattr(
+        writer, "apply",
+        lambda event: (_ for _ in ()).throw(ValueError("bad event handler")))
+    with pytest.raises(ValueError, match="bad event"):
+        writer.apply_resilient({"event_id": "E-bug"})
+    assert reconnects == []
+
+
+def test_psycopg_operational_subclasses_are_connection_failures(tmp_path):
+    import psycopg
+
+    writer = StateWriter(tmp_path / "writer.db")
+    assert writer._is_connection_failure(
+        psycopg.errors.AdminShutdown("server restarting"))
