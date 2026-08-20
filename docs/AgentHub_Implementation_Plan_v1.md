@@ -204,7 +204,10 @@ revision 写许可失效。
     return_to_hermes 已有持久控制面语义，待专用 UI；
 11. [x] 将 agent session/message/action/tool/artifact 事件统一接入可断线补发的实时 SSE；
 12. [ ] 在授权环境执行 Codex/Kimi 真实双轮 resume、进程重启和 Adapter 重启测试；
-13. [ ] 增加 PostgreSQL + NATS + gateway 的故障注入与重复投递集成测试。
+13. [ ] State Writer 已把 event 去重记录、Task transition、run/artifact 写入合并为
+    同一数据库事务，并用“transition/run 首次失败 → 回滚 → 同 event_id 重投成功”
+    离线故障注入证明不会因提前 dedupe ACK 丢状态；PostgreSQL + NATS + gateway
+    真实进程重启、断线和重复投递集成矩阵仍待授权环境执行。
 
 ## 当前迭代（Iteration 6）
 

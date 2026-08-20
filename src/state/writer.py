@@ -51,8 +51,13 @@ class StateWriter:
 
         # 1. 去重（§17.6）
         try:
-            state_store.record_event(self.conn, event)
+            state_store.record_event(self.conn, event, commit=False)
         except state_store.DuplicateEvent:
+            # An input-required handler may have committed the event and some
+            # interactions before a later interaction failed. Reconcile the
+            # idempotent interaction records on redelivery before ACKing.
+            if event_type == "task.input_required" and task_id:
+                self._persist_interactions(task_id, source, payload)
             return "duplicate"
 
         try:
@@ -65,6 +70,7 @@ class StateWriter:
                         created_by=source, project=payload.get("project"),
                         assigned_to=payload.get("assigned_to"),
                         status=TaskStatus.CREATED,
+                        commit=False,
                     )
             elif event_type in _EVENT_TO_STATUS and task_id:
                 dst = _EVENT_TO_STATUS[event_type]
@@ -73,12 +79,14 @@ class StateWriter:
                     result_summary=payload.get("summary"),
                     error_message=payload.get("error"),
                     review=payload.get("review"),
+                    commit=False,
                 )
                 if event_type == "task.started":
                     state_store.add_task_run(
                         self.conn, task_id=task_id, agent_id=source,
                         attempt=payload.get("attempt", 1), status="working",
                         trace_id=event.get("trace_id"),
+                        commit=False,
                     )
                 if event_type in ("task.completed", "task.failed"):
                     state_store.add_task_run(
@@ -86,6 +94,7 @@ class StateWriter:
                         attempt=payload.get("attempt", 1),
                         status=dst.value, trace_id=event.get("trace_id"),
                         error_message=payload.get("error"),
+                        commit=False,
                     )
                 if event_type == "task.failed":
                     failed = state_store.get_task(self.conn, task_id)
@@ -109,6 +118,7 @@ class StateWriter:
                     self.conn, task_id=task_id, agent_id=source,
                     name=payload.get("name", "?"), path=payload.get("path", ""),
                     sha256=payload.get("sha256", ""),
+                    commit=False,
                 )
             elif event_type.startswith("agent.") and event_type.endswith(".heartbeat"):
                 state_store.update_heartbeat(
@@ -116,18 +126,36 @@ class StateWriter:
                     lease_ttl_seconds=payload.get("lease_ttl_seconds", 90),
                     endpoint=payload.get("endpoint"),
                     skills=payload.get("skills"),
+                    commit=False,
                 )
                 from orchestrator import agent_profile_store
 
                 agent_profile_store.assign_seed_profile(self.conn, source)
             else:
+                self.conn.commit()
                 return "ignored"
         except state_store.IllegalTransition as e:
+            self.conn.rollback()
+            # Rejected attempts remain auditable but are not allowed to poison
+            # a future retry of a transient failure.
+            try:
+                state_store.record_event(self.conn, event)
+            except state_store.DuplicateEvent:
+                pass
             self._audit(event, f"illegal transition rejected: {e}")
             return "rejected"
         except KeyError as e:
+            self.conn.rollback()
+            try:
+                state_store.record_event(self.conn, event)
+            except state_store.DuplicateEvent:
+                pass
             self._audit(event, f"unknown task: {e}")
             return "rejected"
+        except Exception:
+            self.conn.rollback()
+            raise
+        self.conn.commit()
         return "applied"
 
     def _persist_interactions(

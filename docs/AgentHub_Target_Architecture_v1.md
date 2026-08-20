@@ -169,6 +169,10 @@ interrupt 采用渐进式处理：记录请求 -> 禁止新工具 -> 等待安�
 PostgreSQL 是 Conversation、Collaboration、Task、Message、Session、ActionIntent、Approval、
 Artifact 元数据和事件的事实源。NATS 只负责实时分发和解耦，不能成为唯一历史来源。
 
+State Writer 对每个 JetStream event 必须在单一数据库事务中同时写入 event_id
+去重记录和对应 Task/Run/Artifact 状态；事务失败不得留下已去重但未应用的 event，
+使同一 event_id 的 JetStream 重投能够安全完成。只有事务提交后才允许 ACK。
+
 Workspace/Git 保存实际文件产物；数据库保存路径、哈希、版本、来源和可见性。
 
 ## 10. 兼容与迁移

@@ -38,7 +38,8 @@ def create_task(conn: sqlite3.Connection, *, task_id: str, objective: str,
                 plan_context: dict | None = None,
                 timeout_seconds: int | None = None,
                 max_retries: int = 2, idempotency_key: str | None = None,
-                status: str = TaskStatus.QUEUED) -> None:
+                status: str = TaskStatus.QUEUED,
+                commit: bool = True) -> None:
     ts = now_iso()
     conn.execute(
         "INSERT INTO tasks (id, parent_id, root_id, collaboration_id,"
@@ -55,7 +56,8 @@ def create_task(conn: sqlite3.Connection, *, task_id: str, objective: str,
          timeout_seconds, max_retries,
          idempotency_key, ts, ts),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_task(conn: sqlite3.Connection, task_id: str) -> sqlite3.Row | None:
@@ -83,7 +85,8 @@ def transition_task(conn: sqlite3.Connection, task_id: str,
                     dst: TaskStatus, *,
                     result_summary: str | None = None,
                     error_message: str | None = None,
-                    review: dict | None = None) -> None:
+                    review: dict | None = None,
+                    commit: bool = True) -> None:
     """按 §5.3 校验并执行迁移；条件更新防止迟到事件覆盖（§22.3）。"""
     row = get_task(conn, task_id)
     if row is None:
@@ -119,7 +122,8 @@ def transition_task(conn: sqlite3.Connection, task_id: str,
         " WHERE id = ? AND status = ?;",
         params,
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     if cur.rowcount == 0:
         raise IllegalTransition(task_id, src.value, dst.value)  # 并发下状态已变
 
@@ -156,7 +160,8 @@ def record_event(conn: sqlite3.Connection, event: dict, *,
 
 def add_task_run(conn: sqlite3.Connection, *, task_id: str, agent_id: str,
                  attempt: int, status: str, trace_id: str | None = None,
-                 error_message: str | None = None) -> None:
+                 error_message: str | None = None,
+                 commit: bool = True) -> None:
     ts = now_iso()
     conn.execute(
         "INSERT INTO task_runs (id, task_id, agent_id, attempt, status,"
@@ -164,24 +169,26 @@ def add_task_run(conn: sqlite3.Connection, *, task_id: str, agent_id: str,
         (f"R-{uuid.uuid4().hex[:12]}", task_id, agent_id, attempt, status,
          ts, trace_id, error_message),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def add_artifact(conn: sqlite3.Connection, *, task_id: str, agent_id: str,
                  name: str, path: str, sha256: str,
-                 artifact_type: str = "file") -> None:
+                 artifact_type: str = "file", commit: bool = True) -> None:
     conn.execute(
         "INSERT INTO artifacts (id, task_id, agent_id, type, name, path,"
         " sha256, created_at) VALUES (?,?,?,?,?,?,?,?);",
         (f"A-{uuid.uuid4().hex[:12]}", task_id, agent_id, artifact_type,
          name, path, sha256, now_iso()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def upsert_agent(conn: sqlite3.Connection, *, agent_id: str, role: str = "worker",
                  endpoint: str | None = None, protocol: str = "a2a",
-                 status: str = "online") -> None:
+                 status: str = "online", commit: bool = True) -> None:
     ts = now_iso()
     conn.execute(
         "INSERT INTO agents (id, role, endpoint, protocol, status, created_at, updated_at)"
@@ -189,13 +196,15 @@ def upsert_agent(conn: sqlite3.Connection, *, agent_id: str, role: str = "worker
         " ON CONFLICT(id) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at;",
         (agent_id, role, endpoint, protocol, status, ts, ts),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def update_heartbeat(conn: sqlite3.Connection, agent_id: str,
                      lease_ttl_seconds: int = 90,
                      endpoint: str | None = None,
-                     skills: list[str] | None = None) -> None:
+                     skills: list[str] | None = None,
+                     commit: bool = True) -> None:
     """更新心跳租约（§17.4）；携带 endpoint/skills 时一并登记（v3 M2 发现注册）。"""
     from datetime import datetime, timedelta as td
 
@@ -204,7 +213,7 @@ def update_heartbeat(conn: sqlite3.Connection, agent_id: str,
     now = datetime.now(CST)
     ts = now.isoformat(timespec="seconds")
     lease = (now + td(seconds=lease_ttl_seconds)).isoformat(timespec="seconds")
-    upsert_agent(conn, agent_id=agent_id, endpoint=endpoint)
+    upsert_agent(conn, agent_id=agent_id, endpoint=endpoint, commit=False)
     conn.execute(
         "UPDATE agents SET last_seen_at = ?, lease_expires_at = ?,"
         " status = 'online', updated_at = ? WHERE id = ?;",
@@ -217,4 +226,5 @@ def update_heartbeat(conn: sqlite3.Connection, agent_id: str,
         conn.execute(
             "UPDATE agents SET skills_json = ? WHERE id = ?;",
             (json.dumps(skills, ensure_ascii=False), agent_id))
-    conn.commit()
+    if commit:
+        conn.commit()
