@@ -33,6 +33,13 @@ def test_all_published_control_plane_ports_bind_loopback():
                 service_name, published)
 
 
+def test_agentctl_compose_service_preserves_cli_entrypoint_for_subcommands():
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    service = compose["services"]["agentctl"]
+    assert service["entrypoint"] == ["agentctl"]
+    assert service["command"] == ["chat"]
+
+
 def test_agentgateway_download_is_verified_per_supported_architecture():
     dockerfile = (ROOT / "Dockerfile").read_text()
     assert "agentgateway/releases/download/v1.4.1" in dockerfile

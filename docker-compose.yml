@@ -232,7 +232,8 @@ services:
   agentctl:
     <<: *agenthub
     profiles: ["cli"]
-    command: ["agentctl", "chat"]
+    entrypoint: ["agentctl"]
+    command: ["chat"]
     stdin_open: true
     tty: true
     environment:
