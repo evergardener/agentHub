@@ -84,9 +84,12 @@ def test_migrations_upgrade_existing_database(tmp_path):
         " VALUES ('T-old', 'queued', 'keep me', 'now', 'now');")
     conn.commit()
 
-    assert migrate(conn) == [4, 5, 6, 7]
+    assert migrate(conn) == [4, 5, 6, 7, 8]
     assert conn.execute(
         "SELECT objective FROM tasks WHERE id = 'T-old';").fetchone()[0] == "keep me"
+    assert conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'alerts';"
+    ).fetchone()[0] == "alerts"
     columns = {r[1] for r in conn.execute("PRAGMA table_info(tasks);")}
     assert "collaboration_id" in columns
     agent_columns = {r[1] for r in conn.execute("PRAGMA table_info(agents);")}

@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Callable
 
 FORMAT_VERSION = 1
-QUIESCE_SERVICES = ("state-writer", "janitor", "orchestrator", "webui",
-                    "agentgateway")
+QUIESCE_SERVICES = ("state-writer", "janitor", "notifier", "orchestrator",
+                    "webui", "agentgateway")
 Runner = Callable[..., subprocess.CompletedProcess]
 
 

@@ -33,6 +33,10 @@ def client(tmp_path, monkeypatch):
                                     "task_id": "T-1"})
     state_store.update_heartbeat(conn, "codex", lease_ttl_seconds=90,
                                  endpoint="http://x:8201", skills=["coding"])
+    from state import alert_store
+    alert_store.upsert_alert(
+        conn, kind="artifact_missing", severity="warning", source="janitor",
+        task_id="T-2", detail="result.md")
     conn.close()
 
     from webui.server import create_app
@@ -67,6 +71,7 @@ def test_overview(client):
     assert ov["task_counts"]["blocked"] == 1
     assert ov["agents"][0]["id"] == "codex"
     assert ov["agents"][0]["endpoint"] == "http://x:8201"
+    assert ov["alert_counts"] == {"warning": 1}
 
 
 def test_tasks_and_detail(client):
@@ -88,6 +93,19 @@ def test_events_cursor(client):
     evs = client.get("/api/events?after=0").json()["events"]
     assert evs[0]["seq"] >= 1
     assert client.get(f"/api/events?after={evs[-1]['seq']}").json()["events"] == []
+
+
+def test_alerts_can_be_acknowledged(client):
+    alerts = client.get("/api/alerts?status=open").json()["alerts"]
+    assert len(alerts) == 1
+    assert alerts[0]["occurrences"] == 1
+    response = client.post(
+        f"/api/alerts/{alerts[0]['id']}/acknowledge",
+        json={"note": "investigating"})
+    assert response.status_code == 200
+    assert client.get("/api/alerts?status=open").json()["alerts"] == []
+    assert client.post(
+        f"/api/alerts/{alerts[0]['id']}/acknowledge", json={}).status_code == 409
 
 
 def test_approve_and_reject(client):
@@ -204,6 +222,10 @@ def test_secure_webui_role_boundaries(secure_client, monkeypatch):
     assert secure_client.post(
         "/api/tasks/T-1/interventions", json={"mode": "comment"},
         headers={"X-CSRF-Token": viewer_csrf}).status_code == 403
+    alert_id = secure_client.get("/api/alerts?status=open").json()["alerts"][0]["id"]
+    assert secure_client.post(
+        f"/api/alerts/{alert_id}/acknowledge", json={},
+        headers={"X-CSRF-Token": viewer_csrf}).status_code == 403
 
     operator, operator_csrf = _login(
         secure_client, "operator-token-012345")
@@ -216,6 +238,9 @@ def test_secure_webui_role_boundaries(secure_client, monkeypatch):
     assert secure_client.post(
         "/api/grants", json={"pattern": "restart"},
         headers={"X-CSRF-Token": operator_csrf}).status_code == 403
+    assert secure_client.post(
+        f"/api/alerts/{alert_id}/acknowledge", json={"note": "owned"},
+        headers={"X-CSRF-Token": operator_csrf}).status_code == 200
 
 
 def test_secure_webui_rejects_tampered_cookie(secure_client):

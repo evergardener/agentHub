@@ -6,6 +6,7 @@ import json
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 @dataclass(frozen=True)
@@ -152,6 +153,26 @@ def check_production_env(path: Path) -> list[Finding]:
         findings.append(Finding(
             "warning", "LAS_WEBUI_COOKIE_SECURE",
             "当前仅适用于 loopback HTTP；经 HTTPS 反代时必须设为 true"))
+
+    alert_url = env.get("LAS_ALERT_WEBHOOK_URL", "").strip()
+    alert_token = env.get("LAS_ALERT_WEBHOOK_TOKEN", "")
+    if not alert_url:
+        findings.append(Finding(
+            "warning", "LAS_ALERT_WEBHOOK_URL",
+            "未配置外部通知；告警仅保留在 WebUI"))
+        if alert_token:
+            findings.append(Finding(
+                "error", "LAS_ALERT_WEBHOOK_TOKEN", "URL 为空时不得单独配置"))
+    else:
+        parsed = urlparse(alert_url)
+        if (parsed.scheme != "https" or not parsed.hostname
+                or parsed.username or parsed.password):
+            findings.append(Finding(
+                "error", "LAS_ALERT_WEBHOOK_URL",
+                "生产必须使用无内嵌凭据的 HTTPS URL"))
+        if alert_token and len(alert_token) < 16:
+            findings.append(Finding(
+                "error", "LAS_ALERT_WEBHOOK_TOKEN", "至少 16 个字符"))
     return findings
 
 

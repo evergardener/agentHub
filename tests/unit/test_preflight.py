@@ -23,6 +23,8 @@ def _secure_env() -> str:
         "LAS_WEBUI_SESSION_SECRET=" + "s" * 64,
         "LAS_WEBUI_TOKENS=" + json.dumps({"w" * 48: "admin"}),
         "LAS_WEBUI_COOKIE_SECURE=true",
+        "LAS_ALERT_WEBHOOK_URL=https://alerts.example.test/agenthub",
+        "LAS_ALERT_WEBHOOK_TOKEN=" + "n" * 32,
         "",
     ])
 

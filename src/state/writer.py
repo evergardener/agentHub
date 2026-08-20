@@ -87,6 +87,20 @@ class StateWriter:
                         status=dst.value, trace_id=event.get("trace_id"),
                         error_message=payload.get("error"),
                     )
+                if event_type == "task.failed":
+                    failed = state_store.get_task(self.conn, task_id)
+                    if (failed is not None
+                            and failed["retry_count"] >= failed["max_retries"]):
+                        from state import alert_store
+
+                        alert_store.upsert_alert(
+                            self.conn,
+                            kind="task_retries_exhausted",
+                            severity="critical",
+                            source="state-writer",
+                            task_id=task_id,
+                            detail=payload.get("error") or "task failed",
+                        )
                 if event_type == "task.input_required":
                     self._persist_interactions(
                         task_id, source, payload)

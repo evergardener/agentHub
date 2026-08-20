@@ -111,7 +111,8 @@ python3 scripts/production-preflight.py .env
 python3 scripts/production-preflight.py --strict .env
 ```
 
-只有显示 `PASS`（或明确接受非 strict 的 loopback cookie warning）后再启动。
+只有显示 `PASS`（或明确接受非 strict 的 loopback cookie / WebUI-only 告警
+warning）后再启动；正式生产建议使用 `--strict` 并配置 HTTPS webhook。
 
 ### 3.3 启动控制面
 
@@ -120,7 +121,7 @@ docker compose up -d
 docker compose ps          # 全部 Up / healthy
 ```
 
-`state-writer` 会同时探测数据库与 NATS，`janitor` 探测数据库，WebUI 和
+`state-writer` 会同时探测数据库与 NATS，`janitor`/`notifier` 探测数据库，WebUI 和
 Orchestrator 的 `/ready` 会验证数据库，agentgateway 则验证监听端口。依赖服务
 未 ready 时，下游不会提前启动；连续失败会在 `docker compose ps` 显示
 `unhealthy`。所有容器使用有界 `json-file` 日志（单文件 10MB、保留 5 个），
@@ -140,6 +141,28 @@ Orchestrator 的 `/ready` 会验证数据库，agentgateway 则验证监听端�
     Python 模块，不必须在容器里跑；基础设施已映射到 127.0.0.1，包装脚本
     自动把 .env 翻译为宿主机视角（PG/gateway 地址改写）。前提是宿主机
     已 `pip install -e .`（注册 `agentctl` 入口点）。
+
+### 3.3.1 告警与通知
+
+Janitor 的租约过期、执行超时、产物缺失，以及重试耗尽的任务会写入持久
+`alerts` outbox，并产生 `system.alert` 审计事件。WebUI「告警中心」实时显示未确认
+告警；`operator`/`admin` 可确认，`viewer` 只读。同一 kind/task/detail 只建立一条
+告警，重复发生增加 `occurrences`，不会形成通知风暴。
+
+外部通知是显式启用的：
+
+```dotenv
+LAS_ALERT_WEBHOOK_URL=https://alerts.example.com/agenthub
+LAS_ALERT_WEBHOOK_TOKEN=<至少16字符的Bearer token>
+LAS_ALERT_POLL_INTERVAL=10
+LAS_ALERT_WEBHOOK_TIMEOUT=10
+```
+
+非 loopback webhook 必须使用 HTTPS，URL 不允许内嵌账号密码。投递只发送告警
+字段，不发送任何 Agent 隐藏推理或系统密钥；HTTP/传输失败采用 5 秒起、最长
+5 分钟的指数退避，连续三次失败把原告警升级为 `critical`。未配置 webhook 时
+告警仍完整保留在数据库/WebUI，生产预检给出 warning，`--strict` 会阻止上线。
+Webhook 恢复后 notifier 继续投递未成功记录，成功告警不会重复发送。
 
 ### 3.4 接入 worker（宿主机）
 

@@ -97,7 +97,9 @@ revision 写许可失效。
   Cosign OIDC 签名。待首次远端 workflow 成功并验证签名/attestation 后勾选；
 - [x] WebUI/Orchestrator readiness、State Writer/Janitor 依赖探针、Gateway
   端口探针、Compose 健康依赖、资源上限与容器日志轮换；
-- 告警路由与通知升级；
+- [ ] 告警实现已完成：持久去重 outbox、WebUI 确认、可选 HTTPS webhook、
+  指数退避及三次失败 critical 升级；待目标环境配置真实 webhook 并完成
+  失败/恢复投递演练后勾选；
 - [x] PostgreSQL custom dump、JetStream、agent-data、宿主机 Workspace 一致性
   备份与离线完整性校验；
 - [x] 受显式确认保护的自动化恢复：恢复前 safety backup、PG exit-on-error、

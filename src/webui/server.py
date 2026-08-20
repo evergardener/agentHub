@@ -259,7 +259,13 @@ def create_app() -> FastAPI:
             grants = _rows(conn.execute(
                 "SELECT id, pattern, note, created_at FROM approval_grants"
                 " WHERE revoked_at IS NULL ORDER BY id;"))
-            return {"agents": agents, "task_counts": counts, "grants": grants}
+            alert_counts = {
+                r["severity"]: r["n"] for r in conn.execute(
+                    "SELECT severity, COUNT(*) AS n FROM alerts"
+                    " WHERE status = 'open' GROUP BY severity;")
+            }
+            return {"agents": agents, "task_counts": counts, "grants": grants,
+                    "alert_counts": alert_counts}
         finally:
             conn.close()
 
@@ -368,6 +374,33 @@ def create_app() -> FastAPI:
                 " ORDER BY seq LIMIT ?;", (after, limit)))}
         finally:
             conn.close()
+
+    @app.get("/api/alerts")
+    def alerts(status: str | None = "open", limit: int = 200):
+        from state.alert_store import list_alerts
+
+        conn = _conn()
+        try:
+            return {"alerts": list_alerts(conn, status=status, limit=limit)}
+        finally:
+            conn.close()
+
+    @app.post("/api/alerts/{alert_id}/acknowledge")
+    def acknowledge_alert(alert_id: str, body: dict, request: Request):
+        from state.alert_store import acknowledge_alert
+
+        note = body.get("note", "") if isinstance(body, dict) else ""
+        conn = _conn()
+        try:
+            changed = acknowledge_alert(
+                conn, alert_id, actor=f"webui:{request.state.role}", note=note)
+        finally:
+            conn.close()
+        if not changed:
+            return JSONResponse(
+                {"error": "alert not found or already acknowledged"},
+                status_code=409)
+        return {"id": alert_id, "status": "acknowledged"}
 
     @app.get("/api/events/stream")
     async def events_stream(request: Request, after: int = 0):

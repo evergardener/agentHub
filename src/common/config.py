@@ -23,6 +23,8 @@
   LAS_WEBUI_SESSION_SECRET（无别名）            WebUI session cookie HMAC 密钥
   LAS_ORCH_REQUIRE_AUTH  （无别名）              Orchestrator A2A 强制认证开关
   LAS_REQUIRE_MIGRATION_BACKUP（无别名）         生产迁移前强制备份回执
+  LAS_ALERT_WEBHOOK_URL（无别名）               可选告警 HTTPS webhook
+  LAS_ALERT_WEBHOOK_TOKEN（无别名）             webhook Bearer token
 """
 
 from __future__ import annotations
@@ -174,6 +176,52 @@ def migration_backup_max_age() -> int:
     if not 300 <= seconds <= 604800:
         raise ValueError("LAS_MIGRATION_BACKUP_MAX_AGE 必须在 300..604800 秒之间")
     return seconds
+
+
+def alert_webhook_url() -> str:
+    return _env("LAS_ALERT_WEBHOOK_URL").strip()
+
+
+def alert_webhook_token() -> str:
+    return _env("LAS_ALERT_WEBHOOK_TOKEN")
+
+
+def alert_poll_interval() -> float:
+    seconds = float(_env("LAS_ALERT_POLL_INTERVAL", default="10"))
+    if not 1 <= seconds <= 300:
+        raise ValueError("LAS_ALERT_POLL_INTERVAL 必须在 1..300 秒之间")
+    return seconds
+
+
+def alert_webhook_timeout() -> float:
+    seconds = float(_env("LAS_ALERT_WEBHOOK_TIMEOUT", default="10"))
+    if not 1 <= seconds <= 30:
+        raise ValueError("LAS_ALERT_WEBHOOK_TIMEOUT 必须在 1..30 秒之间")
+    return seconds
+
+
+def validate_alert_webhook(url: str, token: str = "") -> None:
+    """Reject credentials over plaintext non-loopback HTTP."""
+    import ipaddress
+    from urllib.parse import urlparse
+
+    if not url:
+        if token:
+            raise ValueError("LAS_ALERT_WEBHOOK_TOKEN 已配置但 URL 为空")
+        return
+    parsed = urlparse(url)
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username or parsed.password):
+        raise ValueError("LAS_ALERT_WEBHOOK_URL 必须是无内嵌凭据的 http(s) URL")
+    host = parsed.hostname.lower()
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == "localhost"
+    if parsed.scheme != "https" and not loopback:
+        raise ValueError("非 loopback 告警 webhook 必须使用 HTTPS")
+    if token and len(token) < 16:
+        raise ValueError("LAS_ALERT_WEBHOOK_TOKEN 至少 16 个字符")
 
 
 # peer→worker 固定映射允许的 worker 白名单（Hermes 接入约定，

@@ -305,6 +305,11 @@
   <!-- 左栏：Agents + 审批 + 授权 -->
   <div class="col">
     <section class="card">
+      <h2>告警中心 <span class="badge failed" id="alert-count" style="display:none"></span></h2>
+      <div class="body" id="alerts"></div>
+    </section>
+
+    <section class="card">
       <h2>AGENTS</h2>
       <div class="body" id="agents"></div>
     </section>
@@ -425,6 +430,22 @@ function renderAgents(agents) {
   }).join("") || `<div class="empty">（无注册 agent）</div>`;
 }
 
+function renderAlerts(alerts) {
+  const c = $("#alert-count");
+  c.style.display = alerts.length ? "" : "none";
+  c.textContent = alerts.length;
+  $("#alerts").innerHTML = alerts.map(a =>
+    `<div class="appr">
+      <div class="top"><span class="tid">${esc(a.kind)}</span><span class="badge ${a.severity === "critical" ? "failed" : "blocked"}">${esc(a.severity)}</span></div>
+      <div class="obj2">${esc(a.detail || a.task_id || "系统告警")}</div>
+      <div class="sub" style="margin-bottom:8px;color:var(--mut)">${esc(a.task_id || "system")} · ${esc(a.last_seen_at)} · ×${a.occurrences}</div>
+      ${S.role !== "viewer" ? `<button class="btn ok" data-alert-ack="${esc(a.id)}">确认</button>` : `<span style="font-size:12px;color:var(--mut)">只读角色</span>`}
+    </div>`
+  ).join("") || `<div class="empty">（无未确认告警）</div>`;
+  document.querySelectorAll("[data-alert-ack]").forEach(b =>
+    b.onclick = () => acknowledgeAlert(b.dataset.alertAck, b));
+}
+
 /* ── 渲染：任务 ── */
 function renderChips(counts) {
   const states = ["queued", "assigned", "working", "blocked", "completed",
@@ -543,14 +564,16 @@ async function loadAll() {
     renderAgents(ov.agents || []);
     renderChips(ov.task_counts || {});
     renderGrants(ov.grants || []);
-    const [t, b, i] = await Promise.all([
+    const [t, b, i, a] = await Promise.all([
       fetchJson("/api/tasks" + (S.filter ? "?status=" + S.filter : "")),
       fetchJson("/api/tasks?status=blocked"),
       fetchJson("/api/interactions?status=pending"),
+      fetchJson("/api/alerts?status=open"),
     ]);
     if (!i.error) renderInteractions(i.interactions || []);
     if (!t.error) renderTasks(t.tasks || []);
     if (!b.error) renderBlocked(b.tasks || []);
+    if (!a.error) renderAlerts(a.alerts || []);
     setConn(true, "已连接");
     S.backoff = 8000;
   } catch (e) {
@@ -624,7 +647,7 @@ function startStream() {
       S.lastSeq = Math.max(S.lastSeq, e.seq);
       appendEvent(e);
       appendDetailEvent(e);
-      if (/interaction|input_required|\.blocked$/.test(e.event_type || ""))
+      if (/interaction|input_required|\.blocked$|system\.alert/.test(e.event_type || ""))
         loadAll();
     } catch (_) { /* 跳过坏帧 */ }
   };
@@ -879,6 +902,16 @@ $("#grant-pattern").addEventListener("keydown", (e) => {
 
 async function revokeGrant(id) {
   await fetchJson(`/api/grants/${id}/revoke`, {method: "POST"});
+  loadAll();
+}
+
+async function acknowledgeAlert(id, btn) {
+  if (btn) btn.disabled = true;
+  const r = await fetchJson(`/api/alerts/${encodeURIComponent(id)}/acknowledge`, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({note: "webui acknowledged"}),
+  });
+  if (r.error) alert(r.error);
   loadAll();
 }
 

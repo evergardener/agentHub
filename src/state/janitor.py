@@ -21,6 +21,7 @@ from pathlib import Path
 from common import config as cfg
 from common.models import TaskStatus
 from orchestrator import state_store
+from state import alert_store
 from state.db import CST, init_db
 
 SWEEP_INTERVAL = float(os.environ.get("JANITOR_INTERVAL", "60"))
@@ -113,9 +114,14 @@ class Janitor:
                 self._alert("artifact_missing", r["task_id"], r["path"])
 
     def _alert(self, kind: str, task_id: str | None, detail: str | None) -> None:
+        severity = ("critical" if kind == "timeout_swept" else "warning")
         alert = {"kind": kind, "task_id": task_id, "detail": detail,
+                 "severity": severity,
                  "ts": datetime.now(CST).isoformat(timespec="seconds")}
         self.alerts.append(alert)
+        alert_store.upsert_alert(
+            self.conn, kind=kind, severity=severity, source="janitor",
+            task_id=task_id, detail=detail)
         print(f"[janitor] ALERT {alert}")
 
 

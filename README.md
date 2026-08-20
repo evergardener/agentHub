@@ -31,7 +31,8 @@ pytest
 
 ## Docker 部署（Evolution v3 M2）
 
-控制面一体化镜像（hermes-brain / state-writer / janitor / agentgateway / agentctl）。
+控制面一体化镜像（hermes-brain / state-writer / janitor / notifier /
+agentgateway / agentctl）。
 Worker agent（codex / kimi / dsh / pi ...）**不打包进镜像**——宿主机自装后经心跳注册，
 没注册就不可用（`agentctl agent list` 查看在线状态）。
 
@@ -39,17 +40,19 @@ Worker agent（codex / kimi / dsh / pi ...）**不打包进镜像**——宿主�
 cp .env.example .env && chmod 600 .env
 # 填入 .env.example 标注的生产密钥后，先做不泄露密钥值的预检
 python3 scripts/production-preflight.py .env
-docker compose up -d     # nats + postgres + state-writer + janitor + agentgateway + webui + jaeger
+docker compose up -d     # 另含 notifier / orchestrator / webui / jaeger
 docker compose run --rm agentctl chat   # 与 hermes 对话
 ```
 
-- Web UI（看板 / 任务详情 / 事件流 / 审批中心）：http://127.0.0.1:18070
+- Web UI（看板 / 告警 / 任务详情 / 事件流 / 审批中心）：http://127.0.0.1:18070
 - Jaeger（OTel trace 查询）：http://127.0.0.1:16686
   （`LAS_OTEL_ENDPOINT` 置空即关闭 tracing，默认 NoOp 零开销）
 - Compose 生产模式对 WebUI 与 Orchestrator 认证 fail-closed；缺失或弱密钥时
   相应服务拒绝启动。使用 `scripts/production-preflight.py` 在启动前一次检查。
 - 一致性数据保护使用 `scripts/control-plane-backup.py create|verify`；备份不含
   `.env` 密钥，详见部署文档。
+- 告警默认持久化到 WebUI；配置 `LAS_ALERT_WEBHOOK_URL` 后由 notifier 经
+  HTTPS 投递，失败自动退避并升级，不会因外部通知不可用而丢告警。
 
 宿主机 worker 接入容器栈：
 
