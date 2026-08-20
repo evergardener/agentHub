@@ -43,8 +43,16 @@ Hermes 不直接访问 Worker endpoint、数据库表或 Agent 凭据，只调�
 
 ### Collaboration Engine
 
-管理 Conversation、Collaboration、Task、Message、revision、Session 和恢复。
+管理 Conversation、Collaboration、版本化 Task Plan/Step、Task、Message、revision、Session 和恢复。
 所有状态变更必须幂等并写审计事件。
+
+### Task Plan
+
+Hermes 对多 Agent/多步骤目标必须先创建结构化 Task DAG。每个 Step 固定 Agent ID、
+Agent Profile ID/version、依赖、预期 operation、产物和验收条件；这些字段进入 Task
+上下文并随 A2A 委派/恢复发送给原生 Agent。Profile 漂移、Agent 替换、计划 superseded
+或用户介入提升 revision 后，旧 Step 不得继续委派。超出 Step 预期 operation 的
+ActionIntent 必须升级用户，不能借 Profile 的更大权限扩大当前任务范围。
 
 ### Agent Registry 与 Profile
 

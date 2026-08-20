@@ -128,11 +128,14 @@ def test_dsh_catalog_seed_is_idempotent_and_assigns_only_when_empty(conn):
     first = agent_profile_store.seed_catalog(conn)
     second = agent_profile_store.seed_catalog(conn)
     assert first == {
-        "templates": ["TPL-DSH"], "profiles": ["AP-DSH-REVIEW"]}
+        "templates": ["TPL-CODEX", "TPL-KIMI", "TPL-DSH"],
+        "profiles": [
+            "AP-CODEX-BACKEND", "AP-KIMI-FRONTEND", "AP-DSH-REVIEW"],
+    }
     assert second == {"templates": [], "profiles": []}
     profile = agent_profile_store.profile_policy(conn, "AP-DSH-REVIEW")
     assert profile["execution_mode"] == "read_only"
-    assert "write" in profile["denied_operations"]
+    assert "filesystem.write" in profile["denied_operations"]
 
     state_store.update_heartbeat(
         conn, "dsh", endpoint="http://dsh:8203", skills=["code_review"])

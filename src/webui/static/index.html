@@ -691,6 +691,20 @@ async function openDetail(id) {
     return `${i.kind} · ${i.status} · ${i.agent_id}\n${payload}`;
   }).join("\n\n");
   const currentSession = (d.sessions || []).find(s => !!s.is_current);
+  const plan = d.plan_step;
+  let planHtml = "";
+  if (plan) {
+    const criteria = JSON.parse(plan.acceptance_criteria_json || "[]");
+    const operations = JSON.parse(plan.expected_operations_json || "[]");
+    const chain = (d.plan_steps || []).map(s =>
+      `${s.ordinal}. ${s.step_key} · ${s.agent_id} · ${s.task_status}`).join("\n");
+    planHtml = `<div class="d-sec"><h3>结构化 Task Plan · rev ${esc(plan.plan_revision)}</h3>` +
+      `<div class="mono">${esc(plan.plan_objective)}\n\n当前步骤: ${esc(plan.step_key)}\n` +
+      `Agent/Profile: ${esc(plan.agent_id)} / ${esc(plan.profile_id)}@${esc(plan.profile_version)}\n` +
+      `Context revision: ${esc(plan.plan_context_revision)}\n` +
+      `预期操作: ${esc(operations.join(", "))}\n` +
+      `验收条件: ${esc(criteria.join("；"))}\n\n${esc(chain)}</div></div>`;
+  }
   let sessionCaps = {};
   try { sessionCaps = JSON.parse(currentSession?.capabilities_json || "{}"); }
   catch (_) {}
@@ -719,6 +733,7 @@ async function openDetail(id) {
 
   $("#d-body").innerHTML =
     `<div class="d-sec"><h3>概要</h3><div class="kv">${kv}</div></div>` +
+    planHtml +
     reviewHtml +
     (t.error_message
       ? `<div class="d-sec"><h3>错误</h3><div class="mono">${esc(t.error_message)}</div></div>` : "") +

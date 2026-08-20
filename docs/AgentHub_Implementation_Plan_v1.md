@@ -193,7 +193,10 @@ revision 写许可失效。
    `rpcId`，把原生 approval/question 的 Hermes/用户决定送回同一 DSH turn；
 7. [x] 在 `LAS_RUN_DSH=1` 下验证真实 DSH Web `session.list`（无模型调用）；
    真实双轮与进程重启恢复仍需另行授权模型调用；
-8. [ ] 将 Hermes 委派从自然语言旧策略迁移到结构化 Task Plan + ActionIntent + Profile；
+8. [x] Hermes 多 Agent/多步骤委派迁移到版本化结构化 Task Plan：每步持久绑定
+   Agent/Profile version、依赖、预期操作/产物和验收条件；委派时拒绝 Agent/Profile
+   漂移或用户介入后的旧 revision，ActionIntent 超出计划范围升级用户；WebUI 任务
+   详情可查看完整计划链。legacy create_task 仅保留给单 Agent 单步骤兼容路径；
 9. [x] 为 Codex/Kimi 工具事件建立标准 PendingInteraction/ActionIntent 翻译，
     修改操作执行前必须经过控制面签名回执；
 10. [x] 将用户 comment/steer/pause/interrupt/cancel/takeover 语义接入

@@ -2,6 +2,26 @@
 # separate: this file controls Hub routing/authority; LAS_DSH_AGENT_PRESET
 # optionally selects the composition inside DSH.
 templates:
+  - id: TPL-CODEX
+    name: Codex
+    adapter_kind: codex-app-server
+    description: Backend implementation and test worker with native approvals.
+    capabilities:
+      multi_turn: true
+      native_resume: true
+      streaming: true
+      interactions: true
+
+  - id: TPL-KIMI
+    name: Kimi Code
+    adapter_kind: kimi-acp
+    description: Frontend and long-context implementation worker over ACP.
+    capabilities:
+      multi_turn: true
+      native_resume: true
+      streaming: true
+      interactions: true
+
   - id: TPL-DSH
     name: DeepSeek Harness
     adapter_kind: dsh-web
@@ -20,6 +40,42 @@ templates:
       permission_preset_env: LAS_DSH_PERMISSION_PRESET
 
 profiles:
+  - id: AP-CODEX-BACKEND
+    template_id: TPL-CODEX
+    name: Codex Backend Implementer
+    role_prompt: Implement backend changes, tests and migrations within the workspace.
+    responsibilities: [backend implementation, tests, migration review]
+    execution_mode: execute
+    allowed_operations:
+      [filesystem.read, artifact.read, git.diff, git.status, test.run,
+       filesystem.create, filesystem.write, git.commit]
+    denied_operations:
+      [filesystem.delete, git.push, git.force_push, deployment.apply,
+       database.write, secret.access, service.restart]
+    allowed_tools: [filesystem.read, filesystem.search, test.run]
+    task_types: [backend, testing, migration]
+    approval_level: hermes
+    timeout_seconds: 3600
+    max_concurrent_tasks: 1
+
+  - id: AP-KIMI-FRONTEND
+    template_id: TPL-KIMI
+    name: Kimi Frontend Implementer
+    role_prompt: Implement frontend and UX changes with focused visual verification.
+    responsibilities: [frontend implementation, UX analysis, frontend tests]
+    execution_mode: execute
+    allowed_operations:
+      [filesystem.read, artifact.read, git.diff, git.status, test.run,
+       filesystem.create, filesystem.write]
+    denied_operations:
+      [filesystem.delete, git.commit, git.push, git.force_push,
+       deployment.apply, database.write, secret.access, service.restart]
+    allowed_tools: [filesystem.read, filesystem.search, test.run]
+    task_types: [frontend, ux, testing]
+    approval_level: hermes
+    timeout_seconds: 3600
+    max_concurrent_tasks: 1
+
   - id: AP-DSH-REVIEW
     template_id: TPL-DSH
     name: DSH Independent Reviewer
@@ -32,8 +88,11 @@ profiles:
       - test and production-readiness review
       - risk identification
     execution_mode: read_only
-    allowed_operations: [read, analyze, test, review]
-    denied_operations: [write, delete, git_commit, deploy, publish]
+    allowed_operations:
+      [filesystem.read, artifact.read, git.diff, git.status, test.run]
+    denied_operations:
+      [filesystem.create, filesystem.write, filesystem.delete, git.commit,
+       git.push, git.force_push, deployment.apply, database.write]
     allowed_tools: [filesystem.read, filesystem.search, test.run]
     task_types: [analysis, review, testing]
     approval_level: hermes
@@ -41,6 +100,12 @@ profiles:
     max_concurrent_tasks: 1
 
 assignments:
+  codex:
+    template_id: TPL-CODEX
+    profile_id: AP-CODEX-BACKEND
+  kimi:
+    template_id: TPL-KIMI
+    profile_id: AP-KIMI-FRONTEND
   dsh:
     template_id: TPL-DSH
     profile_id: AP-DSH-REVIEW

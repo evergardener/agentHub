@@ -673,7 +673,7 @@ def create_action_intent(conn, *, collaboration_id: str, task_id: str,
 def route_action_intent(conn, intent_id: str, *, policy=None):
     """Apply structured policy and route to auto/Hermes/user authority."""
     from common import config as cfg
-    from hermes.action_policy import ActionPolicy
+    from hermes.action_policy import ActionDecision, ActionPolicy
 
     row = conn.execute(
         "SELECT * FROM action_intents WHERE id = ?;", (intent_id,)
@@ -696,6 +696,27 @@ def route_action_intent(conn, intent_id: str, *, policy=None):
     decision = policy.evaluate(
         operation=row["operation"], targets=json.loads(row["targets_json"]),
         rollback_plan=row["rollback_plan"], profile=profile)
+    from orchestrator import task_plan_store
+
+    plan_step = task_plan_store.get_step_for_task(conn, row["task_id"])
+    if plan_step is not None:
+        expected = set(json.loads(
+            plan_step["expected_operations_json"] or "[]"))
+        profile_version = profile.get("version") if profile else None
+        current_revision = _current_revision(
+            conn, plan_step["plan_collaboration_id"])[1]
+        if (plan_step["plan_status"] != "active"
+                or plan_step["plan_context_revision"] != current_revision
+                or plan_step["agent_id"] != row["requested_by_agent_id"]
+                or plan_step["profile_id"] != profile_id
+                or plan_step["profile_version"] != profile_version):
+            decision = ActionDecision(
+                "user", "critical",
+                "Task Plan 的 Agent/Profile 快照已失效，必须重新规划")
+        elif row["operation"] not in expected:
+            decision = ActionDecision(
+                "user", "critical",
+                f"操作不在 Task Plan 预期范围: {row['operation']}")
     status = {
         "auto": "approved",
         "hermes": "awaiting_hermes",
@@ -730,6 +751,7 @@ def route_action_intent(conn, intent_id: str, *, policy=None):
                 "status": status,
                 "reason": decision.reason,
                 "profile_id": profile_id,
+                "plan_step_id": plan_step["id"] if plan_step else None,
             })
         conn.commit()
     except Exception:

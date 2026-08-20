@@ -33,6 +33,30 @@ def client(tmp_path, monkeypatch):
                                     "task_id": "T-1"})
     state_store.update_heartbeat(conn, "codex", lease_ttl_seconds=90,
                                  endpoint="http://x:8201", skills=["coding"])
+    from orchestrator import (
+        agent_profile_store,
+        collaboration_store,
+        task_plan_store,
+    )
+    agent_profile_store.seed_catalog(conn)
+    agent_profile_store.assign_seed_profile(conn, "codex")
+    conversation_id = collaboration_store.create_conversation(conn)
+    collaboration_id = collaboration_store.create_collaboration(
+        conn, conversation_id=conversation_id, objective="planned research")
+    conn.execute(
+        "UPDATE tasks SET collaboration_id = ? WHERE id = 'T-2';",
+        (collaboration_id,),
+    )
+    task_plan_store.create_plan(
+        conn, collaboration_id=collaboration_id, objective="planned research",
+        project="webui-test", steps=[{
+            "key": "research", "task_id": "T-2", "objective": "调研 X",
+            "agent_id": "codex", "profile_id": "AP-CODEX-BACKEND",
+            "profile_version": 1, "depends_on": [],
+            "expected_artifacts": ["report.md"],
+            "acceptance_criteria": ["report exists"],
+            "expected_operations": ["filesystem.read"],
+        }])
     from state import alert_store
     alert_store.upsert_alert(
         conn, kind="artifact_missing", severity="warning", source="janitor",
@@ -85,6 +109,12 @@ def test_tasks_and_detail(client):
     assert detail["interactions"] == []
     assert detail["sessions"] == []
     assert detail["messages"] == []
+    assert detail["plan_step"] is None
+    assert detail["plan_steps"] == []
+    planned = client.get("/api/tasks/T-2").json()
+    assert planned["plan_step"]["step_key"] == "research"
+    assert planned["plan_step"]["profile_id"] == "AP-CODEX-BACKEND"
+    assert planned["plan_steps"][0]["task_status"] == "queued"
     assert client.get("/api/interactions").json()["interactions"] == []
     assert client.get("/api/tasks/NOPE").status_code == 404
 

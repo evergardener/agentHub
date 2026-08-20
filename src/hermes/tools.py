@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -29,8 +30,36 @@ def load_agents(path: Path | None = None) -> dict:
 
 TOOL_SCHEMAS: list[dict] = [
     {"type": "function", "function": {
+        "name": "create_task_plan",
+        "description": "创建并激活结构化多步骤 Task Plan；每步绑定 Agent/Profile、"
+                       "依赖、预期操作、产物和验收条件。多 Agent/多步骤任务必须先调用。",
+        "parameters": {"type": "object", "properties": {
+            "objective": {"type": "string"},
+            "project": {"type": "string"},
+            "steps": {"type": "array", "minItems": 1, "maxItems": 50,
+                      "items": {"type": "object", "properties": {
+                          "key": {"type": "string"},
+                          "objective": {"type": "string"},
+                          "agent_id": {"type": "string"},
+                          "depends_on": {"type": "array",
+                                         "items": {"type": "string"}},
+                          "expected_operations": {"type": "array",
+                                                  "description": "精确 operation ID；"
+                                                                 "必须来自 list_agents"
+                                                                 " 的 Profile allowlist",
+                                                  "items": {"type": "string"}},
+                          "expected_artifacts": {"type": "array",
+                                                 "items": {"type": "string"}},
+                          "acceptance_criteria": {"type": "array",
+                                                  "items": {"type": "string"}},
+                      }, "required": ["key", "objective", "agent_id",
+                                      "expected_operations",
+                                      "acceptance_criteria"]}},
+        }, "required": ["objective", "steps"]}}},
+    {"type": "function", "function": {
         "name": "create_task",
-        "description": "创建任务（可选父子/依赖关系）。返回 task_id。",
+        "description": "兼容路径：仅创建单 Agent 单步骤小任务。多 Agent/多步骤"
+                       "必须使用 create_task_plan。返回 task_id。",
         "parameters": {"type": "object", "properties": {
             "objective": {"type": "string", "description": "任务目标"},
             "project": {"type": "string"},
@@ -173,6 +202,89 @@ class HermesTools:
 
     # ---------- 任务 ----------
 
+    async def _tool_create_task_plan(self, objective: str, steps: list[dict],
+                                     project: str | None = None) -> dict:
+        from orchestrator import agent_profile_store, task_plan_store
+
+        if not self.collaboration_id:
+            raise ValueError("Task Plan 必须属于持久 collaboration")
+        task_plan_store.validate_steps(steps)
+        prepared: list[dict] = []
+        for step in steps:
+            agent = self._agent_or_error(step["agent_id"])
+            if "error" in agent:
+                raise ValueError(agent["error"])
+            profile_id = agent.get("profile_id")
+            if not profile_id:
+                raise ValueError(
+                    f"agent {step['agent_id']} 尚未绑定 Agent Profile")
+            profile = agent_profile_store.profile_policy(
+                self.tm.conn, profile_id)
+            if profile["status"] != "active":
+                raise ValueError(f"Agent Profile 未启用: {profile_id}")
+            operations = step["expected_operations"]
+            allowed = set(profile.get("allowed_operations") or [])
+            denied = set(profile.get("denied_operations") or [])
+            disallowed = set(operations) & denied
+            outside = set(operations) - allowed if allowed else set()
+            if disallowed or outside:
+                raise PermissionError(
+                    f"步骤 {step['key']} 的操作超出 Profile: "
+                    f"{sorted(disallowed | outside)}")
+            prepared.append({
+                **step,
+                "profile_id": profile_id,
+                "profile_version": profile["version"],
+                "profile_name": profile["name"],
+                "role_prompt": profile.get("role_prompt"),
+                "responsibilities": profile.get("responsibilities") or [],
+                "timeout_seconds": profile["timeout_seconds"],
+            })
+
+        resolved: list[dict] = []
+        task_ids: dict[str, str] = {}
+        for step in prepared:
+            dependency_ids = [task_ids[key]
+                              for key in step.get("depends_on") or []]
+            context = {
+                "plan_objective": objective,
+                "step_key": step["key"],
+                "agent_id": step["agent_id"],
+                "profile_id": step["profile_id"],
+                "profile_version": step["profile_version"],
+                "profile_name": step["profile_name"],
+                "role_prompt": step["role_prompt"],
+                "responsibilities": step["responsibilities"],
+                "expected_operations": step["expected_operations"],
+                "expected_artifacts": step.get("expected_artifacts") or [],
+                "acceptance_criteria": step["acceptance_criteria"],
+            }
+            task_id = self.tm.create_task(
+                step["objective"], project=project,
+                collaboration_id=self.collaboration_id,
+                depends_on=dependency_ids,
+                timeout_seconds=step["timeout_seconds"],
+                context=context,
+            )
+            task_ids[step["key"]] = task_id
+            resolved.append({
+                **step,
+                "task_id": task_id,
+                "profile_id": step["profile_id"],
+                "profile_version": step["profile_version"],
+            })
+        plan = task_plan_store.create_plan(
+            self.tm.conn, collaboration_id=self.collaboration_id,
+            objective=objective, project=project, steps=resolved)
+        return {
+            "plan_id": plan["id"], "revision": plan["revision"],
+            "status": plan["status"],
+            "steps": [{"key": step["key"], "task_id": step["task_id"],
+                       "agent_id": step["agent_id"],
+                       "profile_id": step["profile_id"]}
+                      for step in resolved],
+        }
+
     async def _tool_create_task(self, objective: str,
                                 project: str | None = None,
                                 depends_on: list[str] | None = None) -> dict:
@@ -189,6 +301,10 @@ class HermesTools:
         agent = self._agent_or_error(agent_id)
         if "error" in agent:
             return agent
+        from orchestrator import task_plan_store
+
+        task_plan_store.validate_delegation(
+            self.tm.conn, task_id=task_id, agent_id=agent_id)
         decision = self.policy.decide(self.tm.conn, row["objective"])
         if decision.action == "ask":
             return {"status": "needs_approval", "task_id": task_id,
@@ -209,6 +325,10 @@ class HermesTools:
         agent = self._agent_or_error(agent_id)
         if "error" in agent:
             return agent
+        from orchestrator import task_plan_store
+
+        task_plan_store.validate_delegation(
+            self.tm.conn, task_id=task_id, agent_id=agent_id)
         # 对话即审批：记录批准事件后委派
         from orchestrator import state_store
         state_store.record_event(self.tm.conn, {
@@ -265,13 +385,28 @@ class HermesTools:
             for r in rows]}
 
     async def _tool_list_agents(self) -> dict:
+        from orchestrator import agent_profile_store
+
         out = []
         for k, v in self._resolve_agents().items():
             status = {True: "online", False: "offline", None: "static"}[v["online"]]
+            profile = None
+            if v.get("profile_id"):
+                profile = agent_profile_store.profile_policy(
+                    self.tm.conn, v["profile_id"])
             out.append({"id": k, "endpoint": v.get("endpoint", ""),
                         "skills": v.get("skills", []), "status": status,
                         "template_id": v.get("template_id"),
-                        "profile_id": v.get("profile_id")})
+                        "profile_id": v.get("profile_id"),
+                        "profile": ({
+                            "version": profile["version"],
+                            "name": profile["name"],
+                            "execution_mode": profile["execution_mode"],
+                            "responsibilities": profile["responsibilities"],
+                            "allowed_operations": profile["allowed_operations"],
+                            "denied_operations": profile["denied_operations"],
+                            "status": profile["status"],
+                        } if profile else None)})
         return {"agents": out}
 
     # ---------- 常驻授权 ----------

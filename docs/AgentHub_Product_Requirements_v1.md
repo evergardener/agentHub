@@ -67,6 +67,7 @@ Codex、Kimi、DeepSeek Harness（DSH）以及后续的 Pi 等 Agent 保持独�
 |---|---|---|
 | Conversation | 用户与 Hermes 的长期对话 | 可跨项目和多天 |
 | Collaboration | 一次完整目标或项目协作 | 从规划到最终汇报 |
+| Task Plan / Step | Hermes 的版本化任务 DAG 与执行契约 | 激活、失效、重规划 |
 | Task | 可独立执行和验收的工作单元 | 属于一个 Collaboration |
 | Agent Session | Task 与某 Agent 原生 Session 的绑定 | 可暂停、恢复或重建 |
 | Message | 用户/Hermes/Agent/System 的持久化消息 | 有单调顺序和投递状态 |
@@ -79,9 +80,10 @@ Codex、Kimi、DeepSeek Harness（DSH）以及后续的 Pi 等 Agent 保持独�
 ## 5. 标准工作流
 
 1. 用户向 Hermes 提交目标。
-2. Hermes 创建 Collaboration，并形成候选 Task DAG。
-3. Hermes 向实施 Agent 发送目标、约束和候选验收标准。
-4. Agent 返回技术方案、风险、依赖、问题、预计操作和产物。
+2. Hermes 创建 Collaboration，并形成结构化 Task Plan/DAG；每步绑定 Agent/Profile
+   version、依赖、预期 operation/产物和验收条件。
+3. Hermes 向实施 Agent 发送完整 Step 执行契约，而不是只发送自然语言 objective。
+4. Agent 在同一 Session 返回技术方案、风险、依赖、问题、预计操作和产物。
 5. Hermes 与 Agent 在同一 task/context 内多轮确认；必要时询问用户。
 6. 方案确认后 Task 进入 ready。
 7. Agent 对每类修改提交 ActionIntent。

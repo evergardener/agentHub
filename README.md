@@ -20,6 +20,10 @@ Hermes 主控的本地多 Agent 协作系统。现行产品与开发基线：
 | Workspace + Git | 共享工件 / 项目状态 |
 | Memory 接口 + Hindsight | 长期记忆（可替换实现） |
 
+多 Agent/多步骤委派使用版本化结构化 Task Plan：每步绑定 Agent/Profile
+version、依赖、预期操作/产物和验收条件；用户介入或 Profile 漂移会使旧计划
+fail-closed，任务详情可追溯完整计划链。
+
 ## 开发
 
 ```bash

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytestmark = pytest.mark.anyio
@@ -94,6 +96,39 @@ async def test_native_binding_is_persisted_and_resumed(tmp_path, monkeypatch):
     assert client.sent[0]["idempotency_key"] != \
         client.sent[1]["idempotency_key"]
     assert second["last_message_seq"] == 2
+
+
+async def test_structured_plan_contract_is_sent_and_persisted(
+        tmp_path, monkeypatch):
+    from orchestrator import collaboration_store
+    from orchestrator.a2a_client import A2aClient
+    from orchestrator.task_manager import TaskManager
+
+    client = FakeA2aClient(native=True)
+    monkeypatch.setattr(
+        A2aClient, "for_agent", classmethod(
+            lambda cls, agent_name, direct_endpoint, timeout=30: client))
+    tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
+    conversation_id = collaboration_store.create_conversation(tm.conn)
+    collaboration_id = collaboration_store.create_collaboration(
+        tm.conn, conversation_id=conversation_id, objective="planned")
+    contract = {
+        "step_key": "backend", "profile_id": "AP-CODEX-BACKEND",
+        "expected_operations": ["filesystem.write"],
+        "acceptance_criteria": ["tests pass"],
+    }
+    task_id = tm.create_task(
+        "implement API", collaboration_id=collaboration_id, context=contract)
+    await (await tm.delegate_task(task_id, "http://fake", "codex"))
+
+    sent = client.sent[0]
+    assert "AgentHub structured Task Plan contract" in sent["text"]
+    assert "ActionIntent" in sent["text"]
+    assert sent["metadata"]["taskPlan"] == contract
+    binding = collaboration_store.get_current_agent_session(
+        tm.conn, task_id, "codex")
+    snapshot = json.loads(binding["context_snapshot_json"])
+    assert snapshot["task_plan"] == contract
 
 
 async def test_nondurable_binding_creates_audited_replacement(

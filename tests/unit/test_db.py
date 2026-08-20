@@ -24,6 +24,7 @@ def test_init_db_creates_tables_and_wal(tmp_path):
         "conversations", "collaborations", "conversation_messages",
         "agent_session_bindings", "action_intents",
         "agent_templates", "agent_profiles", "agent_profile_versions",
+        "task_plans", "task_plan_steps",
     } <= tables
 
 
@@ -84,7 +85,7 @@ def test_migrations_upgrade_existing_database(tmp_path):
         " VALUES ('T-old', 'queued', 'keep me', 'now', 'now');")
     conn.commit()
 
-    assert migrate(conn) == [4, 5, 6, 7, 8]
+    assert migrate(conn) == [4, 5, 6, 7, 8, 9]
     assert conn.execute(
         "SELECT objective FROM tasks WHERE id = 'T-old';").fetchone()[0] == "keep me"
     assert conn.execute(
@@ -92,6 +93,8 @@ def test_migrations_upgrade_existing_database(tmp_path):
     ).fetchone()[0] == "alerts"
     columns = {r[1] for r in conn.execute("PRAGMA table_info(tasks);")}
     assert "collaboration_id" in columns
+    assert "plan_step_id" in columns
+    assert "plan_context_json" in columns
     agent_columns = {r[1] for r in conn.execute("PRAGMA table_info(agents);")}
     assert {"template_id", "profile_id"} <= agent_columns
     binding_columns = {

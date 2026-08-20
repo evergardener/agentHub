@@ -35,6 +35,7 @@ def create_task(conn: sqlite3.Connection, *, task_id: str, objective: str,
                 collaboration_id: str | None = None,
                 priority: str = "normal", assigned_to: str | None = None,
                 depends_on: list[str] | None = None,
+                plan_context: dict | None = None,
                 timeout_seconds: int | None = None,
                 max_retries: int = 2, idempotency_key: str | None = None,
                 status: str = TaskStatus.QUEUED) -> None:
@@ -43,12 +44,15 @@ def create_task(conn: sqlite3.Connection, *, task_id: str, objective: str,
         "INSERT INTO tasks (id, parent_id, root_id, collaboration_id,"
         " project, created_by,"
         " assigned_to, status, priority, objective, depends_on_json,"
-        " timeout_seconds, max_retries, idempotency_key, created_at, updated_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
+        " plan_context_json, timeout_seconds, max_retries, idempotency_key,"
+        " created_at, updated_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);",
         (task_id, parent_id, root_id or task_id, collaboration_id,
          project, created_by,
          assigned_to, status, priority, objective,
-         json.dumps(depends_on or []), timeout_seconds, max_retries,
+         json.dumps(depends_on or []),
+         json.dumps(plan_context, ensure_ascii=False) if plan_context else None,
+         timeout_seconds, max_retries,
          idempotency_key, ts, ts),
     )
     conn.commit()

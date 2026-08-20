@@ -310,6 +310,25 @@ def create_app() -> FastAPI:
             sessions = _rows(conn.execute(
                 "SELECT * FROM agent_session_bindings WHERE task_id = ?"
                 " ORDER BY is_current DESC, created_at DESC;", (task_id,)))
+            plan_step_row = conn.execute(
+                "SELECT s.*, t.status AS task_status, p.revision AS plan_revision,"
+                " p.status AS plan_status, p.objective AS plan_objective,"
+                " p.based_on_revision AS plan_context_revision"
+                " FROM task_plan_steps s JOIN task_plans p ON p.id = s.plan_id"
+                " JOIN tasks t ON t.id = s.task_id"
+                " WHERE s.task_id = ?;", (task_id,),
+            ).fetchone()
+            plan_step = ({key: plan_step_row[key]
+                          for key in plan_step_row.keys()}
+                         if plan_step_row else None)
+            plan_steps = (_rows(conn.execute(
+                "SELECT s.step_key, s.ordinal, s.task_id, s.objective,"
+                " s.agent_id, s.profile_id, s.profile_version,"
+                " s.depends_on_json,"
+                " t.status AS task_status"
+                " FROM task_plan_steps s JOIN tasks t ON t.id = s.task_id"
+                " WHERE s.plan_id = ? ORDER BY s.ordinal;",
+                (plan_step_row["plan_id"],))) if plan_step_row else [])
             messages = (_rows(conn.execute(
                 "SELECT id, sender_type, sender_id, recipient_type,"
                 " recipient_id, message_type, content_json, sequence,"
@@ -320,7 +339,8 @@ def create_app() -> FastAPI:
             return {"task": {k: row[k] for k in keys}, "runs": runs,
                     "artifacts": artifacts, "events": events,
                     "interactions": interactions, "sessions": sessions,
-                    "messages": messages}
+                    "messages": messages, "plan_step": plan_step,
+                    "plan_steps": plan_steps}
         finally:
             conn.close()
 

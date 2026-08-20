@@ -41,7 +41,7 @@ class TaskManager:
                     priority: str = "normal",
                     timeout_seconds: int = 1800,
                     max_retries: int = 2,
-                    context: str | None = None) -> str:
+                    context: dict | str | None = None) -> str:
         task_id = next_task_id(self.conn)
         root_id = parent_id or task_id
         if parent_id:
@@ -61,6 +61,7 @@ class TaskManager:
                 created_by="hermes", project=project, parent_id=parent_id,
                 root_id=root_id, collaboration_id=collaboration_id,
                 priority=priority, depends_on=depends_on,
+                plan_context=context if isinstance(context, dict) else None,
                 timeout_seconds=timeout_seconds, max_retries=max_retries,
                 idempotency_key=make_idem_key(task_id, 1),
                 status=TaskStatus.CREATED,
@@ -75,8 +76,13 @@ class TaskManager:
             f"project: {project}\nobjective: |\n  {objective}\n",
             encoding="utf-8",
         )
-        (tdir / "context.md").write_text(context or f"# Task {task_id}\n\n{objective}\n",
-                                         encoding="utf-8")
+        context_text = (
+            json.dumps(context, ensure_ascii=False, indent=2)
+            if isinstance(context, dict) else context
+        )
+        (tdir / "context.md").write_text(
+            context_text or f"# Task {task_id}\n\n{objective}\n",
+            encoding="utf-8")
         # depends_on 门控（§5.3）：前置任务全部 accepted 才可 queued
         if depends_on and not self._deps_satisfied(depends_on):
             pass  # 保持 created，等待 promote_dependents
@@ -215,6 +221,8 @@ class TaskManager:
                     "objective": row["objective"],
                     "project": row["project"],
                     "context_revision": context_revision,
+                    "task_plan": json.loads(
+                        row["plan_context_json"] or "null"),
                 })
 
         async def _call() -> None:
@@ -222,8 +230,18 @@ class TaskManager:
             try:
                 delivery_sequence = (
                     turn_sequence if collaboration_id else attempt)
+                plan_context = json.loads(row["plan_context_json"] or "null")
+                instruction = row["objective"]
+                if plan_context:
+                    instruction += (
+                        "\n\n[AgentHub structured Task Plan contract]\n"
+                        + json.dumps(plan_context, ensure_ascii=False, indent=2)
+                        + "\nAny modifying operation must be requested as a structured "
+                        "ActionIntent before execution. Ask Hermes when requirements, "
+                        "risks, or acceptance criteria are ambiguous."
+                    )
                 response = await client.send_message(
-                    row["objective"],
+                    instruction,
                     idempotency_key=make_idem_key(
                         task_id, delivery_sequence),
                     trace_id=f"trace-{row['root_id']}",
@@ -232,7 +250,8 @@ class TaskManager:
                     native_session_id=native_session_id,
                     context_revision=context_revision,
                     replace_session=binding is not None,
-                    metadata={"recoveryMode": recovery_plan},
+                    metadata={"recoveryMode": recovery_plan,
+                              "taskPlan": plan_context},
                 )
                 dispatched = True
                 saved_binding = _save_binding(
