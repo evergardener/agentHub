@@ -168,6 +168,19 @@ LAS_ALERT_WEBHOOK_TIMEOUT=10
 告警仍完整保留在数据库/WebUI，生产预检给出 warning，`--strict` 会阻止上线。
 Webhook 恢复后 notifier 继续投递未成功记录，成功告警不会重复发送。
 
+本机隔离 HTTPS 故障门禁需显式开启：
+
+```bash
+LAS_RUN_ALERT_WEBHOOK=1 \
+  .venv/bin/python -m pytest -q \
+  tests/integration/test_alert_webhook_fault.py
+```
+
+该门禁使用临时自签证书、随机 loopback 端口和临时 SQLite：连续三次 503 后确认
+原告警升级为 `critical`，切换 204 后确认恢复投递且不重复发送。2026-08-20 已在
+本机真实执行通过（1 passed）。这不替代目标环境正式证书、反向代理、DNS、网络
+策略和接收端的同类演练。
+
 ### 3.4 接入 worker（宿主机）
 
 ```bash
