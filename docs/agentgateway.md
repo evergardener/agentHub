@@ -58,7 +58,7 @@ LAS_RUN_GW=1 .venv/bin/python -m pytest tests/integration/test_agentgateway.py
 ```
 
 覆盖：配置 schema / 无 key 401 / 经 gateway 委派成功 / 禁用 Agent 后 403 /
-路由限流 429 / 直连回退。
+路由限流 429 / gateway 进程重启后同幂等键不重复执行 / 直连回退。
 
 ## 跨主机剖面
 

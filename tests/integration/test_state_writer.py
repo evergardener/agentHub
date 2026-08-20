@@ -7,6 +7,7 @@ Adapter 发事件 → State Writer 落库 → agentctl 可查；
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -68,6 +69,25 @@ async def _fetch_events(durable: str) -> list[dict]:
     finally:
         await nc.close()
     return events
+
+
+async def _publish(event: dict) -> None:
+    nc = await nats.connect(TEST_URL, connect_timeout=2,
+                            max_reconnect_attempts=1, allow_reconnect=False)
+    try:
+        await nc.jetstream().publish(
+            event["event_type"], json.dumps(event).encode("utf-8"))
+    finally:
+        await nc.close()
+
+
+async def _wait_status(conn, task_id: str, expected: str) -> None:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if state_store.get_task(conn, task_id)["status"] == expected:
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"task {task_id} did not reach {expected}")
 
 
 @requires_nats
@@ -157,3 +177,71 @@ async def test_state_plane_end_to_end(tmp_path, monkeypatch):
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+@requires_nats
+async def test_durable_writer_recovers_after_nats_restart_and_dedupes(
+        tmp_path, monkeypatch):
+    """Consumer/NATS restart must resume durable delivery without duplicate Run."""
+    monkeypatch.setenv("AGENT_WORKSPACE", str(tmp_path / "ws"))
+    monkeypatch.setenv("NATS_URL", TEST_URL)
+    store_dir = tmp_path / "jetstream-restart"
+    db_path = tmp_path / "restart.db"
+    proc = _start_nats(store_dir)
+    from orchestrator.nats_client import durable_consume, ensure_stream
+
+    writer = StateWriter(db_path)
+    task_id = "T-NATS-RESTART-1"
+    state_store.create_task(
+        writer.conn, task_id=task_id, objective="restart delivery",
+        created_by="hermes", status=TaskStatus.QUEUED)
+    state_store.transition_task(writer.conn, task_id, TaskStatus.ASSIGNED)
+    durable = "fault-restart-writer"
+
+    async def consume(current_writer, stop):
+        async def apply(event):
+            current_writer.apply(event)
+        await durable_consume(durable, apply, TEST_URL, stop_event=stop)
+
+    try:
+        await ensure_stream(TEST_URL)
+        stop = asyncio.Event()
+        consumer = asyncio.create_task(consume(writer, stop))
+        await _publish({
+            "event_id": "E-NATS-STARTED", "event_type": "task.started",
+            "task_id": task_id, "source": "codex", "payload": {"attempt": 1},
+        })
+        await _wait_status(writer.conn, task_id, "working")
+        stop.set()
+        await asyncio.wait_for(consumer, timeout=5)
+
+        completed = {
+            "event_id": "E-NATS-COMPLETED", "event_type": "task.completed",
+            "task_id": task_id, "source": "codex",
+            "payload": {"attempt": 1, "summary": "done"},
+        }
+        await _publish(completed)
+        await _publish(completed)
+        proc.terminate()
+        proc.wait(timeout=10)
+
+        proc = _start_nats(store_dir)
+        await ensure_stream(TEST_URL)
+        resumed = StateWriter(db_path)
+        stop = asyncio.Event()
+        consumer = asyncio.create_task(consume(resumed, stop))
+        await _wait_status(resumed.conn, task_id, "completed")
+        stop.set()
+        await asyncio.wait_for(consumer, timeout=5)
+
+        assert resumed.conn.execute(
+            "SELECT COUNT(*) FROM events WHERE id = 'E-NATS-COMPLETED';"
+        ).fetchone()[0] == 1
+        assert resumed.conn.execute(
+            "SELECT COUNT(*) FROM task_runs WHERE task_id = ?"
+            " AND status = 'completed';", (task_id,),
+        ).fetchone()[0] == 1
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=10)

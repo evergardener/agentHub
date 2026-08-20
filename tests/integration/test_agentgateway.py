@@ -46,11 +46,32 @@ def _free_loopback_port() -> int:
         return sock.getsockname()[1]
 
 
-@dataclass(frozen=True)
+@dataclass
 class GatewayStack:
     config_path: Path
     gateway_base: str
     worker_base: str
+    process: subprocess.Popen
+    env: dict[str, str]
+
+    def restart(self) -> None:
+        self.process.terminate()
+        self.process.wait(timeout=5)
+        self.process = subprocess.Popen(
+            [str(AGW_BIN), "-f", str(self.config_path)],
+            env=self.env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        for _ in range(50):
+            try:
+                if httpx.get(
+                    f"{self.gateway_base}/agents/codex/health", timeout=1
+                ).status_code == 401:
+                    return
+            except httpx.TransportError:
+                time.sleep(0.1)
+        raise RuntimeError("agentgateway did not restart")
 
 
 def _gateway_key() -> str:
@@ -109,14 +130,18 @@ def stack(tmp_path_factory):
                 time.sleep(0.1)
         else:
             raise RuntimeError("agentgateway did not start")
-        yield GatewayStack(
+        stack = GatewayStack(
             config_path=conf_copy,
             gateway_base=f"http://127.0.0.1:{gateway_port}",
             worker_base=f"http://127.0.0.1:{worker_port}",
+            process=gw,
+            env=env,
         )
+        yield stack
     finally:
-        gw.terminate()
-        gw.wait(timeout=5)
+        process = stack.process if "stack" in locals() else gw
+        process.terminate()
+        process.wait(timeout=5)
         srv.should_exit = True
         thread.join(timeout=5)
 
@@ -214,3 +239,24 @@ async def test_route_rate_limit_rejects_a_runaway_loop(stack):
 
     assert 429 in statuses
     assert codex.status_code == 200
+
+
+async def test_gateway_restart_preserves_idempotent_a2a_task(stack, monkeypatch):
+    monkeypatch.setenv("AGENT_GATEWAY_URL", stack.gateway_base)
+    client = A2aClient.for_agent("codex", "http://unused", timeout=30)
+    task_id = "T-GATEWAY-RESTART-1"
+    first = await client.send_and_wait(
+        "gateway restart idempotency",
+        idempotency_key="gateway-restart:once",
+        task_id=task_id,
+    )
+    assert first["status"]["state"] == "completed"
+
+    stack.restart()
+    replay = await client.send_message(
+        "gateway restart idempotency",
+        idempotency_key="gateway-restart:once",
+        task_id=task_id,
+    )
+    assert replay["id"] == first["id"]
+    assert replay["status"]["state"] == "completed"

@@ -415,6 +415,17 @@ safety backup 与旧 Workspace 可读取，最后确认随机项目的容器、�
 删除。该测试现作为显式集成门禁保留。正式部署到另一台目标主机时仍须在其维护
 窗口再执行一次，验证当地 Docker、磁盘权限和备份介质，而不是拿本次结果替代。
 
+消息/路由故障门禁使用隔离端口并需显式开启：
+
+```bash
+LAS_RUN_GW=1 .venv/bin/python -m pytest tests/integration/test_agentgateway.py
+.venv/bin/python -m pytest tests/integration/test_state_writer.py
+```
+
+前者包含 gateway 进程重启后的 A2A 幂等重放，后者包含 durable consumer 与 NATS
+持久存储重启、重复 event_id 去重。必须在允许监听 loopback 端口的隔离环境运行；
+不要把测试指向默认栈端口或生产数据目录。
+
 ## 8. 安全基线
 
 - 所有端口绑 `127.0.0.1`（Web UI / gateway / Jaeger 默认不暴露局域网）
