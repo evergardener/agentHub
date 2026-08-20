@@ -36,7 +36,7 @@ def test_isolated_postgres_nats_agent_data_workspace_restore(
     compose.write_text(textwrap.dedent("""
         services:
           postgres:
-            image: postgres:17-alpine
+            image: postgres:17.11-alpine3.24@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
             environment:
               POSTGRES_USER: agenthub
               POSTGRES_PASSWORD: drill-only-password
@@ -48,7 +48,7 @@ def test_isolated_postgres_nats_agent_data_workspace_restore(
               timeout: 2s
               retries: 30
           nats:
-            image: nats:2.11-alpine
+            image: nats:2.11.17-alpine3.22@sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00
             command: ["-js", "-sd", "/data"]
             volumes: [nats-data:/data]
           state-writer:

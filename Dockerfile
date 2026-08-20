@@ -7,23 +7,31 @@
 # 经心跳向 agentHub 注册（见 docs/ 与 src/hermes/tools.py 的发现语义）。
 
 # ── agentgateway 二进制（按构建架构拉取对应 release）──
-# REGISTRY 可覆盖基础镜像源：Docker Hub 不可达时用加速镜像构建——
+# REGISTRY 可覆盖基础镜像源：Docker Hub 不可达时用保持 OCI digest 不变的
+# pull-through cache；tag + digest 均固定，更新必须经过 review。
 #   docker compose build --build-arg REGISTRY=docker.m.daocloud.io/library
 # 默认 docker.io/library，CI（GitHub runner）无需任何改动。
 ARG REGISTRY=docker.io/library
-FROM ${REGISTRY}/python:3.12-slim AS agw
-ARG AGW_VERSION=1.4.1
+ARG PYTHON_TAG=3.12.14-slim-trixie
+ARG PYTHON_DIGEST=sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a
+FROM ${REGISTRY}/python:${PYTHON_TAG}@${PYTHON_DIGEST} AS agw
 ARG TARGETARCH
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \
  && curl -fsSL -o /tmp/agentgateway \
-    "https://github.com/agentgateway/agentgateway/releases/download/v${AGW_VERSION}/agentgateway-linux-${TARGETARCH}" \
+    "https://github.com/agentgateway/agentgateway/releases/download/v1.4.1/agentgateway-linux-${TARGETARCH}" \
+ && case "${TARGETARCH}" in \
+      amd64) expected="20f7b298e0c36eef33e7d612b0d0b91d87d43124f59b01f6e9b730477f66d982" ;; \
+      arm64) expected="983a0919e30d287ec34ba51a69aa678fb81c5b893a59ae267b29d9fd30365d0e" ;; \
+      *) echo "unsupported agentgateway architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && echo "${expected}  /tmp/agentgateway" | sha256sum -c - \
  && install -m 0755 /tmp/agentgateway /usr/local/bin/agentgateway \
  && apt-get purge -y curl \
  && rm -rf /var/lib/apt/lists/* /tmp/agentgateway
 
 # ── 运行时 ──
-FROM ${REGISTRY}/python:3.12-slim
+FROM ${REGISTRY}/python:${PYTHON_TAG}@${PYTHON_DIGEST}
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/src \
     LAS_WORKSPACE=/data/workspace

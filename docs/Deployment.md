@@ -53,6 +53,31 @@ cd agentHub   # 下文统称项目根
 - **ghcr 拉取**：`ghcr.io/evergardener/agenthub:latest`（或 `v*` tag），
   把 compose 里 `agenthub:latest` 锚点的 `build: .` 去掉、改为该镜像名。
 
+基础镜像和 Compose 外部服务均同时固定可读 tag 与 OCI digest。`REGISTRY`
+只能指向保持上游 manifest digest 不变的 pull-through cache；镜像升级通过
+Dependabot PR 或人工 PR 更新 tag + digest，禁止仅改 tag 后直接部署。
+
+### 3.1.1 镜像供应链验收
+
+`main`/`v*` 的镜像工作流执行以下门禁：
+
+1. 所有第三方 GitHub Actions 固定到完整 commit SHA；
+2. BuildKit 先把多架构镜像作为 `candidate-<commit>` 推送，并附加 max-mode
+   provenance 与 SBOM attestation；
+3. Trivy 扫描候选的不可变 digest，存在已有修复的 HIGH/CRITICAL 漏洞即失败；
+4. 扫描通过后，Cosign 使用 GitHub OIDC 对同一 digest 做 keyless 签名；
+5. 只有已扫描、已签名的 digest 才晋升为 `latest` / `sha-*` / semver 正式标签。
+
+验证已发布镜像（把 digest 换为工作流输出）：
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github.com/evergardener/agentHub/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/evergardener/agenthub@sha256:<digest>
+docker buildx imagetools inspect ghcr.io/evergardener/agenthub@sha256:<digest>
+```
+
 ### 3.2 配置 .env
 
 ```bash
@@ -282,7 +307,8 @@ MCP 只读工具带 `readOnlyHint`，`~/.codex/config.toml` 的 agent-* 服务�
 声明创建文件但无产物会被强制驳回返工，Web UI 任务详情可见驳回原因。
 
 ### 6.4 构建失败：拉不动镜像 / pip hash mismatch
-Docker Hub 不可达：`--build-arg REGISTRY=docker.m.daocloud.io/library`；
+Docker Hub 不可达：`--build-arg REGISTRY=docker.m.daocloud.io/library`（镜像源
+必须保留相同 OCI digest，否则固定摘要校验会安全失败）；
 PyPI 不稳：`--build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`。
 
 ### 6.5 worker 显示 offline
@@ -291,7 +317,7 @@ agents 表在线判定按 `lease_expires_at` 动态计算。查 worker 进程与
 
 ### 6.6 委派非 codex/kimi 的 agent 失败
 gateway 路由表（`infra/agentgateway/config.docker.yaml`）目前只静态映射
-codex/kimi。临时绕过：`LAS_GATEWAY_URL=` 置空走直连；长期方案是 gateway
+codex/kimi/dsh。临时绕过：`LAS_GATEWAY_URL=` 置空走直连；长期方案是 gateway
 动态路由（见 Evolution v3 §8.2）。
 
 ## 7. 备份

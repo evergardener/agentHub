@@ -92,7 +92,9 @@ revision 写许可失效。
   映射，检查输出不泄露 secret value；
 - [ ] gateway：loopback 剖面已完成 strict API key、路由 ACL、独立 token-bucket
   限流；跨主机 HTTPS/mTLS + strict JWT 剖面待实施；
-- 固定镜像版本、SBOM、签名和漏洞扫描；
+- [ ] 供应链实现已完成：外部镜像 tag + OCI digest、GitHub Actions commit SHA、
+  agentgateway 二进制 SHA256 固定；发布生成 SBOM/provenance，经 Trivy 门禁后以
+  Cosign OIDC 签名。待首次远端 workflow 成功并验证签名/attestation 后勾选；
 - [x] WebUI/Orchestrator readiness、State Writer/Janitor 依赖探针、Gateway
   端口探针、Compose 健康依赖、资源上限与容器日志轮换；
 - 告警路由与通知升级；
