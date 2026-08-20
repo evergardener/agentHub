@@ -34,6 +34,8 @@ templates:
       streaming: true
       interrupt: true
       cancel: true
+      native_permission_enforcement: false
+      modifying_operations: false
     default_config:
       web_url_env: LAS_DSH_WEB_URL
       agent_preset_env: LAS_DSH_AGENT_PRESET

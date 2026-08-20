@@ -16,6 +16,8 @@ def _secure_env() -> str:
         "LAS_ACTION_RECEIPT_SECRET=" + "r" * 64,
         "LAS_API_TOKEN=" + "i" * 48,
         "LAS_A2A_PEERS=",
+        "LAS_DSH_PRODUCTION_ENABLED=false",
+        "LAS_DSH_ALLOW_UNVERIFIED_RUNTIME=false",
         "LAS_WEBUI_REQUIRE_AUTH=true",
         "LAS_ORCH_REQUIRE_AUTH=true",
         "LAS_REQUIRE_MIGRATION_BACKUP=true",
@@ -118,3 +120,35 @@ def test_remote_gateway_plaintext_and_missing_credentials_fail(tmp_path):
         "LAS_GATEWAY_CLIENT_CERT_FILE",
         "LAS_GATEWAY_CLIENT_KEY_FILE",
     }.issubset(keys)
+
+
+def test_dsh_development_override_is_rejected_in_production(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(_secure_env().replace(
+        "LAS_DSH_ALLOW_UNVERIFIED_RUNTIME=false",
+        "LAS_DSH_ALLOW_UNVERIFIED_RUNTIME=true"), encoding="utf-8")
+    env_file.chmod(0o600)
+    findings = check_production_env(env_file)
+    assert {item.key for item in findings} == {
+        "LAS_DSH_ALLOW_UNVERIFIED_RUNTIME"}
+
+
+def test_dsh_production_route_is_blocked_until_native_enforcement(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(_secure_env().replace(
+        "LAS_DSH_PRODUCTION_ENABLED=false",
+        "LAS_DSH_PRODUCTION_ENABLED=true"), encoding="utf-8")
+    env_file.chmod(0o600)
+    findings = check_production_env(env_file)
+    assert {item.key for item in findings} == {"LAS_DSH_PRODUCTION_ENABLED"}
+
+
+def test_dsh_peer_route_is_blocked_until_native_enforcement(tmp_path):
+    token = "d" * 48
+    peers = json.dumps({token: {"peer": "reviewer", "worker": "dsh"}})
+    env_file = tmp_path / ".env"
+    env_file.write_text(_secure_env().replace(
+        "LAS_A2A_PEERS=", f"LAS_A2A_PEERS={peers}"), encoding="utf-8")
+    env_file.chmod(0o600)
+    findings = check_production_env(env_file)
+    assert {item.key for item in findings} == {"LAS_DSH_PRODUCTION_ENABLED"}

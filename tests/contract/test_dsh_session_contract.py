@@ -58,7 +58,8 @@ async def test_dsh_a2a_card_and_native_session_metadata(tmp_path, monkeypatch):
     native_client = httpx.AsyncClient(
         transport=httpx.MockTransport(dsh), base_url="http://dsh.test")
     adapter = DshWebSessionAdapter(
-        client=native_client, poll_interval=0, timeout_seconds=1)
+        client=native_client, poll_interval=0, timeout_seconds=1,
+        allow_unverified_runtime=True)
     app = build_app("dsh", agent_card, max_concurrent=1,
                     session_adapter=adapter)
     published: list[tuple] = []
@@ -76,6 +77,10 @@ async def test_dsh_a2a_card_and_native_session_metadata(tmp_path, monkeypatch):
             caps = card["capabilities"]["extensions"]["agentHubSession"]
             assert caps["native_resume"] is True
             assert caps["durable_session"] is True
+            security = card["capabilities"]["extensions"][
+                "agentHubSecurity"]
+            assert security["nativePermissionEnforcement"] is False
+            assert security["modelPromptsDefault"] == "disabled"
 
             sent = (await client.post("/a2a", json={
                 "jsonrpc": "2.0", "id": "send", "method": "message/send",
@@ -109,6 +114,39 @@ async def test_dsh_a2a_card_and_native_session_metadata(tmp_path, monkeypatch):
                        for event in session_events)
             assert {event[2]["nativeEventType"] for event in session_events} >= {
                 "dsh.turn.started", "dsh.assistant/message", "dsh.turn/end"}
+    finally:
+        await native_client.aclose()
+
+
+async def test_dsh_default_health_is_unavailable_without_native_enforcement(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path))
+    monkeypatch.delenv("LAS_DSH_ALLOW_UNVERIFIED_RUNTIME", raising=False)
+
+    async def dsh(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["method"] == "session.list"
+        return httpx.Response(200, json={
+            "type": "server-response", "rpcId": body["rpcId"],
+            "result": {"ok": True, "value": {"items": []}},
+        })
+
+    native_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(dsh), base_url="http://dsh.test")
+    adapter = DshWebSessionAdapter(
+        client=native_client, event_stream=False)
+    app = build_app("dsh", agent_card, max_concurrent=1,
+                    session_adapter=adapter, health_check=adapter.health)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://adapter"
+        ) as client:
+            response = await client.get("/health")
+        assert response.status_code == 503
+        payload = response.json()
+        assert payload["status"] == "unavailable"
+        assert payload["dependency"]["ready"] is False
+        assert payload["dependency"]["nativePermissionEnforcement"] is False
     finally:
         await native_client.aclose()
 
@@ -162,7 +200,8 @@ async def test_dsh_a2a_native_approval_response_continues_same_turn(
         transport=httpx.MockTransport(dsh), base_url="http://dsh.test")
     adapter = DshWebSessionAdapter(
         client=native_client, poll_interval=0,
-        timeout_seconds=2, interaction_wait_seconds=1)
+        timeout_seconds=2, interaction_wait_seconds=1,
+        allow_unverified_runtime=True)
     app = build_app("dsh", agent_card, max_concurrent=1,
                     session_adapter=adapter)
 

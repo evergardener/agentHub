@@ -58,6 +58,7 @@ def _start_adapter(
         LAS_ADAPTER_TOKEN="",
         LAS_DSH_WEB_URL=dsh_url,
         LAS_DSH_PERMISSION_PRESET="read-only",
+        LAS_DSH_ALLOW_UNVERIFIED_RUNTIME="true",
         LAS_ACTION_RECEIPT_SECRET="d" * 32,
         NATS_URL="nats://127.0.0.1:1",
     )

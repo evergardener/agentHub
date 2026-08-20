@@ -170,6 +170,7 @@ class DshWebSessionAdapter(SessionAdapter):
         client: httpx.AsyncClient | None = None,
         event_stream: bool | None = None,
         interaction_wait_seconds: float = 2.0,
+        allow_unverified_runtime: bool | None = None,
     ) -> None:
         self.base_url = (
             base_url or os.environ.get("LAS_DSH_WEB_URL", DEFAULT_DSH_WEB_URL)
@@ -182,6 +183,11 @@ class DshWebSessionAdapter(SessionAdapter):
             raise ValueError(
                 "LAS_DSH_PERMISSION_PRESET must remain read-only; modifying "
                 "calls use one ActionIntent-bound allowed-once response")
+        if allow_unverified_runtime is None:
+            allow_unverified_runtime = os.environ.get(
+                "LAS_DSH_ALLOW_UNVERIFIED_RUNTIME", ""
+            ).lower() in {"1", "true", "yes", "on"}
+        self.allow_unverified_runtime = allow_unverified_runtime
         self._client = client
         self._handles: dict[str, SessionHandle] = {}
         self._tasks: dict[str, A2aTask] = {}
@@ -203,6 +209,14 @@ class DshWebSessionAdapter(SessionAdapter):
 
     def get_session(self, session_id: str) -> SessionHandle | None:
         return self._handles.get(session_id)
+
+    def _require_prompt_authority(self) -> None:
+        if not self.allow_unverified_runtime:
+            raise SessionCapabilityError(
+                "DSH model prompts are disabled: this DSH version has no "
+                "verified native permission enforcement; "
+                "LAS_DSH_ALLOW_UNVERIFIED_RUNTIME is development-only"
+            )
 
     async def start(self) -> None:
         await self._ensure_event_stream()
@@ -390,7 +404,13 @@ class DshWebSessionAdapter(SessionAdapter):
         items = value.get("items")
         if not isinstance(items, list):
             raise DshApiError("DSH session.list returned invalid items")
-        return {"runtime": "dsh-web", "sessions": len(items)}
+        return {
+            "runtime": "dsh-web",
+            "sessions": len(items),
+            "ready": self.allow_unverified_runtime,
+            "nativePermissionEnforcement": False,
+            "modelPromptsEnabled": self.allow_unverified_runtime,
+        }
 
     def _workspace(self, task_id: str) -> Path:
         path = workspace_root() / "tasks" / task_id
@@ -514,6 +534,7 @@ class DshWebSessionAdapter(SessionAdapter):
             raise KeyError(f"session not found: {session_id}")
         if handle.status == "canceled":
             raise SessionCapabilityError("session is canceled")
+        self._require_prompt_authority()
 
         native = handle.native_session_id
         before = await self._history(native)
@@ -894,6 +915,7 @@ class DshWebSessionAdapter(SessionAdapter):
         handle = self._handles[session_id]
         if not handle.native_session_id:
             raise SessionCapabilityError("native DSH session ID is missing")
+        self._require_prompt_authority()
         await self._request("session.prompt", {
             "sessionId": handle.native_session_id,
             "mode": "steer",

@@ -186,11 +186,14 @@ revision 写许可失效。
    生产接入改用 DSH Web 原生 session API；
 2. [x] 增加 DSH Agent Card、持久 Session Adapter、8203 独立 A2A 服务、
    gateway 路由/ACL、心跳注册和启动脚本；
-3. [ ] 增加 DSH Template 与默认只读 Reviewer Profile；仅首次心跳自动绑定，
+3. [x] 增加 DSH Template 与默认只读 Reviewer Profile；仅首次心跳自动绑定，
    已有人工/Profile WebUI 配置不被覆盖。2026-08-20 真实门禁证实 rc.7 会把
    `/permission read-only` 当普通模型 prompt，既不强制权限又与首轮竞态；该
    prompt 已删除。待 DSH 官方 permission API 或可审计专用 preset 接入并实测前，
-   控制面 read_only Profile 不能被表述为原生 sandbox，DSH 修改能力不得生产放行；
+   控制面 read_only Profile 不能被表述为原生 sandbox；Adapter 已改为默认拒绝
+   所有模型 prompt/steer，Card/health 暴露未验证状态，readiness 返回不可用且
+   停止在线心跳，Hermes 静态种子标记为 disabled，生产预检阻断 DSH 启用与
+   peer 路由。开发豁免仅允许隔离门禁，DSH 整体仍不得生产放行；
 4. [x] 支持同一 DSH 原生 session 多轮消息、Adapter 重启恢复、历史/工具事件
    Artifact、interrupt/cancel，并把原生审批挂起映射为 `input-required`；
 5. [x] DSH unit+contract 离线测试通过；全量 unit+contract 为 209 passed；
@@ -276,9 +279,9 @@ revision 写许可失效。
     进程重启仍待授权环境执行。2026-08-20 真实模型检查发现并移除伪 permission
     prompt 后，`LAS_RUN_DSH_SERVICE_RESTART=1` 已在随机端口同时重启 DSH Web
     与 HTTP Adapter，并以同一 native session 完成第二轮 marker 恢复（1 passed）。
-    该结果覆盖无工具只读 prompt 的双轮/双进程恢复，不证明原生 read-only sandbox；
-    approval 拒绝/允许矩阵与官方 permission 接口仍待完成；本批全量 unit+contract
-    为 323 passed；
+    该结果覆盖开发豁免下无工具 prompt 的双轮/双进程恢复，不证明原生 read-only
+    sandbox；之后已增加代码级默认禁用、Card/health 能力披露及 production-preflight
+    阻断。approval 拒绝/允许矩阵必须等官方 permission 接口可验证后再执行；
 13. [x] 完成 Codex/Kimi ToolCall/ActionIntent 拦截与用户介入实时 UI，
     再进入生产安全评审。
 
@@ -346,14 +349,16 @@ revision 写许可失效。
 
 ## 2026-08-20 当前发布基线与外部阻塞项
 
-- 当前源码全量 unit+contract：323 passed；默认 integration：10 passed、
-  24 skipped。默认跳过项均维持显式门控；gateway、远程安全剖面、NATS、
+- 当前源码全量 unit+contract：331 passed；默认 integration：10 passed、
+  28 skipped。默认跳过项均维持显式门控；gateway、远程安全剖面、NATS、
   PostgreSQL、DSH 无模型重启、HTTPS 告警及备份恢复等已执行的隔离门禁结果，
   以各节记录为准；
 - 本机可安全完成的实现与隔离故障注入已收敛。后续不应继续以 mock 或仅健康检查
   替代真实验收，也不应在未授权时调用模型、外部身份系统或发布流水线；
-- 发布前仍阻塞于四类外部验收：Codex/Kimi/DSH 真实 approval、双轮恢复与
-  Adapter 服务进程重启；真实 CA/OIDC 和第二主机 gateway；首次远端供应链
+- Codex 真实 approval 允许/拒绝、双轮恢复及 HTTP Adapter 服务重启矩阵已完成；
+  DSH 双进程恢复已完成，但生产仍阻塞于官方 permission API/可审计 preset；
+- 发布前仍阻塞于 Kimi 真实 approval/双轮/重启矩阵、DSH 原生权限接口、真实
+  CA/OIDC 和第二主机 gateway、首次远端供应链
   workflow 与 Cosign/attestation 验证；目标环境正式 HTTPS webhook 失败/恢复；
 - Kimi 真实模型门禁当前另受服务端配额阻塞（2026-08-20 HTTP 403 usage limit）；
   额度恢复后从只读单轮门禁重新开始，再执行 approval/双轮/重启矩阵；

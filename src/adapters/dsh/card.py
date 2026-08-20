@@ -18,6 +18,13 @@ def agent_card(base_url: str) -> dict:
             # session events are declared separately in agentHubSession.
             "streaming": False,
             "pushNotifications": False,
+            "extensions": {
+                "agentHubSecurity": {
+                    "nativePermissionEnforcement": False,
+                    "modelPromptsDefault": "disabled",
+                    "modifyingOperations": False,
+                },
+            },
         },
         "defaultInputModes": ["text"],
         "defaultOutputModes": ["text", "file"],

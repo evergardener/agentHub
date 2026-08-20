@@ -51,18 +51,28 @@ def _card_skills(card_fn: CardFn) -> list[str]:
 
 
 async def _heartbeat_loop(publisher: EventPublisher, agent_id: str,
-                          card_fn: CardFn) -> None:
+                          card_fn: CardFn,
+                          health_check: HealthFn | None = None) -> None:
     # 发现注册（v3 M2）：心跳携带自声明 endpoint 与技能，
     # StateWriter 落库 agents 表，hermes 按租约在线性发现 worker。
     # interval/ttl 每轮动态读 env，便于测试与运维热调。
     endpoint = os.environ.get("LAS_AGENT_ENDPOINT", "").strip()
     skills = _card_skills(card_fn)
     while True:
-        payload: dict = {"lease_ttl_seconds": cfg.lease_ttl(),
-                         "skills": skills}
-        if endpoint:
-            payload["endpoint"] = endpoint
-        await publisher.publish(f"agent.{agent_id}.heartbeat", None, payload)
+        ready = True
+        if health_check is not None:
+            try:
+                dependency = await health_check()
+                ready = dependency.get("ready") is not False
+            except Exception:  # noqa: BLE001 - dependency readiness boundary
+                ready = False
+        if ready:
+            payload: dict = {"lease_ttl_seconds": cfg.lease_ttl(),
+                             "skills": skills}
+            if endpoint:
+                payload["endpoint"] = endpoint
+            await publisher.publish(
+                f"agent.{agent_id}.heartbeat", None, payload)
         await asyncio.sleep(cfg.heartbeat_interval())
 
 
@@ -145,7 +155,8 @@ def build_app(
 
         tracing.init_tracing(f"adapter-{agent_id}")
         await session_adapter.start()
-        hb = asyncio.create_task(_heartbeat_loop(publisher, agent_id, card_fn))
+        hb = asyncio.create_task(_heartbeat_loop(
+            publisher, agent_id, card_fn, health_check))
         try:
             yield
         finally:
@@ -186,7 +197,11 @@ def build_app(
         if health_check is None:
             return result
         try:
-            result["dependency"] = await health_check()
+            dependency = await health_check()
+            result["dependency"] = dependency
+            if dependency.get("ready") is False:
+                result["status"] = "unavailable"
+                return JSONResponse(result, status_code=503)
             return result
         except Exception as exc:  # noqa: BLE001 - readiness boundary
             return JSONResponse(

@@ -158,17 +158,22 @@ class HermesTools:
         from state.db import CST
 
         now = datetime.now(CST).isoformat(timespec="seconds")
-        merged = {k: {**v, "online": None} for k, v in self.agents.items()}
+        merged = {
+            k: {**v, "enabled": v.get("enabled", True), "online": None}
+            for k, v in self.agents.items()
+        }
         for r in self.tm.conn.execute(
                 "SELECT id, endpoint, skills_json, lease_expires_at,"
                 " template_id, profile_id"
                 " FROM agents;").fetchall():
             online = bool(r["lease_expires_at"] and r["lease_expires_at"] > now)
-            entry = merged.setdefault(r["id"], {"endpoint": "", "skills": []})
+            entry = merged.setdefault(
+                r["id"], {"endpoint": "", "skills": [], "enabled": True})
             entry["online"] = online
             entry["template_id"] = r["template_id"]
             entry["profile_id"] = r["profile_id"]
             if online:
+                entry["enabled"] = True
                 if r["endpoint"]:
                     entry["endpoint"] = r["endpoint"]
                 if r["skills_json"]:
@@ -185,6 +190,8 @@ class HermesTools:
         if info is None:
             return {"error": f"unknown agent: {agent_id}",
                     "known": sorted(agents)}
+        if info.get("enabled") is False:
+            return {"error": f"agent disabled: {agent_id}（生产安全门禁）"}
         if info["online"] is False:
             return {"error": f"agent offline: {agent_id}（心跳租约已过期）"}
         if not info.get("endpoint"):
@@ -389,7 +396,11 @@ class HermesTools:
 
         out = []
         for k, v in self._resolve_agents().items():
-            status = {True: "online", False: "offline", None: "static"}[v["online"]]
+            status = (
+                "disabled" if v.get("enabled") is False else
+                {True: "online", False: "offline", None: "static"}[
+                    v["online"]]
+            )
             profile = None
             if v.get("profile_id"):
                 profile = agent_profile_store.profile_policy(

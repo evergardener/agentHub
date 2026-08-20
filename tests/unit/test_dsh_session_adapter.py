@@ -127,7 +127,7 @@ def _adapter(fixture: DshFixture) -> tuple[DshWebSessionAdapter,
         transport=httpx.MockTransport(fixture), base_url="http://dsh.test")
     return DshWebSessionAdapter(
         client=client, poll_interval=0, timeout_seconds=1,
-        interaction_wait_seconds=0), client
+        interaction_wait_seconds=0, allow_unverified_runtime=True), client
 
 
 async def test_dsh_uses_same_native_session_for_multiple_turns(
@@ -408,8 +408,36 @@ async def test_dsh_health_checks_the_native_runtime():
     adapter, client = _adapter(fixture)
     try:
         assert await adapter.health() == {
-            "runtime": "dsh-web", "sessions": 1}
+            "runtime": "dsh-web", "sessions": 1,
+            "ready": True,
+            "nativePermissionEnforcement": False,
+            "modelPromptsEnabled": True,
+        }
         assert fixture.methods == ["session.list"]
+    finally:
+        await client.aclose()
+
+
+async def test_dsh_model_prompt_is_disabled_without_development_override(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path))
+    monkeypatch.delenv("LAS_DSH_ALLOW_UNVERIFIED_RUNTIME", raising=False)
+    fixture = DshFixture()
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(fixture), base_url="http://dsh.test")
+    adapter = DshWebSessionAdapter(client=client, event_stream=False)
+    try:
+        await adapter.start_session(_task(), session_id="S-dsh", metadata={})
+        health = await adapter.health()
+        assert health["ready"] is False
+        assert health["modelPromptsEnabled"] is False
+        with pytest.raises(SessionCapabilityError, match="prompts are disabled"):
+            await adapter.send_message(
+                "S-dsh", SessionMessage("M-1", "user", "review"))
+        with pytest.raises(SessionCapabilityError, match="prompts are disabled"):
+            await adapter.steer(
+                "S-dsh", SessionMessage("M-2", "user", "adjust"))
+        assert "session.prompt" not in fixture.methods
     finally:
         await client.aclose()
 

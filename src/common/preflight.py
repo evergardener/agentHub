@@ -204,6 +204,7 @@ def check_production_env(path: Path) -> list[Finding]:
 
     api_token = env.get("LAS_API_TOKEN", "") or adapter_token
     raw_peers = env.get("LAS_A2A_PEERS", "")
+    peer_workers: set[str] = set()
     if not api_token and not raw_peers:
         findings.append(Finding(
             "error", "LAS_API_TOKEN/LAS_A2A_PEERS", "至少配置一种 A2A 身份"))
@@ -222,9 +223,22 @@ def check_production_env(path: Path) -> list[Finding]:
                 findings.append(Finding(
                     "error", "LAS_A2A_PEERS",
                     "token 至少 24 字符，且每项必须含合法 peer/worker"))
+            else:
+                peer_workers = {str(meta["worker"])
+                                for meta in peers.values()}
         except (json.JSONDecodeError, ValueError):
             findings.append(Finding(
                 "error", "LAS_A2A_PEERS", "不是合法的非空 peer 映射 JSON"))
+
+    if _enabled(env.get("LAS_DSH_ALLOW_UNVERIFIED_RUNTIME", "")):
+        findings.append(Finding(
+            "error", "LAS_DSH_ALLOW_UNVERIFIED_RUNTIME",
+            "仅限开发；生产不得绕过 DSH 原生权限门禁"))
+    if (_enabled(env.get("LAS_DSH_PRODUCTION_ENABLED", ""))
+            or "dsh" in peer_workers):
+        findings.append(Finding(
+            "error", "LAS_DSH_PRODUCTION_ENABLED",
+            "当前 DSH 版本无可验证的原生权限强制；本构建禁止生产任务路由"))
 
     if not _enabled(env.get("LAS_WEBUI_COOKIE_SECURE", "false")):
         findings.append(Finding(

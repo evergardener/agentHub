@@ -99,7 +99,9 @@ cp .env.example .env && chmod 600 .env
 | `LAS_WEBUI_TOKENS` | WebUI 登录 token→role JSON；token 用 `openssl rand -hex 24` 生成，role 为 `viewer` / `operator` / `admin` |
 | `LAS_WEBUI_SESSION_SECRET` | WebUI 签名 session cookie 的独立 HMAC 密钥，使用 `openssl rand -hex 32`；未配置时 WebUI 拒绝启动 |
 | `LAS_ADAPTER_BIND` | worker 监听地址，默认 `127.0.0.1`；需容器回连时加宿主机 LAN IP |
-| `LAS_DSH_PERMISSION_PRESET` | 兼容性校验值必须为 `read-only`，但 DSH rc.7 无已验证 preset RPC；不得把它视为原生 sandbox，修改能力在正式接口验收前保持生产禁用 |
+| `LAS_DSH_PRODUCTION_ENABLED` | 当前必须为 `false`；DSH rc.7 没有可验证的原生权限强制，本构建的生产预检会阻断启用或任何指向 dsh 的 A2A peer 路由 |
+| `LAS_DSH_ALLOW_UNVERIFIED_RUNTIME` | 仅限隔离开发/真实模型门禁；生产必须为 `false`，否则预检失败 |
+| `LAS_DSH_PERMISSION_PRESET` | 兼容性校验值必须为 `read-only`，但它不代表 DSH 原生 sandbox |
 | `LAS_DATABASE_URL` | 留空 = compose PG；`sqlite:////path/x.db` = SQLite；外部 PG 直接填 URL |
 | `LAS_OTEL_ENDPOINT` | compose 内已指向 jaeger；置空关闭 tracing |
 
@@ -190,15 +192,15 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"   # worker 运行依�
 ./scripts/install-agent-autostart.sh codex     # launchd 常驻（macOS）
 ./scripts/install-agent-autostart.sh kimi
 
-# DSH 仍可独立使用；Adapter 连接其 loopback Web API
+# DSH 仍可通过自身 Web UI 独立使用；当前 AgentHub 生产接入保持禁用
 dsh web --host 127.0.0.1 --port 3080
-./scripts/install-agent-autostart.sh dsh
+# 不要安装 dsh Adapter 常驻项；仅显式门控的隔离测试会开启开发豁免
 ```
 
 验证：
 
 ```bash
-docker compose run --rm agentctl agent list    # codex/kimi/dsh 应为 online
+docker compose run --rm agentctl agent list    # codex/kimi 应 online；dsh 应 disabled
 curl -H "X-Agent-Token: $(grep ^LAS_ADAPTER_TOKEN= .env | cut -d= -f2)" \
      http://127.0.0.1:8201/health              # {"status":"ok",...}
 ```
@@ -227,8 +229,13 @@ ActionIntent，再把不可伪造的 receipt 送到 DSH `/api/respond`。问题�
 2026-08-20 真实门禁证实 DSH rc.7 会把 `/permission read-only` 当普通模型
 prompt；该做法既不能强制权限又会与首轮竞态，现已从 Adapter 删除。随后使用
 随机端口同时重启 DSH Web 与 HTTP Adapter，以同一 native session 完成第二轮
-marker 恢复（1 passed）。这只验证无工具 prompt 的双轮/双进程恢复；在 DSH
-官方 permission API 或可审计专用 preset 完成实测前，修改能力不得生产启用。
+marker 恢复（1 passed）。这只是在显式开发豁免下验证无工具 prompt 的双轮/
+双进程恢复。Adapter 现在默认拒绝所有 `session.prompt` 与 steer，Agent Card 和
+health 明示 `nativePermissionEnforcement=false`，`/health` 返回 503 且不发布
+在线心跳；只有
+`LAS_DSH_ALLOW_UNVERIFIED_RUNTIME=true` 才能进行隔离开发测试，而该值会被生产
+预检拒绝。在 DSH 官方 permission API 或可审计专用 preset 完成实测前，DSH
+任务路由整体不得生产启用，不再只把修改能力列为阻塞。
 
 Kimi Adapter 使用 `kimi acp`，ACP 的 `session/request_permission` 走相同
 `blocked -> ActionIntent -> signed receipt -> native response` 链。允许仅选择
@@ -394,6 +401,8 @@ PyPI 不稳：`--build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simpl
 ### 6.5 worker 显示 offline
 agents 表在线判定按 `lease_expires_at` 动态计算。查 worker 进程与日志；
 心跳间隔/租约由 `LAS_HEARTBEAT_INTERVAL` / `LAS_LEASE_TTL` 控制。
+当前构建的 DSH `disabled` 是预期安全状态：静态种子禁止委派，未验证原生权限
+强制时 `/health` 返回 503 且不发布心跳。不要用开发豁免把它伪装成生产就绪。
 
 ### 6.6 委派非 codex/kimi 的 agent 失败
 gateway 路由表（`infra/agentgateway/config.docker.yaml`）目前只静态映射
@@ -488,8 +497,10 @@ LAS_RUN_DSH_SERVICE_RESTART=1 \
 持久存储重启、重复 event_id 去重。PostgreSQL 用例创建随机 Compose project、
 临时端口和卷，验证停库 NAK 与恢复后单次落库；DSH 用例使用随机端口和临时
 `DSH_HOME`，只调用 session.create/list/history，验证 DSH 进程重启和 Adapter
-实例重建，不调用模型且不改用户 `~/.dsh`。最后一项使用现有 DSH 配置调用模型，
-同时重启随机端口 DSH Web 与 HTTP Adapter，并会新增可追溯测试 session。所有
+实例重建，不调用模型且不改用户 `~/.dsh`。最后一项在测试子进程内显式启用
+`LAS_DSH_ALLOW_UNVERIFIED_RUNTIME=true`，使用现有 DSH 配置调用模型，同时重启
+随机端口 DSH Web 与 HTTP Adapter，并会新增可追溯测试 session；该开发豁免
+不得复制到生产 `.env`。所有
 这些测试必须在允许监听 loopback
 端口、启动隔离进程/容器的环境运行；不要改写测试使用临时资源的设计，也不要
 把它们指向默认栈端口、用户 DSH_HOME 或生产数据目录。

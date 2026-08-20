@@ -102,7 +102,10 @@ def test_delegate_gate_offline_and_unknown(conn, tmp_path):
 
 def test_list_agents_status_view(conn, tmp_path):
     tools = _tools(conn, tmp_path, static={
-        "codex": {"endpoint": "http://static:8201", "skills": ["coding"]}})
+        "codex": {"endpoint": "http://static:8201", "skills": ["coding"]},
+        "dsh": {"enabled": False, "endpoint": "http://static:8203",
+                "skills": ["review"]},
+    })
     _heartbeat(conn, "kimi", endpoint="http://live:8202", skills=["research"])
     import asyncio
 
@@ -111,3 +114,17 @@ def test_list_agents_status_view(conn, tmp_path):
     assert by_id["kimi"]["status"] == "online"
     assert by_id["kimi"]["endpoint"] == "http://live:8202"
     assert by_id["codex"]["status"] == "static"
+    assert by_id["dsh"]["status"] == "disabled"
+    assert "disabled" in tools._agent_or_error("dsh")["error"]
+
+
+def test_ready_heartbeat_overrides_disabled_static_seed(conn, tmp_path):
+    tools = _tools(conn, tmp_path, static={
+        "dsh": {"enabled": False, "endpoint": "http://static:8203",
+                "skills": ["review"]},
+    })
+    _heartbeat(conn, "dsh", endpoint="http://dev:8203", skills=["review"])
+    dsh = tools._agent_or_error("dsh")
+    assert dsh["enabled"] is True
+    assert dsh["online"] is True
+    assert dsh["endpoint"] == "http://dev:8203"

@@ -191,7 +191,11 @@ Workspace/Git 保存实际文件产物；数据库保存路径、哈希、版本
   实现多轮、历史读取、恢复、事件追踪和取消；DSH 0.1.0-rc.7 尚未发现可验证的
   permission-preset RPC，禁止把 `/permission read-only` 作为聊天 prompt 伪装成
   原生安全边界。正式部署前必须取得并验证 DSH 官方 permission API 或专用 preset；
-  在此之前 DSH 修改能力保持生产阻塞，只认可原生 approval 拦截证据；命令
+  在此之前 Adapter 默认拒绝所有模型 prompt/steer，Agent Card 与 health 明示
+  `nativePermissionEnforcement=false`，readiness 返回不可用且不发布在线心跳，
+  生产预检阻断 DSH 启用和 peer 路由。显式
+  开发豁免只能用于隔离测试，不能作为安全证明；原生 approval 拦截证据仍保留
+  为未来接口验收基础。命令
   只有在无 shell 组合/扩展、影响类型可识别且所有目标解析到任务工作区内时
   才形成结构化 operation/targets；State Writer 必须在控制面根据受限 view
   独立重算，不信任 Adapter 声明的语义。未知命令、越界路径和已脱敏命令均只可拒绝；

@@ -53,6 +53,8 @@ docker compose run --rm agentctl chat   # 与 hermes 对话
   （`LAS_OTEL_ENDPOINT` 置空即关闭 tracing，默认 NoOp 零开销）
 - Compose 生产模式对 WebUI 与 Orchestrator 认证 fail-closed；缺失或弱密钥时
   相应服务拒绝启动。使用 `scripts/production-preflight.py` 在启动前一次检查。
+- DSH rc.7 尚无可验证的原生权限强制；当前构建默认拒绝其模型 prompt、readiness
+  返回不可用并阻断生产路由。DSH 自身 Web UI 的独立使用不受影响。
 - 一致性数据保护使用 `scripts/control-plane-backup.py create|verify`；备份不含
   `.env` 密钥，详见部署文档。
 - 告警默认持久化到 WebUI；配置 `LAS_ALERT_WEBHOOK_URL` 后由 notifier 经
