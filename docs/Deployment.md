@@ -224,6 +224,11 @@ ActionIntent，再把不可伪造的 receipt 送到 DSH `/api/respond`。问题�
 此时旧的任务级 approve/reject 会明确拒绝，避免只修改数据库状态却没有回应
 原生 Runtime。
 
+2026-08-20 已使用本机现有 DSH 配置短暂启动 loopback Web，完成真实只读模型
+门禁：Adapter 固定 `read-only`，prompt 明确禁止工具调用，turn 最终 completed，
+原生 session ID 可追溯并生成 2 个有界产物；随后已停止临时 Web 进程。该结果
+不覆盖 approval 拒绝/允许、双轮恢复或 Adapter 服务进程重启。
+
 Kimi Adapter 使用 `kimi acp`，ACP 的 `session/request_permission` 走相同
 `blocked -> ActionIntent -> signed receipt -> native response` 链。允许仅选择
 Kimi 本次请求提供的 `allow_once`，拒绝选择 `reject_once`；prompt CLI 的
