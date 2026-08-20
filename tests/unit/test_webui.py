@@ -165,6 +165,7 @@ def test_grants_api(client):
 def test_index_page(client):
     r = client.get("/")
     assert r.status_code == 200
+    assert r.headers["cache-control"] == "no-store"
     assert "agentHub" in r.text
     assert "AGENT 交互" in r.text
     assert "用户介入" in r.text

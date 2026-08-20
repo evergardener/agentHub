@@ -170,7 +170,14 @@ def create_app() -> FastAPI:
 
     @app.get("/")
     async def index():
-        return FileResponse(STATIC / "index.html")
+        # The console is a single deploy-time HTML bundle. Never let a browser
+        # keep an older bootstrap/login implementation across a container
+        # rollout; API responses and session cookies remain independently
+        # controlled by their own routes.
+        return FileResponse(
+            STATIC / "index.html",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/health")
     async def health():
