@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from common.envfile import ensure_key
+import pytest
+
+from common.envfile import ensure_key, set_values
 
 
 def test_generates_when_missing(tmp_path, monkeypatch):
@@ -52,3 +54,20 @@ def test_custom_generator(tmp_path, monkeypatch):
     value, created = ensure_key(tmp_path / ".env", "TEST_CFG_KEY",
                                 generator=lambda: "fixed")
     assert (value, created) == ("fixed", True)
+
+
+def test_set_values_preserves_unrelated_lines_and_normalizes_duplicates(
+        tmp_path):
+    env = tmp_path / ".env"
+    env.write_text(
+        "# keep\nA=old\nUNCHANGED=value\nexport A=stale\n",
+        encoding="utf-8")
+    set_values(env, {"A": "new", "B": "added"})
+    assert env.read_text(encoding="utf-8") == (
+        "# keep\nA=new\nUNCHANGED=value\nA=new\nB=added\n")
+    assert env.stat().st_mode & 0o777 == 0o600
+
+
+def test_set_values_rejects_multiline_values(tmp_path):
+    with pytest.raises(ValueError, match="invalid environment entry"):
+        set_values(tmp_path / ".env", {"A": "unsafe\nvalue"})

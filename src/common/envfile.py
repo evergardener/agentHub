@@ -19,6 +19,7 @@ import fcntl
 import os
 import secrets
 import stat
+import tempfile
 from pathlib import Path
 from typing import Callable
 
@@ -80,3 +81,55 @@ def ensure_key(env_path: Path, key: str,
     except OSError:
         pass
     return value, True
+
+
+def set_values(env_path: Path, values: dict[str, str]) -> None:
+    """Atomically set multiple entries without printing their values."""
+    for key, value in values.items():
+        if (not key or not key.replace("_", "A").isalnum()
+                or "\n" in value or "\r" in value):
+            raise ValueError(f"invalid environment entry: {key!r}")
+
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(env_path, "a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        temp_name: str | None = None
+        try:
+            lock_file.seek(0)
+            content = lock_file.read()
+            seen: set[str] = set()
+            output: list[str] = []
+            for line in content.splitlines():
+                stripped = line.strip()
+                candidate = stripped[7:].lstrip() if stripped.startswith(
+                    "export ") else stripped
+                key = candidate.partition("=")[0].strip() \
+                    if "=" in candidate else ""
+                if (not candidate.startswith("#") and key in values):
+                    output.append(f"{key}={values[key]}")
+                    seen.add(key)
+                else:
+                    output.append(line)
+            for key, value in values.items():
+                if key not in seen:
+                    output.append(f"{key}={value}")
+            rendered = "\n".join(output).rstrip("\n") + "\n"
+
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=env_path.parent,
+                prefix=f".{env_path.name}.", delete=False,
+            ) as temp_file:
+                temp_name = temp_file.name
+                temp_file.write(rendered)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            os.chmod(temp_name, stat.S_IRUSR | stat.S_IWUSR)
+            os.replace(temp_name, env_path)
+            temp_name = None
+        finally:
+            if temp_name is not None:
+                try:
+                    os.unlink(temp_name)
+                except OSError:
+                    pass
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

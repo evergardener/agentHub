@@ -82,7 +82,14 @@ docker buildx imagetools inspect ghcr.io/evergardener/agenthub@sha256:<digest>
 
 ```bash
 cp .env.example .env && chmod 600 .env
+# 已有 .env 时建议使用初始化器：会先备份旧文件、生成本机密钥、移除 Kimi
+# peer、加入 DSH peer；不会轮换 PostgreSQL 密码，也不会打印任何密钥值。
+.venv/bin/python scripts/init-production-env.py
 ```
+
+初始化器把首次登录信息写入 owner-only 的
+`runtime/production-credentials.json`（被 Git 忽略）。请在部署完成后把其中凭据
+转存到你的密码管理器，再删除该 bootstrap 文件。
 
 必填项（其余见 .env.example 注释）：
 
@@ -115,9 +122,9 @@ python3 scripts/production-preflight.py .env
 python3 scripts/production-preflight.py --strict .env
 ```
 
-预检同时读取镜像/仓库的 `config/agents.yaml`，要求当前 DSH 静态种子保持
-`enabled: false`；使用外置 catalog 时通过 `--agents-file` 指定实际部署文件，
-不得只检查仓库样例。
+预检同时读取镜像/仓库的 `config/agents.yaml`，要求当前发布候选保持
+Codex/DSH enabled、Kimi disabled；使用外置 catalog 时通过 `--agents-file`
+指定实际部署文件，不得只检查仓库样例。
 
 只有显示 `PASS`（或明确接受非 strict 的 loopback cookie / WebUI-only 告警
 warning）后再启动；正式生产建议使用 `--strict` 并配置 HTTPS webhook。
