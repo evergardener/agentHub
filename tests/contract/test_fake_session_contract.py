@@ -116,9 +116,22 @@ async def test_stale_context_revision_is_rejected(tmp_path, monkeypatch):
         await _wait_state(client, "T-revision", "input-required")
         stale = await _rpc(client, "message/send", {"message": {
             "role": "user", "parts": [{"kind": "text", "text": "old"}],
-            "metadata": {"taskId": "T-revision", "contextRevision": 7},
+            "metadata": {
+                "taskId": "T-revision", "contextRevision": 7,
+                "idempotencyKey": "revision-retry",
+            },
         }}, "stale")
         assert stale["error"]["code"] == -32005
+        corrected = await _rpc(client, "message/send", {"message": {
+            "role": "user", "parts": [{"kind": "text", "text": "new"}],
+            "metadata": {
+                "taskId": "T-revision", "contextRevision": 9,
+                "idempotencyKey": "revision-retry", "interactive": True,
+            },
+        }}, "corrected")
+        assert corrected["result"]["id"] == "T-revision"
+        current = await _wait_state(client, "T-revision", "input-required")
+        assert len(current["history"]) == 2
 
 
 async def test_cancel_is_terminal(tmp_path, monkeypatch):
@@ -167,6 +180,24 @@ async def test_terminal_task_requires_explicit_recovery_replacement(
             },
         }}, "first")
         await _wait_state(client, "T-replace", "completed")
+        replayed = await _rpc(client, "message/send", {"message": {
+            "role": "user", "parts": [{"kind": "text", "text": "first"}],
+            "metadata": {
+                "taskId": "T-replace", "sessionId": "S-old",
+                "idempotencyKey": "replace-1",
+            },
+        }}, "replay")
+        assert replayed["result"]["status"]["state"] == "completed"
+        assert len(replayed["result"]["history"]) == 1
+
+        conflict = await _rpc(client, "message/send", {"message": {
+            "role": "user", "parts": [{"kind": "text", "text": "other"}],
+            "metadata": {
+                "taskId": "T-other", "idempotencyKey": "replace-1",
+            },
+        }}, "conflict")
+        assert conflict["error"]["code"] == -32004
+
         denied = await _rpc(client, "message/send", {"message": {
             "role": "user", "parts": [{"kind": "text", "text": "retry"}],
             "metadata": {"taskId": "T-replace", "sessionId": "S-new"},

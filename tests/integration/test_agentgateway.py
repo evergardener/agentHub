@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import socket
 import subprocess
 import threading
@@ -53,6 +54,7 @@ class GatewayStack:
     worker_base: str
     process: subprocess.Popen
     env: dict[str, str]
+    api_key: str
 
     def restart(self) -> None:
         self.process.terminate()
@@ -72,15 +74,6 @@ class GatewayStack:
             except httpx.TransportError:
                 time.sleep(0.1)
         raise RuntimeError("agentgateway did not restart")
-
-
-def _gateway_key() -> str:
-    from common import config as cfg
-
-    key = cfg.gateway_api_key()
-    if not key:
-        pytest.skip("LAS_GATEWAY_API_KEY/GATEWAY_API_KEY not set")
-    return key
 
 
 @pytest.fixture(scope="module")
@@ -113,9 +106,20 @@ def stack(tmp_path_factory):
         f"host: 127.0.0.1:{worker_port}",
         1,
     )
+    config_text = config_text.replace(
+        "host: 127.0.0.1:8202",
+        f"host: 127.0.0.1:{worker_port}",
+        1,
+    )
+    config_text = config_text.replace(
+        "host: 127.0.0.1:8203",
+        f"host: 127.0.0.1:{worker_port}",
+        1,
+    )
     conf_copy.write_text(config_text, encoding="utf-8")
 
-    env = dict(os.environ, GATEWAY_API_KEY=_gateway_key())
+    api_key = secrets.token_urlsafe(32)
+    env = dict(os.environ, GATEWAY_API_KEY=api_key)
     gw = subprocess.Popen([str(AGW_BIN), "-f", str(conf_copy)],
                           env=env,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -136,6 +140,7 @@ def stack(tmp_path_factory):
             worker_base=f"http://127.0.0.1:{worker_port}",
             process=gw,
             env=env,
+            api_key=api_key,
         )
         yield stack
     finally:
@@ -156,6 +161,7 @@ async def test_gateway_requires_api_key(stack):
 async def test_hermes_delegates_via_gateway(stack, monkeypatch):
     """Hermes 只访问 gateway：for_agent + Bearer key → 任务完成。"""
     monkeypatch.setenv("AGENT_GATEWAY_URL", stack.gateway_base)
+    monkeypatch.setenv("LAS_GATEWAY_API_KEY", stack.api_key)
     client = A2aClient.for_agent("codex", "http://127.0.0.1:9/unused",
                                  timeout=30)
 
@@ -178,7 +184,7 @@ async def test_acl_blocks_disabled_agent(stack):
     conf = stack.config_path
     original = conf.read_text(encoding="utf-8")
     assert "agents: codex,kimi" in original
-    key = _gateway_key()
+    key = stack.api_key
     try:
         conf.write_text(original.replace("agents: codex,kimi", "agents: kimi"),
                         encoding="utf-8")
@@ -221,7 +227,7 @@ async def test_direct_bypass_still_possible_but_unauthenticated(stack):
 
 async def test_route_rate_limit_rejects_a_runaway_loop(stack):
     """kimi 使用独立限流桶；后端离线也应在突发超额后由 gateway 返回 429。"""
-    key = _gateway_key()
+    key = stack.api_key
     statuses: list[int] = []
     async with httpx.AsyncClient(timeout=5) as client:
         for _ in range(35):
@@ -243,6 +249,7 @@ async def test_route_rate_limit_rejects_a_runaway_loop(stack):
 
 async def test_gateway_restart_preserves_idempotent_a2a_task(stack, monkeypatch):
     monkeypatch.setenv("AGENT_GATEWAY_URL", stack.gateway_base)
+    monkeypatch.setenv("LAS_GATEWAY_API_KEY", stack.api_key)
     client = A2aClient.for_agent("codex", "http://unused", timeout=30)
     task_id = "T-GATEWAY-RESTART-1"
     first = await client.send_and_wait(

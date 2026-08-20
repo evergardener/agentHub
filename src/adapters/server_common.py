@@ -240,6 +240,16 @@ def build_app(
             return _rpc_error(rpc_id, -32602, "message has no text part")
 
         requested_task_id = metadata.get("taskId")
+        requested_idempotency_key = metadata.get("idempotencyKey")
+        if requested_idempotency_key:
+            duplicate = store.get_by_idempotency_key(
+                requested_idempotency_key)
+            if duplicate is not None:
+                if requested_task_id and duplicate.id != requested_task_id:
+                    return _rpc_error(
+                        rpc_id, -32004,
+                        "idempotency key belongs to another task")
+                return _rpc_result(rpc_id, duplicate.to_a2a())
         existing = store.get(requested_task_id) if requested_task_id else None
         if requested_task_id and existing is not None:
             if (existing.status_state in {
@@ -261,13 +271,6 @@ def build_app(
                 return _rpc_error(
                     rpc_id, -32006,
                     "session is paused; resume before sending a message")
-            if metadata.get("idempotencyKey"):
-                duplicate = store.get_by_idempotency_key(
-                    metadata["idempotencyKey"])
-                if duplicate is not None:
-                    return _rpc_result(rpc_id, duplicate.to_a2a())
-                store.remember_idempotency_key(
-                    metadata["idempotencyKey"], existing.id)
             try:
                 requested_revision = int(metadata.get(
                     "contextRevision", existing.context_revision))
@@ -279,6 +282,9 @@ def build_app(
                     rpc_id, -32005,
                     "stale contextRevision: "
                     f"{requested_revision} < {existing.context_revision}")
+            if requested_idempotency_key:
+                store.remember_idempotency_key(
+                    requested_idempotency_key, existing.id)
             existing.objective = objective
             existing.context_revision = requested_revision
             _queue_turn(existing, objective, metadata, first=False)
@@ -295,7 +301,7 @@ def build_app(
             id=task_id,  # Hermes 分配的 ID 优先
             status_state="submitted",
             objective=objective,
-            idempotency_key=metadata.get("idempotencyKey"),
+            idempotency_key=requested_idempotency_key,
             context_id=metadata.get("contextId") or task_id,
             session_id=session_id,
             adapter_instance_id=adapter_instance_id,

@@ -207,18 +207,22 @@ revision 写许可失效。
     322 passed；
 11. [x] 将 agent session/message/action/tool/artifact 事件统一接入可断线补发的实时 SSE；
 12. [ ] 在授权环境执行 Codex/Kimi 真实双轮 resume、进程重启和 Adapter 重启测试；
-13. [ ] State Writer 已把 event 去重记录、Task transition、run/artifact 写入合并为
+13. [x] State Writer 已把 event 去重记录、Task transition、run/artifact 写入合并为
     同一数据库事务，并用“transition/run 首次失败 → 回滚 → 同 event_id 重投成功”
     离线故障注入证明不会因提前 dedupe ACK 丢状态；已增加 gateway 重启后同
     idempotency key 不重复执行，以及 durable consumer/NATS 重启后两条同 event_id
     只落一条 Event/Run 的隔离进程测试。NATS 用例已改为逐测试随机端口，并于
     2026-08-20 在本机真实执行通过（端到端落库与持久存储重启共 2 passed）；
-    gateway 用例仍待执行。PostgreSQL 连接故障现会替换 State Writer 的失效连接
-    并继续依赖 JetStream NAK 重投；
+    gateway 用例已改为使用进程内随机 key、随机端口，并把 codex/kimi/dsh 路由
+    全部指向临时 fake worker；2026-08-20 真实执行认证、ACL、路由限流、委派和
+    gateway 重启幂等共 6 passed。实测同时发现终态 task 重放先于幂等检查的缺陷，
+    现已改为同 key 返回原结果、跨 task key 冲突拒绝、失败 revision 不登记 key。
+    PostgreSQL 连接故障现会替换 State Writer 的失效连接并继续依赖 JetStream NAK 重投；
     已增加 `LAS_RUN_PG_FAULTS=1` 显式门控的随机 Compose 项目故障测试：停库期间
     验证 durable message NAK，恢复后验证同 event_id 只落一条 Event/Run；该
     PostgreSQL 隔离容器门禁已于 2026-08-20 在本机真实执行通过（1 passed），
-    gateway 隔离进程门禁仍待授权环境执行；本批全量 unit+contract 为 323 passed。
+    gateway、NATS 与 PostgreSQL 三项隔离故障门禁均已执行通过；本批全量
+    unit+contract 为 323 passed。
 
 ## 当前迭代（Iteration 6）
 
