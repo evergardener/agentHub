@@ -37,14 +37,16 @@ ENV PYTHONUNBUFFERED=1 \
     LAS_WORKSPACE=/data/workspace
 WORKDIR /app
 
-COPY pyproject.toml ./
-COPY src ./src
-COPY config ./config
 # PyPI 不可达/不稳定时：--build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG PIP_INDEX_URL=""
-RUN pip install --no-cache-dir ${PIP_INDEX_URL:+--index-url "$PIP_INDEX_URL"} . \
+COPY requirements.lock ./
+RUN pip install --no-cache-dir ${PIP_INDEX_URL:+--index-url "$PIP_INDEX_URL"} \
+      -r requirements.lock \
  && mkdir -p /data/workspace
 
+COPY src ./src
+COPY config ./config
+COPY scripts/agentctl-container /usr/local/bin/agentctl
 COPY infra/agentgateway/config.docker.yaml ./infra/agentgateway/config.docker.yaml
 COPY --from=agw /usr/local/bin/agentgateway /usr/local/bin/agentgateway
 

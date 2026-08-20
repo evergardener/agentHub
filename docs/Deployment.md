@@ -50,6 +50,10 @@ cd agentHub   # 下文统称项目根
     --build-arg REGISTRY=docker.m.daocloud.io/library \
     --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
   ```
+
+容器依赖由 `requirements.lock` 精确锁定，且依赖层位于源码层之前；普通源码变更
+不会重新解析或下载所有 wheel。升级 `pyproject.toml` 依赖时必须同步刷新锁文件，
+在两个目标架构构建并完成全量测试、镜像扫描和本节生产烟测后才能提交。
 - **ghcr 拉取**：`ghcr.io/evergardener/agenthub:latest`（或 `v*` tag），
   把 compose 里 `agenthub:latest` 锚点的 `build: .` 去掉、改为该镜像名。
 

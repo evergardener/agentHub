@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -55,6 +56,31 @@ def test_agentgateway_download_is_verified_per_supported_architecture():
     assert re.search(r'arm64\) expected="[0-9a-f]{64}"', dockerfile)
     assert 'sha256sum -c -' in dockerfile
     assert "unsupported agentgateway architecture" in dockerfile
+
+
+def test_container_dependencies_are_exactly_locked_and_cached_before_source():
+    locked_lines = [
+        line.strip() for line in (ROOT / "requirements.lock").read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    assert locked_lines
+    assert all(re.fullmatch(r"[A-Za-z0-9_.-]+==[^=\s]+", line)
+               for line in locked_lines)
+    locked = {line.split("==", 1)[0].lower().replace("_", "-")
+              for line in locked_lines}
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    direct = {
+        re.split(r"[<>=\[]", requirement, 1)[0].lower().replace("_", "-")
+        for requirement in project["project"]["dependencies"]
+    }
+    assert direct <= locked
+    assert "local-agent-system" not in locked
+
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    assert "-r requirements.lock" in dockerfile
+    assert dockerfile.index("COPY requirements.lock") < dockerfile.index(
+        "COPY src ./src")
+    assert "pip install --no-cache-dir" in dockerfile
 
 
 def test_release_workflow_pins_actions_and_enforces_attest_scan_sign():
