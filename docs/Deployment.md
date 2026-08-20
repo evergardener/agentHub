@@ -240,10 +240,12 @@ LAS_RUN_CODEX_APP_SERVER=1 \
 断线重连时携带最后 `seq`，由 `/api/events/stream?after=...` 补发；NATS 短暂
 不可用时 Adapter 先写 `events-pending.jsonl`，恢复后按既有 replay 流程回放。
 
-任务详情中的「用户介入」支持备注、实时纠正、中断和取消。实时纠正按钮只在
-Agent Card 的 `agentHubSession.steer=true` 时显示：Codex/DSH 当前支持，Kimi
-ACP 当前不支持。所有操作会写入 conversation message 与 `user.intervened`
-审计事件并提升 context revision；刷新或重启 Hermes 后仍可恢复。若 Kimi 指令
+任务详情中的「用户介入」支持备注、实时纠正、中断、接管、归还 Hermes 和取消。
+实时纠正按钮只在 Session capability `steer=true` 时显示：Codex/DSH 当前支持，
+Kimi ACP 当前不支持。接管仅在 `interrupt=true` 时开放：平台先提升 revision，
+再中断原生 turn 并把 controller 保持为 user；归还后 controller 切回 Hermes、
+phase 进入 `needs_replan`，旧 turn 不会恢复。所有操作会写入 conversation message
+与 `user.intervened` 审计事件；刷新或重启 Hermes 后仍可恢复。若 Kimi 指令
 偏差，应先点“中断当前 turn”，再由 Hermes 按新 revision 下发下一轮，不得把
 新 prompt 伪装成对旧 turn 的 steer。
 
@@ -420,11 +422,21 @@ safety backup 与旧 Workspace 可读取，最后确认随机项目的容器、�
 ```bash
 LAS_RUN_GW=1 .venv/bin/python -m pytest tests/integration/test_agentgateway.py
 .venv/bin/python -m pytest tests/integration/test_state_writer.py
+LAS_RUN_PG_FAULTS=1 \
+  .venv/bin/python -m pytest -q \
+  tests/integration/test_postgres_restart_fault.py
+LAS_RUN_DSH_RESTART=1 \
+  .venv/bin/python -m pytest -q \
+  tests/integration/test_dsh_restart_fault.py
 ```
 
 前者包含 gateway 进程重启后的 A2A 幂等重放，后者包含 durable consumer 与 NATS
-持久存储重启、重复 event_id 去重。必须在允许监听 loopback 端口的隔离环境运行；
-不要把测试指向默认栈端口或生产数据目录。
+持久存储重启、重复 event_id 去重。PostgreSQL 用例创建随机 Compose project、
+临时端口和卷，验证停库 NAK 与恢复后单次落库；DSH 用例使用随机端口和临时
+`DSH_HOME`，只调用 session.create/list/history，验证 DSH 进程重启和 Adapter
+实例重建，不调用模型且不改用户 `~/.dsh`。这些测试必须在允许监听 loopback
+端口、启动隔离进程/容器的环境运行；不要改写测试使用临时资源的设计，也不要
+把它们指向默认栈端口、用户 DSH_HOME 或生产数据目录。
 
 ## 8. 安全基线
 
