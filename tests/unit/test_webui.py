@@ -179,7 +179,11 @@ def test_index_page(client):
     assert "归还 Hermes 并重新规划" in r.text
     assert "协作会话" in r.text
     assert "委派指令（原文）" in r.text
-    assert "完整多轮消息" in r.text
+    assert "任务导航" in r.text
+    assert 'aria-label="协作会话工作区"' in r.text
+    assert 'id="conversation-select"' in r.text
+    assert 'id="chat-transcript"' in r.text
+    assert "只读追踪视图" in r.text
 
 
 def test_index_has_bounded_alert_center_and_in_page_dialogs(client):

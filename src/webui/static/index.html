@@ -71,22 +71,32 @@
 
   /* ── 布局 ── */
   .layout {
-    display: grid; gap: 16px; padding: 16px 20px;
-    grid-template-columns: 264px minmax(0, 1fr) 360px;
-    align-items: start; max-width: 1720px; margin: 0 auto;
+    display: grid; gap: 12px; padding: 12px 16px;
+    grid-template-columns: 330px minmax(520px, 1fr) 300px;
+    align-items: stretch; max-width: 1920px; height: calc(100vh - 52px);
+    margin: 0 auto; overflow: hidden;
   }
-  @media (max-width: 1100px) {
-    .layout { grid-template-columns: 1fr; }
+  @media (max-width: 1180px) {
+    .layout { grid-template-columns: 300px minmax(480px, 1fr);
+              height: auto; overflow: visible; }
+    .ops-col { grid-column: 1 / -1; display: grid !important;
+               grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .workspace-card { height: 76vh; min-height: 620px; }
+    .sidebar-col { height: 76vh; min-height: 620px; }
   }
   @media (max-width: 600px) {
     header { padding: 0 12px; gap: 8px; }
     #clock { display: none; }
-    .layout { padding: 12px; }
+    .layout { padding: 10px; grid-template-columns: 1fr; }
+    .ops-col { grid-column: auto; display: flex !important; }
+    .workspace-card, .sidebar-col { height: 72vh; min-height: 520px; }
     .alert-summary { grid-template-columns: 1fr; }
     .alert-footer { align-items: stretch; flex-direction: column; }
     .alert-footer .btn { width: 100%; }
   }
   .col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .sidebar-col, .ops-col { height: 100%; min-height: 0; overflow: hidden; }
+  .ops-col { gap: 12px; overflow-y: auto; padding-right: 3px; }
 
   .card {
     background: var(--card); border: 1px solid var(--line);
@@ -293,6 +303,57 @@
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
     overflow: hidden; word-break: break-all;
   }
+  .task-card { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .task-list { min-height: 0; overflow-y: auto; padding: 6px 0; }
+  .task-item {
+    display: block; width: 100%; border: 0; border-bottom: 1px solid var(--line-soft);
+    background: transparent; color: inherit; text-align: left; padding: 9px 14px;
+    cursor: pointer; font: inherit;
+  }
+  .task-item:hover, .task-item.active { background: #f7f9fd; }
+  .task-item .top { display: flex; align-items: center; gap: 8px; }
+  .task-item .top .tid { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .task-item .objective { margin-top: 4px; color: var(--fg); font-size: 12.5px;
+                          display: -webkit-box; -webkit-line-clamp: 2;
+                          -webkit-box-orient: vertical; overflow: hidden; }
+  .task-item .agent-name { margin-top: 3px; color: var(--faint); font-size: 11px; }
+
+  /* ── 长对话工作区 ── */
+  .workspace-card { height: 100%; min-height: 0; display: flex;
+                    flex-direction: column; overflow: hidden; }
+  .chat-head { padding: 13px 18px; border-bottom: 1px solid var(--line);
+               display: flex; align-items: center; gap: 10px; }
+  .chat-head .titles { flex: 1; min-width: 0; }
+  .chat-head h1 { margin: 0; font-size: 15px; font-weight: 650;
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chat-head .sub { color: var(--faint); font-size: 11px; margin-top: 1px; }
+  .conversation-picker { max-width: 240px; min-width: 150px; padding: 6px 9px;
+                         border: 1px solid var(--line); border-radius: 8px;
+                         background: var(--card); color: var(--fg); font: inherit;
+                         font-size: 12px; }
+  .chat-context { padding: 11px 18px; border-bottom: 1px solid var(--line-soft);
+                  background: #fafbfc; }
+  .chat-objective { font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
+  .chat-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px;
+               color: var(--faint); font-size: 11px; }
+  .chat-meta button { border: 0; padding: 0; color: var(--acc); background: none;
+                      cursor: pointer; font: inherit; font-size: 11px; }
+  .chat-transcript { flex: 1; min-height: 0; overflow-y: auto;
+                     padding: 20px clamp(18px, 4vw, 54px); }
+  .chat-transcript .message-list { gap: 14px; }
+  .chat-transcript .message { max-width: 88%; padding: 12px 14px; }
+  .chat-transcript .message.user { margin-left: auto; }
+  .chat-transcript .message.hermes,
+  .chat-transcript .message.tool { margin-right: auto; }
+  .chat-transcript .message.tool { max-width: 96%; }
+  .chat-empty { height: 100%; display: grid; place-items: center; text-align: center;
+                color: var(--faint); padding: 30px; }
+  .chat-foot { border-top: 1px solid var(--line); padding: 10px 18px;
+               background: #fafbfc; color: var(--mut); font-size: 11.5px;
+               display: flex; align-items: center; gap: 8px; }
+  .chat-foot strong { color: var(--fg); }
+  .chat-foot .spacer { flex: 1; }
+
   .conversation-list { padding: 4px 0; }
   .conversation {
     display: block; width: 100%; padding: 11px 16px; border: 0;
@@ -357,7 +418,7 @@
                     cursor: pointer; text-transform: none;
                     letter-spacing: 0; font-weight: 400; }
   #events {
-    height: 480px; overflow-y: auto; padding: 8px 0;
+    height: 300px; overflow-y: auto; padding: 8px 0;
     font: 11.5px/1.75 ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   .ev {
@@ -489,13 +550,48 @@
 </header>
 
 <div class="layout">
-  <!-- 左栏：Agents + 审批 + 授权 -->
-  <div class="col">
+  <!-- 左栏：Agent 状态 + 任务导航 -->
+  <div class="col sidebar-col">
     <section class="card">
       <h2>AGENTS</h2>
       <div class="body" id="agents"></div>
     </section>
 
+    <section class="card task-card">
+      <h2>任务导航 <span class="tid">点击查看详情</span></h2>
+      <div class="chips" id="status-chips"></div>
+      <div class="task-list" id="tasks"></div>
+    </section>
+  </div>
+
+  <!-- 中栏：类似 Codex 的持久长对话追踪视图 -->
+  <main class="col">
+    <section class="card workspace-card" aria-label="协作会话工作区">
+      <div class="chat-head">
+        <div class="titles">
+          <h1 id="chat-title">协作会话</h1>
+          <div class="sub" id="chat-subtitle">Hermes 多轮上下文追踪</div>
+        </div>
+        <span id="chat-badge"></span>
+        <select class="conversation-picker" id="conversation-select" aria-label="选择协作会话"></select>
+      </div>
+      <div class="chat-context" id="chat-context">
+        <div class="chat-objective">选择一个协作会话查看完整过程。</div>
+      </div>
+      <div class="chat-transcript" id="chat-transcript">
+        <div class="chat-empty">暂无可显示的持久会话</div>
+      </div>
+      <div class="chat-foot">
+        <strong>只读追踪视图</strong>
+        <span>任务控制、用户介入与 Artifact 仍在任务详情中操作。</span>
+        <span class="spacer"></span>
+        <span id="chat-refresh-state">等待数据</span>
+      </div>
+    </section>
+  </main>
+
+  <!-- 右栏：审批、原生交互、授权和事件流 -->
+  <div class="col ops-col">
     <section class="card">
       <h2>审批中心 <span class="badge blocked" id="blocked-count" style="display:none"></span></h2>
       <div class="body" id="blocked"></div>
@@ -516,24 +612,7 @@
         <div id="grants"></div>
       </div>
     </section>
-  </div>
 
-  <!-- 中栏：任务 -->
-  <div class="col">
-    <section class="card">
-      <h2>任务</h2>
-      <div class="chips" id="status-chips"></div>
-      <table class="tasks"><tbody id="tasks"></tbody></table>
-    </section>
-
-    <section class="card">
-      <h2>协作会话 <span class="tid">Hermes 多轮上下文</span></h2>
-      <div class="conversation-list" id="collaborations"></div>
-    </section>
-  </div>
-
-  <!-- 右栏：事件流 -->
-  <div class="col">
     <section class="card">
       <h2>事件流
         <span class="ev-tools">
@@ -612,6 +691,8 @@ const S = {
   evCount: 0,
   EV_CAP: 300,           // 事件流 DOM 上限
   detailId: null,
+  collaborationId: null,
+  collaborations: [],
   interactions: new Map(),
   alerts: [],
   alertFilter: "all",
@@ -848,34 +929,47 @@ function renderChips(counts) {
     states.filter(s => counts[s]).map(s =>
       `<button class="chip ${S.filter === s ? "on" : ""}" data-f="${s}">${s}<span class="n">${counts[s]}</span></button>`
     ).join("");
-  document.querySelectorAll(".chip").forEach(b =>
+  document.querySelectorAll("#status-chips [data-f]").forEach(b =>
     b.onclick = () => { S.filter = b.dataset.f || null; loadAll(); });
 }
 
 function renderTasks(tasks) {
   $("#tasks").innerHTML = tasks.map(x =>
-    `<tr data-task="${esc(x.id)}">
-       <td class="tid">${esc(x.id)}</td>
-       <td>${badge(x.status)}</td>
-       <td class="obj"><div class="t" title="${esc(x.objective || "")}">${esc(x.objective || "")}</div></td>
-       <td class="tid">${esc(x.assigned_to || "-")}</td>
-     </tr>`
-  ).join("") || `<tr><td class="empty" colspan="4">（无任务）</td></tr>`;
+    `<button class="task-item ${S.detailId === x.id ? "active" : ""}" type="button" ` +
+    `data-task="${esc(x.id)}" data-task-collaboration="${esc(x.collaboration_id || "")}">
+      <div class="top"><span class="tid">${esc(x.id)}</span>${badge(x.status)}</div>
+      <div class="objective">${esc(x.objective || "（无目标）")}</div>
+      <div class="agent-name">${esc(x.assigned_to || "未分配 Agent")}${x.collaboration_id ? " · 有协作会话" : " · 独立任务"}</div>
+    </button>`
+  ).join("") || `<div class="empty" style="padding:12px 14px">（无任务）</div>`;
   document.querySelectorAll("[data-task]").forEach(tr =>
-    tr.onclick = () => openDetail(tr.dataset.task));
+    tr.onclick = async () => {
+      if (tr.dataset.taskCollaboration)
+        await loadConversationPanel(tr.dataset.taskCollaboration);
+      await openDetail(tr.dataset.task);
+    });
 }
 
 function renderCollaborations(rows) {
-  $("#collaborations").innerHTML = rows.map(x =>
-    `<button class="conversation" type="button" data-collaboration="${esc(x.id)}">
-      <div class="top"><span class="title">${esc(x.title || x.objective || x.id)}</span>${badge(x.phase)}</div>
-      <div class="desc">${esc(x.objective || "（无目标）")}</div>
-      <div class="stats">${esc(x.message_count)} 条消息 · ${esc(x.task_count)} 个任务 · revision ${esc(x.context_revision)}</div>
-    </button>`
-  ).join("") || `<div class="empty" style="padding:12px 16px">（暂无持久协作会话）</div>`;
-  document.querySelectorAll("[data-collaboration]").forEach(b =>
-    b.onclick = () => openCollaboration(b.dataset.collaboration));
+  S.collaborations = rows;
+  const picker = $("#conversation-select");
+  if (!rows.length) {
+    picker.innerHTML = `<option value="">暂无协作会话</option>`;
+    picker.disabled = true;
+    S.collaborationId = null;
+    renderEmptyConversation();
+    return;
+  }
+  picker.disabled = false;
+  if (!S.collaborationId || !rows.some(x => x.id === S.collaborationId))
+    S.collaborationId = rows[0].id;
+  picker.innerHTML = rows.map(x =>
+    `<option value="${esc(x.id)}" ${x.id === S.collaborationId ? "selected" : ""}>` +
+    `${esc((x.title || x.objective || x.id).slice(0, 52))} · ${esc(x.message_count)} 条</option>`
+  ).join("");
 }
+
+$("#conversation-select").onchange = e => loadConversationPanel(e.target.value);
 
 /* ── 渲染：审批与授权 ── */
 function renderBlocked(tasks) {
@@ -980,7 +1074,11 @@ async function loadAll() {
     if (!t.error) renderTasks(t.tasks || []);
     if (!b.error) renderBlocked(b.tasks || []);
     if (!a.error) renderAlerts(a.alerts || []);
-    if (!c.error) renderCollaborations(c.collaborations || []);
+    if (!c.error) {
+      renderCollaborations(c.collaborations || []);
+      if (S.collaborationId)
+        await loadConversationPanel(S.collaborationId, {preserveScroll: true});
+    }
     setConn(true, "已连接");
     S.backoff = 8000;
   } catch (e) {
@@ -1054,6 +1152,8 @@ function startStream() {
       S.lastSeq = Math.max(S.lastSeq, e.seq);
       appendEvent(e);
       appendDetailEvent(e);
+      if (e.event_type === "conversation.message.created" && S.collaborationId)
+        loadConversationPanel(S.collaborationId, {preserveScroll: true});
       if (/interaction|input_required|\.blocked$|system\.alert/.test(e.event_type || ""))
         loadAll();
     } catch (_) { /* 跳过坏帧 */ }
@@ -1101,6 +1201,10 @@ async function openDetail(id) {
   $("#d-badge").innerHTML = badge(d.task.status);
 
   const t = d.task;
+  document.querySelectorAll("[data-task]").forEach(item =>
+    item.classList.toggle("active", item.dataset.task === t.id));
+  if (t.collaboration_id && t.collaboration_id !== S.collaborationId)
+    await loadConversationPanel(t.collaboration_id);
   const collaboration = d.collaboration || {};
   const kv = [
     ["执行体", t.assigned_to || "-"],
@@ -1214,39 +1318,61 @@ async function openDetail(id) {
   $("#drawer").classList.add("show");
 }
 
-async function openCollaboration(id) {
-  S.detailId = null;
+function renderEmptyConversation() {
+  $("#chat-title").textContent = "协作会话";
+  $("#chat-subtitle").textContent = "Hermes 多轮上下文追踪";
+  $("#chat-badge").innerHTML = "";
+  $("#chat-context").innerHTML =
+    `<div class="chat-objective">当前没有持久 Conversation/Collaboration。</div>`;
+  $("#chat-transcript").innerHTML =
+    `<div class="chat-empty">暂无可显示的持久会话</div>`;
+  $("#chat-refresh-state").textContent = "无会话";
+}
+
+async function loadConversationPanel(id, {preserveScroll = false} = {}) {
+  if (!id) { renderEmptyConversation(); return; }
+  S.collaborationId = id;
+  const picker = $("#conversation-select");
+  if ([...picker.options].some(option => option.value === id)) picker.value = id;
+  const transcript = $("#chat-transcript");
+  const previousScroll = transcript.scrollTop;
+  const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
+  $("#chat-refresh-state").textContent = "同步中…";
   const d = await fetchJson("/api/collaborations/" + encodeURIComponent(id));
-  if (d.error) { showToast(d.error, "error"); return; }
+  if (d.error) {
+    $("#chat-refresh-state").textContent = "同步失败";
+    showToast(d.error, "error");
+    return;
+  }
   const c = d.collaboration;
-  $("#d-id").textContent = c.id;
-  $("#d-badge").innerHTML = badge(c.phase);
-  const tasks = (d.tasks || []).map(t =>
-    `<button class="conversation" style="padding:8px 0" type="button" data-linked-task="${esc(t.id)}">` +
-    `<div class="top"><span class="tid">${esc(t.id)}</span>${badge(t.status)}</div>` +
-    `<div class="desc">${esc(t.objective)}</div></button>`).join("");
-  const sessions = (d.sessions || []).map(s =>
-    `${s.agent_id} · task=${s.task_id} · native=${s.native_session_id || "未建立"} · ${s.status} · resume=${s.resume_capability}`
-  ).join("\n");
-  $("#d-body").innerHTML =
-    `<div class="d-sec"><h3>会话目标（原文）</h3><div class="instruction">${esc(c.objective)}</div></div>` +
-    `<div class="d-sec"><h3>上下文</h3><div class="kv">` +
-      [["conversation", c.conversation_id], ["标题", c.title || "-"],
-       ["控制权", c.controller], ["revision", c.context_revision],
-       ["创建", c.created_at], ["更新", c.updated_at]].map(([k, v]) =>
-        `<div class="row"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join("") +
-    `</div></div>` +
-    `<div class="d-sec"><h3>完整多轮消息</h3>${renderMessageList(d.messages || [])}</div>` +
-    `<div class="d-sec"><h3>关联任务</h3>${tasks || `<div class="empty">（无关联任务）</div>`}</div>` +
-    `<div class="d-sec"><h3>可恢复 Agent Session</h3><div class="mono">${esc(sessions) || "（尚未建立子 Agent session）"}</div></div>`;
-  document.querySelectorAll("[data-linked-task]").forEach(b =>
-    b.onclick = () => openDetail(b.dataset.linkedTask));
-  $("#overlay").classList.add("show");
-  $("#drawer").classList.add("show");
+  $("#chat-title").textContent = c.title || c.objective || c.id;
+  $("#chat-subtitle").textContent = c.id;
+  $("#chat-badge").innerHTML = badge(c.phase);
+  const taskLinks = (d.tasks || []).map(t =>
+    `<button type="button" data-chat-task="${esc(t.id)}">${esc(t.id)} · ${esc(t.status)}</button>`
+  ).join("");
+  const nativeSessions = (d.sessions || []).filter(s => s.native_session_id).length;
+  $("#chat-context").innerHTML =
+    `<div class="chat-objective">${esc(c.objective || "（无目标）")}</div>` +
+    `<div class="chat-meta"><span>conversation ${esc(c.conversation_id)}</span>` +
+    `<span>控制权 ${esc(c.controller)}</span><span>revision ${esc(c.context_revision)}</span>` +
+    `<span>${esc((d.messages || []).length)} 条消息</span>` +
+    `<span>${esc((d.tasks || []).length)} 个任务</span>` +
+    `<span>${esc(nativeSessions)} 个原生 Session</span>` +
+    (taskLinks ? `<span>关联：${taskLinks}</span>` : `<span>纯对话 · 未创建任务</span>`) +
+    `</div>`;
+  transcript.innerHTML = renderMessageList(d.messages || []);
+  document.querySelectorAll("[data-chat-task]").forEach(button =>
+    button.onclick = () => openDetail(button.dataset.chatTask));
+  if (!preserveScroll || nearBottom) transcript.scrollTop = transcript.scrollHeight;
+  else transcript.scrollTop = previousScroll;
+  $("#chat-refresh-state").textContent = `已同步 ${formatTime(new Date().toISOString())}`;
 }
 
 function closeDetail() {
   S.detailId = null;
+  document.querySelectorAll("[data-task]").forEach(item =>
+    item.classList.remove("active"));
   $("#overlay").classList.remove("show");
   $("#drawer").classList.remove("show");
 }

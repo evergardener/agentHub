@@ -439,14 +439,17 @@ def create_app() -> FastAPI:
             rows = _rows(conn.execute(
                 "SELECT co.id, co.conversation_id, co.objective, co.status,"
                 " co.phase, co.controller, co.context_revision, co.created_at,"
-                " co.updated_at, c.title, c.project, c.status AS conversation_status,"
+                " co.updated_at, c.title, c.project,"
+                " c.updated_at AS conversation_updated_at,"
+                " c.status AS conversation_status,"
                 " (SELECT COUNT(*) FROM conversation_messages m"
                 "   WHERE m.collaboration_id = co.id) AS message_count,"
                 " (SELECT COUNT(*) FROM tasks t"
                 "   WHERE t.collaboration_id = co.id) AS task_count"
                 " FROM collaborations co JOIN conversations c"
                 " ON c.id = co.conversation_id"
-                " ORDER BY co.updated_at DESC LIMIT ?;", (limit,)))
+                " ORDER BY c.updated_at DESC, co.updated_at DESC LIMIT ?;",
+                (limit,)))
             return {"collaborations": rows}
         finally:
             conn.close()
