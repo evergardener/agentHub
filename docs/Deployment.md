@@ -269,6 +269,9 @@ LAS_RUN_CODEX_RESTART=1 \
 LAS_RUN_CODEX_REJECT=1 \
   .venv/bin/python -m pytest -q \
   tests/integration/test_codex_rejection_fault.py
+LAS_RUN_CODEX_SERVICE_RESTART=1 \
+  .venv/bin/python -m pytest -q \
+  tests/integration/test_codex_service_restart_fault.py
 ```
 
 2026-08-20 已在 pytest 临时工作区真实执行通过（1 passed）：Codex 的修改请求
@@ -278,7 +281,9 @@ LAS_RUN_CODEX_REJECT=1 \
 关闭第一 Adapter/App Server 后，新实例以相同 native thread 完成第二轮并准确
 复述第一轮 marker；它仍不替代 HTTP Adapter 服务进程重启测试。同日第三条
 拒绝门禁真实通过（1 passed）：所有挂起的原生修改请求均明确拒绝，目标文件及
-`workspace/*` 产物均不存在。
+`workspace/*` 产物均不存在。同日第四条随机端口 HTTP Adapter 整进程重启门禁
+真实通过（1 passed）：停止第一服务后，第二服务以持久 native thread ID 和提升
+后的 context revision 恢复第二轮，不访问默认 8201。
 
 三类 Adapter 的原生过程事件统一发布为 `agent.session.event`，WebUI 的全局事件
 区与任务详情「事件时间线（实时）」会显示 `nativeEventType` 和脱敏摘要。浏览器

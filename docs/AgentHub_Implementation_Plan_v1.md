@@ -210,6 +210,9 @@ revision 写许可失效。
     322 passed；
 11. [x] 将 agent session/message/action/tool/artifact 事件统一接入可断线补发的实时 SSE；
 12. [ ] 在授权环境执行 Codex/Kimi 真实双轮 resume、进程重启和 Adapter 重启测试；
+    Codex 已于 2026-08-20 完成实例重建及随机端口 HTTP Adapter 整进程重启两级
+    真实门禁，均以同一 native thread 完成第二轮并复述首轮 marker（各 1 passed）；
+    Kimi 仍受服务端 usage limit 阻塞；
 13. [x] State Writer 已把 event 去重记录、Task transition、run/artifact 写入合并为
     同一数据库事务，并用“transition/run 首次失败 → 回滚 → 同 event_id 重投成功”
     离线故障注入证明不会因提前 dedupe ACK 丢状态；已增加 gateway 重启后同
@@ -325,6 +328,9 @@ revision 写许可失效。
     Adapter/App Server 重建，不覆盖 HTTP Adapter 服务进程重启。真实拒绝门禁
     `LAS_RUN_CODEX_REJECT=1` 也已通过（1 passed）：原生修改请求挂起后全部由
     user 拒绝，turn 正常结束且目标文件与任何 `workspace/*` 产物均不存在。
+    `LAS_RUN_CODEX_SERVICE_RESTART=1` 随机端口 HTTP 整进程重启门禁亦已通过
+    （1 passed），第二服务进程携同一 native thread/context revision 完成第二轮。
+    至此 Codex 允许、拒绝、双轮、App Server/Adapter 重建和 HTTP 服务重启矩阵完成。
 12. [x] Codex App Server 批次回归：unit+contract 233 passed；集成
     9 passed/13 skipped；本机无模型 `initialize + thread/start` 1 passed。
     同时修正多轮 handle 的 context revision 同步，以及把 Codex App Server/
