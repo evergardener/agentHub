@@ -186,6 +186,10 @@ def check_production_env(path: Path) -> list[Finding]:
             "必须在 300..604800 秒之间"))
     require_secret("LAS_WEBUI_SESSION_SECRET", 32)
 
+    if not _enabled(env.get("LAS_PRODUCTION_MODE", "")):
+        findings.append(Finding(
+            "error", "LAS_PRODUCTION_MODE", "生产预检要求显式设为 true"))
+
     raw_web_tokens = env.get("LAS_WEBUI_TOKENS", "")
     try:
         web_tokens = json.loads(raw_web_tokens) if raw_web_tokens else None

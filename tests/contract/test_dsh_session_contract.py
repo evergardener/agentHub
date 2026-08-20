@@ -59,7 +59,7 @@ async def test_dsh_a2a_card_and_native_session_metadata(tmp_path, monkeypatch):
         transport=httpx.MockTransport(dsh), base_url="http://dsh.test")
     adapter = DshWebSessionAdapter(
         client=native_client, poll_interval=0, timeout_seconds=1,
-        allow_unverified_runtime=True)
+        allow_unverified_runtime=True, production_mode=False)
     app = build_app("dsh", agent_card, max_concurrent=1,
                     session_adapter=adapter)
     published: list[tuple] = []
@@ -201,7 +201,7 @@ async def test_dsh_a2a_native_approval_response_continues_same_turn(
     adapter = DshWebSessionAdapter(
         client=native_client, poll_interval=0,
         timeout_seconds=2, interaction_wait_seconds=1,
-        allow_unverified_runtime=True)
+        allow_unverified_runtime=True, production_mode=False)
     app = build_app("dsh", agent_card, max_concurrent=1,
                     session_adapter=adapter)
 

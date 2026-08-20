@@ -91,6 +91,7 @@ cp .env.example .env && chmod 600 .env
 | `LAS_LLM_BASE_URL` | **宿主机视角**的 LLM 地址（如 `http://127.0.0.1:8317/v1`）；容器侧由 compose 固定改写为 `host.docker.internal`，不要在本文件填容器地址 |
 | `LAS_LLM_API_KEY` | LLM 端点密钥 |
 | `LAS_LLM_MODEL` | 模型名（如 `deepseek-ai/DeepSeek-V4-Flash`） |
+| `LAS_PRODUCTION_MODE` | 生产必须为 `true`；会在运行时拒绝 DSH 开发豁免，防止跳过预检绕过安全边界 |
 | `LAS_GATEWAY_API_KEY` | gateway 认证 key，`openssl rand -hex 24` 生成；**留空 gateway 拒绝所有请求** |
 | `LAS_PG_PASSWORD` | PostgreSQL 密码；**已有数据卷时改它会导致认证失败**（见 §6.2） |
 | `LAS_ADAPTER_TOKEN` | 留空即可——worker 首启自动生成随机值回写本文件 |
@@ -234,7 +235,8 @@ marker 恢复（1 passed）。这只是在显式开发豁免下验证无工具 p
 health 明示 `nativePermissionEnforcement=false`，`/health` 返回 503 且不发布
 在线心跳；只有
 `LAS_DSH_ALLOW_UNVERIFIED_RUNTIME=true` 才能进行隔离开发测试，而该值会被生产
-预检拒绝。在 DSH 官方 permission API 或可审计专用 preset 完成实测前，DSH
+预检拒绝；`LAS_PRODUCTION_MODE=true` 时 Adapter 还会直接拒绝启动，避免跳过
+预检绕过。在 DSH 官方 permission API 或可审计专用 preset 完成实测前，DSH
 任务路由整体不得生产启用，不再只把修改能力列为阻塞。
 
 Kimi Adapter 使用 `kimi acp`，ACP 的 `session/request_permission` 走相同

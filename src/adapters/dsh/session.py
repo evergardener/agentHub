@@ -171,6 +171,7 @@ class DshWebSessionAdapter(SessionAdapter):
         event_stream: bool | None = None,
         interaction_wait_seconds: float = 2.0,
         allow_unverified_runtime: bool | None = None,
+        production_mode: bool | None = None,
     ) -> None:
         self.base_url = (
             base_url or os.environ.get("LAS_DSH_WEB_URL", DEFAULT_DSH_WEB_URL)
@@ -187,6 +188,15 @@ class DshWebSessionAdapter(SessionAdapter):
             allow_unverified_runtime = os.environ.get(
                 "LAS_DSH_ALLOW_UNVERIFIED_RUNTIME", ""
             ).lower() in {"1", "true", "yes", "on"}
+        if production_mode is None:
+            production_mode = os.environ.get(
+                "LAS_PRODUCTION_MODE", ""
+            ).lower() in {"1", "true", "yes", "on"}
+        if production_mode and allow_unverified_runtime:
+            raise ValueError(
+                "LAS_DSH_ALLOW_UNVERIFIED_RUNTIME cannot be enabled when "
+                "LAS_PRODUCTION_MODE is true"
+            )
         self.allow_unverified_runtime = allow_unverified_runtime
         self._client = client
         self._handles: dict[str, SessionHandle] = {}

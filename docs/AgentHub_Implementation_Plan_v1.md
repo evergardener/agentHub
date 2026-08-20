@@ -193,7 +193,8 @@ revision 写许可失效。
    控制面 read_only Profile 不能被表述为原生 sandbox；Adapter 已改为默认拒绝
    所有模型 prompt/steer，Card/health 暴露未验证状态，readiness 返回不可用且
    停止在线心跳，Hermes 静态种子标记为 disabled，生产预检阻断 DSH 启用与
-   peer 路由。开发豁免仅允许隔离门禁，DSH 整体仍不得生产放行；
+   peer 路由；`LAS_PRODUCTION_MODE=true` 还会在运行时拒绝开发豁免，不能靠
+   跳过预检绕过。开发豁免仅允许隔离门禁，DSH 整体仍不得生产放行；
 4. [x] 支持同一 DSH 原生 session 多轮消息、Adapter 重启恢复、历史/工具事件
    Artifact、interrupt/cancel，并把原生审批挂起映射为 `input-required`；
 5. [x] DSH unit+contract 离线测试通过；全量 unit+contract 为 209 passed；
@@ -349,7 +350,7 @@ revision 写许可失效。
 
 ## 2026-08-20 当前发布基线与外部阻塞项
 
-- 当前源码全量 unit+contract：331 passed；默认 integration：10 passed、
+- 当前源码全量 unit+contract：333 passed；默认 integration：10 passed、
   28 skipped。默认跳过项均维持显式门控；gateway、远程安全剖面、NATS、
   PostgreSQL、DSH 无模型重启、HTTPS 告警及备份恢复等已执行的隔离门禁结果，
   以各节记录为准；

@@ -16,6 +16,7 @@ def _secure_env() -> str:
         "LAS_ACTION_RECEIPT_SECRET=" + "r" * 64,
         "LAS_API_TOKEN=" + "i" * 48,
         "LAS_A2A_PEERS=",
+        "LAS_PRODUCTION_MODE=true",
         "LAS_DSH_PRODUCTION_ENABLED=false",
         "LAS_DSH_ALLOW_UNVERIFIED_RUNTIME=false",
         "LAS_WEBUI_REQUIRE_AUTH=true",
@@ -131,6 +132,16 @@ def test_dsh_development_override_is_rejected_in_production(tmp_path):
     findings = check_production_env(env_file)
     assert {item.key for item in findings} == {
         "LAS_DSH_ALLOW_UNVERIFIED_RUNTIME"}
+
+
+def test_production_mode_must_be_explicitly_enabled(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(_secure_env().replace(
+        "LAS_PRODUCTION_MODE=true", "LAS_PRODUCTION_MODE=false"),
+        encoding="utf-8")
+    env_file.chmod(0o600)
+    findings = check_production_env(env_file)
+    assert {item.key for item in findings} == {"LAS_PRODUCTION_MODE"}
 
 
 def test_dsh_production_route_is_blocked_until_native_enforcement(tmp_path):

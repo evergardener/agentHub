@@ -194,7 +194,8 @@ Workspace/Git 保存实际文件产物；数据库保存路径、哈希、版本
   在此之前 Adapter 默认拒绝所有模型 prompt/steer，Agent Card 与 health 明示
   `nativePermissionEnforcement=false`，readiness 返回不可用且不发布在线心跳，
   生产预检阻断 DSH 启用和 peer 路由。显式
-  开发豁免只能用于隔离测试，不能作为安全证明；原生 approval 拦截证据仍保留
+  开发豁免只能用于隔离测试，不能作为安全证明；生产模式还在 Adapter 构造阶段
+  拒绝该豁免，不能靠跳过预检绕过。原生 approval 拦截证据仍保留
   为未来接口验收基础。命令
   只有在无 shell 组合/扩展、影响类型可识别且所有目标解析到任务工作区内时
   才形成结构化 operation/targets；State Writer 必须在控制面根据受限 view

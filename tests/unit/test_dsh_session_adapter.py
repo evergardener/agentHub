@@ -127,7 +127,8 @@ def _adapter(fixture: DshFixture) -> tuple[DshWebSessionAdapter,
         transport=httpx.MockTransport(fixture), base_url="http://dsh.test")
     return DshWebSessionAdapter(
         client=client, poll_interval=0, timeout_seconds=1,
-        interaction_wait_seconds=0, allow_unverified_runtime=True), client
+        interaction_wait_seconds=0, allow_unverified_runtime=True,
+        production_mode=False), client
 
 
 async def test_dsh_uses_same_native_session_for_multiple_turns(
@@ -438,6 +439,19 @@ async def test_dsh_model_prompt_is_disabled_without_development_override(
             await adapter.steer(
                 "S-dsh", SessionMessage("M-2", "user", "adjust"))
         assert "session.prompt" not in fixture.methods
+    finally:
+        await client.aclose()
+
+
+async def test_dsh_development_override_cannot_start_in_production():
+    fixture = DshFixture()
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(fixture), base_url="http://dsh.test")
+    try:
+        with pytest.raises(ValueError, match="LAS_PRODUCTION_MODE is true"):
+            DshWebSessionAdapter(
+                client=client, allow_unverified_runtime=True,
+                production_mode=True)
     finally:
         await client.aclose()
 

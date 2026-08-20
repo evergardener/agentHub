@@ -25,6 +25,7 @@ x-agenthub: &agenthub
       max-file: "5"
 
 x-agenthub-env: &agenthub-env
+  LAS_PRODUCTION_MODE: "true"
   LAS_NATS_URL: nats://nats:4222
   LAS_WORKSPACE: /data/workspace
   LAS_DATABASE_URL: postgresql://agenthub:${LAS_PG_PASSWORD:-agenthub-dev-only}@postgres:5432/agenthub
