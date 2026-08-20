@@ -28,6 +28,12 @@ from typing import Any, AsyncIterator
 import httpx
 
 from adapters.common import A2aTask, save_artifact, workspace_root
+from adapters.dsh.safety import (
+    normalize_tool_view,
+    redact_bounded,
+    safe_tool_view,
+    tool_view_is_inspectable,
+)
 from adapters.session import (
     PendingInteraction,
     SessionAdapter,
@@ -111,36 +117,6 @@ def _pending_approval(entries: list[dict[str, Any]], after_seq: int) -> dict | N
     )
 
 
-def _safe_tool_view(view: Any) -> dict[str, Any] | None:
-    """Reduce DSH presentation data to approval-safe, bounded fields."""
-    if not isinstance(view, dict) or view.get("for") != "call":
-        return None
-    value = view.get("view")
-    if not isinstance(value, dict):
-        return None
-    card = value.get("card")
-    title = value.get("title")
-    if card == "terminal" and isinstance(title, str) and title.strip():
-        return {"card": card, "command": title[:8192],
-                "cwd": value.get("cwd")}
-    if card == "diff":
-        paths = [
-            item.get("path") for item in value.get("diffs", [])
-            if isinstance(item, dict) and isinstance(item.get("path"), str)
-        ]
-        if paths:
-            return {"card": card, "title": str(title or "file change")[:512],
-                    "paths": paths[:100]}
-    if card == "generic" and isinstance(title, str) and title.strip():
-        locations = [
-            item.get("path") for item in value.get("locations", [])
-            if isinstance(item, dict) and isinstance(item.get("path"), str)
-        ]
-        return {"card": card, "title": title[:512],
-                "kind": value.get("kind"), "paths": locations[:100]}
-    return None
-
-
 def _history_tool_view(
     entries: list[dict[str, Any]], call_id: str
 ) -> dict[str, Any] | None:
@@ -149,16 +125,8 @@ def _history_tool_view(
         data = event.get("data") or {}
         if (event.get("type") == "tool/call"
                 and data.get("callId") == call_id):
-            return _safe_tool_view(entry.get("view"))
+            return safe_tool_view(entry.get("view"))
     return None
-
-
-def _tool_view_is_inspectable(view: dict[str, Any] | None) -> bool:
-    if not view:
-        return False
-    if view.get("card") == "terminal":
-        return bool(view.get("command"))
-    return bool(view.get("paths"))
 
 
 class DshWebSessionAdapter(SessionAdapter):
@@ -197,8 +165,8 @@ class DshWebSessionAdapter(SessionAdapter):
             "LAS_DSH_PERMISSION_PRESET", "read-only")
         if self.permission_preset not in SAFE_PERMISSION_PRESETS:
             raise ValueError(
-                "LAS_DSH_PERMISSION_PRESET must remain read-only until the "
-                "native tool target normalization is enabled")
+                "LAS_DSH_PERMISSION_PRESET must remain read-only; modifying "
+                "calls use one ActionIntent-bound allowed-once response")
         self._client = client
         self._handles: dict[str, SessionHandle] = {}
         self._tasks: dict[str, A2aTask] = {}
@@ -324,8 +292,12 @@ class DshWebSessionAdapter(SessionAdapter):
                     except (DshApiError, DshNotAvailable):
                         tool_view = None
                 if kind == "approval":
+                    tool_view = normalize_tool_view(
+                        tool_view,
+                        workspace=self._workspace(handle.task_id),
+                    )
                     interaction_payload["inspectable"] = \
-                        _tool_view_is_inspectable(tool_view)
+                        tool_view_is_inspectable(tool_view)
                     if tool_view is not None:
                         interaction_payload["toolView"] = tool_view
                 interaction = PendingInteraction(
@@ -350,7 +322,11 @@ class DshWebSessionAdapter(SessionAdapter):
             if isinstance(event, dict) and event.get("type") == "tool/call":
                 data = event.get("data") or {}
                 call_id = data.get("callId")
-                safe_view = _safe_tool_view(payload.get("view"))
+                safe_view = normalize_tool_view(
+                    safe_tool_view(payload.get("view")),
+                    workspace=self._workspace(
+                        self._handles[session_id].task_id),
+                )
                 if call_id and safe_view is not None:
                     self._tool_call_views[(str(native), str(call_id))] = safe_view
                     for interaction in self._pending_interactions.get(
@@ -360,7 +336,7 @@ class DshWebSessionAdapter(SessionAdapter):
                                 and interaction.payload.get("callId") == call_id):
                             interaction.payload["toolView"] = safe_view
                             interaction.payload["inspectable"] = \
-                                _tool_view_is_inspectable(safe_view)
+                                tool_view_is_inspectable(safe_view)
                             self._interaction_changed.set()
 
         if method in {"approval/resolved", "question/resolved"}:
@@ -469,8 +445,8 @@ class DshWebSessionAdapter(SessionAdapter):
                 "dshPermissionPreset", self.permission_preset)
             if permission not in SAFE_PERMISSION_PRESETS:
                 raise DshApiError(
-                    "DSH permission preset must remain read-only until the "
-                    "native tool target normalization is enabled")
+                    "DSH permission preset must remain read-only; modifying "
+                    "calls require one ActionIntent-bound allowed-once response")
             await self._request("session.prompt", {
                 "sessionId": native,
                 "mode": "queue",
@@ -499,7 +475,7 @@ class DshWebSessionAdapter(SessionAdapter):
             event_type=event_type,
             session_id=session_id,
             task_id=handle.task_id,
-            payload=payload,
+            payload=redact_bounded(payload),
         )
         await self._event_queues[session_id].put(event)
         return event
@@ -818,13 +794,16 @@ class DshWebSessionAdapter(SessionAdapter):
         baseline: int, *, state: str,
     ) -> list[dict]:
         encoded = json.dumps(
-            {"state": state, "afterSeq": baseline, "entries": entries},
+            redact_bounded({
+                "state": state, "afterSeq": baseline, "entries": entries,
+            }),
             ensure_ascii=False, indent=2,
         ).encode("utf-8")
         artifacts = [save_artifact(
             task.id, "dsh-history.json", encoded, "log")]
         answer = _assistant_text(entries, baseline)
         if answer:
+            answer = str(redact_bounded(answer))
             artifacts.append(save_artifact(
                 task.id, "last-message.md", answer.encode("utf-8"), "report"))
         artifacts.extend(self._workspace_artifacts(task.id))

@@ -85,6 +85,9 @@ dsh web --host 127.0.0.1 --port 3080
   session 默认执行 DSH `/permission read-only`，不会继承宽松的 Web 默认值。
   原生 approval/question 会实时进入 A2A `pendingInteractions`，经持久
   ActionIntent/用户或 Hermes 决策后由 `/api/respond` 回到同一 DSH turn。
+  DSH 命令仅在无 shell 组合/扩展且 operation 与目标路径可规范化到任务工作区时
+  才可逐次放行；事件及 history Artifact 会有界保存并脱敏。持久权限仍固定
+  `read-only`，修改仅使用绑定原 RPC 的 `allowed-once`。
 
 PostgreSQL 状态库（M3，compose 默认启用）：控制面默认使用
 `LAS_DATABASE_URL=postgresql://agenthub:***@postgres:5432/agenthub`；

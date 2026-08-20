@@ -238,7 +238,26 @@ class StateWriter:
             self.conn, task["collaboration_id"])
         if collaboration is None:
             return
-        for item in interactions:
+        for raw_item in interactions:
+            item = dict(raw_item)
+            details = dict(item.get("payload") or {})
+            tool_view = details.get("toolView") or {}
+            if (agent_id == "dsh" and item.get("kind") == "approval"
+                    and tool_view):
+                # Recompute before persistence so UI/TaskManager never retain
+                # adapter-authored inspectable=true for unverified input.
+                from adapters.dsh.safety import (
+                    normalize_tool_view,
+                    tool_view_is_inspectable,
+                )
+
+                tool_view = normalize_tool_view(
+                    tool_view,
+                    workspace=self._workspace_root() / "tasks" / task_id,
+                ) or {}
+                details["toolView"] = tool_view
+                details["inspectable"] = tool_view_is_inspectable(tool_view)
+                item["payload"] = details
             saved = collaboration_store.upsert_session_interaction(
                 self.conn,
                 collaboration_id=task["collaboration_id"],
@@ -249,24 +268,39 @@ class StateWriter:
             )
             if saved["kind"] != "approval" or saved["action_intent_id"]:
                 continue
-            details = item.get("payload") or {}
-            tool_view = details.get("toolView") or {}
-            target_paths = tool_view.get("paths") or []
-            targets = {
-                "workspace": str(self._workspace_root()),
+            semantic = tool_view.get("semanticIntent") or {}
+            semantic_targets = semantic.get("targets")
+            verified = (
+                agent_id == "dsh"
+                and semantic.get("status") == "verified"
+                and isinstance(semantic.get("operation"), str)
+                and bool(semantic.get("operation"))
+                and isinstance(semantic_targets, dict)
+                and isinstance(semantic_targets.get("paths"), list)
+                and bool(semantic_targets.get("paths"))
+            )
+            targets = (
+                dict(semantic_targets) if verified else {
+                    "workspace": str(self._workspace_root()),
+                    "nativeSessionId": item.get("nativeSessionId"),
+                    "callId": details.get("callId"),
+                    "paths": [],
+                }
+            )
+            targets.update({
                 "nativeSessionId": item.get("nativeSessionId"),
                 "callId": details.get("callId"),
-                "paths": target_paths,
-            }
-            if tool_view.get("cwd"):
-                targets["path"] = tool_view["cwd"]
+            })
             intent = collaboration_store.request_action_intent(
                 self.conn,
                 collaboration_id=task["collaboration_id"],
                 task_id=task_id,
                 session_binding_id=binding["id"],
                 requested_by_agent_id=agent_id,
-                operation=f"agent.tool.{details.get('toolName') or 'unknown'}",
+                operation=(
+                    semantic["operation"] if verified
+                    else f"agent.tool.{details.get('toolName') or 'unknown'}"
+                ),
                 targets=targets,
                 purpose=details.get("reason") or "native agent tool request",
                 expected_effects={
@@ -274,7 +308,8 @@ class StateWriter:
                     "approvalId": details.get("approvalId"),
                     "toolView": tool_view,
                 },
-                rollback_plan=None,
+                rollback_plan=(semantic.get("rollbackPlan") if verified
+                               else None),
                 based_on_revision=collaboration["context_revision"],
             )
             collaboration_store.attach_action_intent(

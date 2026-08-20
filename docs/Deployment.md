@@ -99,7 +99,7 @@ cp .env.example .env && chmod 600 .env
 | `LAS_WEBUI_TOKENS` | WebUI 登录 token→role JSON；token 用 `openssl rand -hex 24` 生成，role 为 `viewer` / `operator` / `admin` |
 | `LAS_WEBUI_SESSION_SECRET` | WebUI 签名 session cookie 的独立 HMAC 密钥，使用 `openssl rand -hex 32`；未配置时 WebUI 拒绝启动 |
 | `LAS_ADAPTER_BIND` | worker 监听地址，默认 `127.0.0.1`；需容器回连时加宿主机 LAN IP |
-| `LAS_DSH_PERMISSION_PRESET` | 当前必须为 `read-only`；ActionIntent 回执已接通，但 tool target normalization/脱敏完成前拒绝更宽 preset |
+| `LAS_DSH_PERMISSION_PRESET` | 必须为 `read-only`；修改仅允许经语义 target normalization、ActionIntent 签名回执绑定原 RPC 的 `allowed-once`，不开放持久 `workspace-write` |
 | `LAS_DATABASE_URL` | 留空 = compose PG；`sqlite:////path/x.db` = SQLite；外部 PG 直接填 URL |
 | `LAS_OTEL_ENDPOINT` | compose 内已指向 jaeger；置空关闭 tracing |
 

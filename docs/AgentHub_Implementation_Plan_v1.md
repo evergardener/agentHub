@@ -240,8 +240,13 @@ revision 写许可失效。
 10. [x] 以 callId 关联 DSH `ToolEventView`，只保留有界命令/cwd 或变更路径；
     缺少可审查详情时 WebUI 与 Adapter 均只允许拒绝，重连 replay 可从
     history 恢复安全 view；
-11. [ ] 完成命令影响面解析、语义 target normalization 和原始 Artifact
-    脱敏前，DSH 仍强制 `read-only`，不得开放 `workspace-write`；
+11. [x] DSH 命令采用 fail-closed 影响面解析：只对无 shell 组合/扩展的明确
+    读、测试、文件修改/删除及 Git 操作生成规范化 operation，并把所有目标
+    解析为任务工作区内绝对路径；未知、越界、含变量/重定向或已脱敏命令只可
+    拒绝。State Writer 在控制面独立重算语义，不信任 Adapter 声明的 operation；
+    实时事件、history JSON 与 assistant Artifact 均有界脱敏；原生层
+    继续固定 `read-only`，修改只使用绑定原 RPC 的 `allowed-once`，不开放持久
+    `workspace-write`；本批全量 unit+contract 为 320 passed；
 12. [ ] 对 SSE 重连、pending replay、重复 `/api/respond`、Adapter/DSH
     双端重启进行真实进程故障注入；
 13. [x] 完成 Codex/Kimi ToolCall/ActionIntent 拦截与用户介入实时 UI，

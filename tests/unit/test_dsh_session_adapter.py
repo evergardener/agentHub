@@ -227,7 +227,7 @@ async def test_dsh_native_approval_requires_action_intent_receipt(
                     "arguments": "hidden"}},
                 "view": {"for": "call", "view": {
                     "card": "terminal", "title": "touch safe.txt",
-                    "cwd": str(tmp_path)}},
+                    "cwd": str(tmp_path / "tasks" / "T-dsh")}},
             },
         })
         await adapter.ingest_server_request({
@@ -325,7 +325,8 @@ async def test_dsh_replayed_approval_recovers_safe_view_from_history(
         "name": "bash", "arguments": "hidden",
     })
     call["view"] = {"for": "call", "view": {
-        "card": "terminal", "title": "pwd", "cwd": str(tmp_path)}}
+        "card": "terminal", "title": "pwd",
+        "cwd": str(tmp_path / "tasks" / "T-dsh")}}
     fixture.events.append(call)
     adapter, client = _adapter(fixture)
     try:

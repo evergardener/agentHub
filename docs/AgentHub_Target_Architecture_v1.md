@@ -188,10 +188,15 @@ Workspace/Git 保存实际文件产物；数据库保存路径、哈希、版本
 - DSH 作为第一个新 Adapter 验证插件化边界。DSH `headless` 仅用于一次性
   新会话；生产 Session Adapter 使用回环 DSH Web API，以原生 session id
   实现多轮、历史读取、恢复、事件追踪和取消；新建 Hub session 默认在
-  DSH 原生层固定 `read-only`，避免仅有控制面 Profile 而执行层仍可写；
+  DSH 原生层固定 `read-only`，避免仅有控制面 Profile 而执行层仍可写；命令
+  只有在无 shell 组合/扩展、影响类型可识别且所有目标解析到任务工作区内时
+  才形成结构化 operation/targets；State Writer 必须在控制面根据受限 view
+  独立重算，不信任 Adapter 声明的语义。未知命令、越界路径和已脱敏命令均只可拒绝；
+  修改通过绑定原 RPC 的 `allowed-once`，不开放持久 `workspace-write`；
   DSH 下行使用 `/api/events.mux` SSE（与其 WebSocket carrier 共用相同
   ServerRequest 语义），`/api/respond` 继续同一原生 turn；待处理交互同时
-  写入 `agent_session_interactions` 并关联 ActionIntent；
+  写入 `agent_session_interactions` 并关联 ActionIntent；原生事件与 history
+  Artifact 只保存有界脱敏副本；
 - Kimi 生产 Adapter 使用 `kimi acp`，不使用无法回传逐工具审批的 prompt
   CLI。ACP `session/request_permission` 进入同一 PendingInteraction/
   ActionIntent/签名 receipt 链，`allow_once` 或 `reject_once` 回应原 RPC 后

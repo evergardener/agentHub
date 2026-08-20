@@ -194,10 +194,10 @@ async def test_dsh_a2a_native_approval_response_continues_same_turn(
                     "type": "session/event", "sessionId": "native-approval",
                     "event": {"type": "tool/call", "data": {
                         "callId": "call-1", "name": "bash",
-                        "arguments": "hidden"}},
+                    "arguments": "hidden"}},
                     "view": {"for": "call", "view": {
                         "card": "terminal", "title": "touch safe.txt",
-                        "cwd": str(tmp_path)}},
+                        "cwd": str(tmp_path / "tasks" / "T-approval")}},
                 },
             })
             await adapter.ingest_server_request({
