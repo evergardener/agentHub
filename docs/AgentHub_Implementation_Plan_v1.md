@@ -322,7 +322,9 @@ revision 写许可失效。
     执行 pytest 成功；同日新增 `LAS_RUN_CODEX_RESTART=1` 门禁并真实通过
     （1 passed）：第一 Adapter/App Server 完成 marker turn 后关闭，第二实例以
     同一 native thread 恢复并在第二轮准确复述 marker。该结果覆盖双轮上下文及
-    Adapter/App Server 重建，不覆盖 HTTP Adapter 服务进程重启；拒绝分支仍待执行。
+    Adapter/App Server 重建，不覆盖 HTTP Adapter 服务进程重启。真实拒绝门禁
+    `LAS_RUN_CODEX_REJECT=1` 也已通过（1 passed）：原生修改请求挂起后全部由
+    user 拒绝，turn 正常结束且目标文件与任何 `workspace/*` 产物均不存在。
 12. [x] Codex App Server 批次回归：unit+contract 233 passed；集成
     9 passed/13 skipped；本机无模型 `initialize + thread/start` 1 passed。
     同时修正多轮 handle 的 context revision 同步，以及把 Codex App Server/
