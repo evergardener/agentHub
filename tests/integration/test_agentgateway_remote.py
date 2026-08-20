@@ -12,6 +12,7 @@ import ipaddress
 import json
 import os
 import socket
+import ssl
 import subprocess
 import threading
 import time
@@ -130,10 +131,14 @@ class RemoteStack:
     signing_key: object
 
     def client(self, token: str | None = None, *, with_cert: bool = True):
-        cert = (str(self.client_cert), str(self.client_key)) if with_cert else None
+        context = ssl.create_default_context(cafile=str(self.ca))
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        if with_cert:
+            context.load_cert_chain(
+                certfile=str(self.client_cert), keyfile=str(self.client_key))
         headers = {"Authorization": f"Bearer {token}"} if token else None
         return httpx.Client(
-            verify=str(self.ca), cert=cert, headers=headers, timeout=3
+            verify=context, headers=headers, timeout=3
         )
 
 
@@ -224,12 +229,14 @@ def remote_stack(tmp_path_factory):
         AGENT_KIMI_BACKEND="127.0.0.1:9",
         AGENT_DSH_BACKEND="127.0.0.1:9",
     )
-    gateway = subprocess.Popen(
-        [str(AGW_BIN), "-f", str(config_path)],
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    gateway_log = work / "agentgateway.log"
+    with gateway_log.open("wb") as output:
+        gateway = subprocess.Popen(
+            [str(AGW_BIN), "-f", str(config_path)],
+            env=env,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+        )
     stack = RemoteStack(
         gateway_base=f"https://127.0.0.1:{gateway_port}",
         ca=ca_path,
@@ -239,19 +246,32 @@ def remote_stack(tmp_path_factory):
         signing_key=signing_key,
     )
     try:
+        last_readiness = "no response"
         for _ in range(50):
+            if gateway.poll() is not None:
+                last_readiness = f"process exited with {gateway.returncode}"
+                break
             try:
                 with stack.client() as client:
-                    if client.get(f"{stack.gateway_base}/agents/codex/health").status_code == 401:
+                    status = client.get(
+                        f"{stack.gateway_base}/agents/codex/health").status_code
+                    last_readiness = f"HTTP {status}"
+                    if status == 401:
                         break
-            except httpx.TransportError:
+            except httpx.TransportError as exc:
+                last_readiness = f"{type(exc).__name__}: {exc}"
                 time.sleep(0.1)
-        else:
-            raise RuntimeError("remote agentgateway did not start")
+        if last_readiness != "HTTP 401":
+            detail = gateway_log.read_text(
+                encoding="utf-8", errors="replace")[-4000:]
+            raise RuntimeError(
+                "remote agentgateway did not start: "
+                f"{last_readiness}; log: {detail}")
         yield stack
     finally:
-        gateway.terminate()
-        gateway.wait(timeout=5)
+        if gateway.poll() is None:
+            gateway.terminate()
+            gateway.wait(timeout=5)
         uvicorn_server.should_exit = True
         thread.join(timeout=5)
 
@@ -297,3 +317,29 @@ async def test_hermes_client_completes_a2a_over_mtls_and_jwt(
         idempotency_key="T-REMOTE-GW:1",
     )
     assert task["status"]["state"] == "completed"
+
+
+@pytest.mark.anyio
+async def test_hermes_client_reloads_rotated_jwt_file(remote_stack, monkeypatch):
+    monkeypatch.setenv("LAS_GATEWAY_URL", remote_stack.gateway_base)
+    monkeypatch.setenv("LAS_GATEWAY_JWT_FILE", str(remote_stack.jwt_file))
+    monkeypatch.setenv("LAS_GATEWAY_CA_FILE", str(remote_stack.ca))
+    monkeypatch.setenv(
+        "LAS_GATEWAY_CLIENT_CERT_FILE", str(remote_stack.client_cert))
+    monkeypatch.setenv(
+        "LAS_GATEWAY_CLIENT_KEY_FILE", str(remote_stack.client_key))
+    client = A2aClient.for_agent("codex", "http://unused", timeout=10)
+
+    assert (await client.health())["status"] == "ok"
+    try:
+        remote_stack.jwt_file.write_text(
+            _token(remote_stack.signing_key, agents="kimi"), encoding="utf-8")
+        with pytest.raises(httpx.HTTPStatusError) as denied:
+            await client.health()
+        assert denied.value.response.status_code == 403
+    finally:
+        remote_stack.jwt_file.write_text(
+            _token(remote_stack.signing_key, agents="codex,kimi,dsh"),
+            encoding="utf-8",
+        )
+    assert (await client.health())["status"] == "ok"

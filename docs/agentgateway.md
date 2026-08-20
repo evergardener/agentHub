@@ -55,10 +55,19 @@ Bearer key），否则保持 Phase 1-4 的直连行为。task_manager 与 recove
 
 ```bash
 LAS_RUN_GW=1 .venv/bin/python -m pytest tests/integration/test_agentgateway.py
+LAS_RUN_GW_REMOTE=1 \
+  .venv/bin/python -m pytest -q \
+  tests/integration/test_agentgateway_remote.py
 ```
 
 覆盖：配置 schema / 无 key 401 / 经 gateway 委派成功 / 禁用 Agent 后 403 /
 路由限流 429 / gateway 进程重启后同幂等键不重复执行 / 直连回退。
+
+第二条命令使用临时 CA、server/client 证书、JWKS/JWT、随机 loopback 端口和
+fake worker，不读取生产身份材料。2026-08-20 已在本机真实执行通过（5 passed），
+覆盖缺失 client cert 的 TLS 拒绝、JWT 401、claim ACL 403、mTLS+JWT A2A 委派，
+以及同一 Hermes client 在 JWT 文件轮换后的撤权与恢复。它不替代真实 CA/OIDC、
+DNS、防火墙和第二主机验收。
 
 ## 跨主机剖面
 
