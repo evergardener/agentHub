@@ -15,8 +15,8 @@
         ▲ 心跳注册（NATS）          ▲ A2A 委派（经 gateway → host.docker.internal）
         │                           │
 ┌───────┴───────────────────────────┴────────── 宿主机（worker）─────────────┐
-│  codex :8201   kimi :8202   dsh :8203（launchd 常驻，token 鉴权）          │
-│  Codex/Kimi CLI、DSH Web :3080、LLM 端点（127.0.0.1:8317）用户自装         │
+│  codex :8201   dsh :8203（launchd 常驻，token 鉴权）；kimi 当前禁用        │
+│  Codex CLI、DSH Web :3080、LLM 端点（127.0.0.1:8317）用户自装              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -31,7 +31,7 @@
 |---|---|
 | Docker + compose 插件 | Docker Desktop（macOS）或 Docker Engine 24+（Linux） |
 | LLM 端点 | OpenAI 兼容接口（本项目用本地 cliproxy `127.0.0.1:8317`） |
-| worker runtime | 按需自装：Codex CLI、Kimi Code CLI，以及 DSH；DSH Adapter 要求先运行 `dsh web --host 127.0.0.1 --port 3080` |
+| worker runtime | 按需自装：Codex CLI 与 DSH；DSH Adapter 要求先运行仅回环监听的 DSH Web |
 | 网络 | 容器可回连宿主机（compose 已配 `host.docker.internal:host-gateway`） |
 
 ## 3. 部署步骤
@@ -214,11 +214,10 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"   # worker 运行依�
 
 ./scripts/agent-worker.sh codex                # 手动前台启动（调试用）
 ./scripts/install-agent-autostart.sh codex     # launchd 常驻（macOS）
-./scripts/install-agent-autostart.sh kimi
 
-# DSH 仍可通过自身 Web UI 独立使用；AgentHub 使用同一回环 Web API
-dsh web --host 127.0.0.1 --port 3080
-# 为 dsh 安装与 codex 相同生命周期的 Adapter 常驻项；Kimi 当前不要安装
+# DSH Web 固定只监听回环；随后安装 DSH Adapter；Kimi 当前不要安装
+./scripts/install-dsh-web-autostart.sh
+./scripts/install-agent-autostart.sh dsh
 ```
 
 验证：
