@@ -541,7 +541,7 @@ class TaskManager:
             self.conn, interaction_id)
         if interaction is None:
             raise KeyError(f"interaction not found: {interaction_id}")
-        if interaction["status"] != "pending":
+        if interaction["status"] not in {"pending", "failed"}:
             raise ValueError(
                 f"interaction already {interaction['status']}")
         task = state_store.get_task(self.conn, interaction["task_id"])

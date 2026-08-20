@@ -196,7 +196,9 @@ Workspace/Git 保存实际文件产物；数据库保存路径、哈希、版本
   DSH 下行使用 `/api/events.mux` SSE（与其 WebSocket carrier 共用相同
   ServerRequest 语义），`/api/respond` 继续同一原生 turn；待处理交互同时
   写入 `agent_session_interactions` 并关联 ActionIntent；原生事件与 history
-  Artifact 只保存有界脱敏副本；
+  Artifact 只保存有界脱敏副本。`/api/respond` 传输失败必须保持控制面可重试；
+  重试前按原生 history 的 approval id/outcome 对账，已生效的相同决定视为幂等
+  成功，冲突决定 fail-closed，不得重复放行工具调用；
 - Kimi 生产 Adapter 使用 `kimi acp`，不使用无法回传逐工具审批的 prompt
   CLI。ACP `session/request_permission` 进入同一 PendingInteraction/
   ActionIntent/签名 receipt 链，`allow_once` 或 `reject_once` 回应原 RPC 后

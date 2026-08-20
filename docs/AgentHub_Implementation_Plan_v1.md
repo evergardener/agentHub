@@ -250,8 +250,10 @@ revision 写许可失效。
     实时事件、history JSON 与 assistant Artifact 均有界脱敏；原生层
     继续固定 `read-only`，修改只使用绑定原 RPC 的 `allowed-once`，不开放持久
     `workspace-write`；本批全量 unit+contract 为 320 passed；
-12. [ ] 对 SSE 重连、pending replay、重复 `/api/respond`、Adapter/DSH
-    双端重启进行真实进程故障注入；
+12. [ ] SSE 断线退避重连、Adapter 恢复后从 history 重建 pending view、控制面
+    `/api/respond` 失败后重试，以及“DSH 已接收但响应丢失”按 approval/outcome
+    对账且不二次发送，均已有离线故障测试；Adapter/DSH 双端真实进程重启仍待
+    授权环境故障注入；本批全量 unit+contract 为 323 passed；
 13. [x] 完成 Codex/Kimi ToolCall/ActionIntent 拦截与用户介入实时 UI，
     再进入生产安全评审。
 

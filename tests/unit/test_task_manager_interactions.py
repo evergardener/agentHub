@@ -56,17 +56,22 @@ async def test_user_approval_delivers_action_intent_receipt(
     conn.close()
 
     captured = {}
+    attempts = 0
 
     class FakeClient:
         async def respond_interaction(
                 self, task_id, adapter_interaction_id, response, *,
                 responded_by):
+            nonlocal attempts
+            attempts += 1
             captured.update({
                 "task_id": task_id,
                 "adapter_interaction_id": adapter_interaction_id,
                 "response": response,
                 "responded_by": responded_by,
             })
+            if attempts == 1:
+                raise ConnectionError("injected adapter response loss")
             return {"id": task_id, "status": {"state": "working"}}
 
     monkeypatch.setattr(
@@ -76,6 +81,14 @@ async def test_user_approval_delivers_action_intent_receipt(
     try:
         with pytest.raises(ValueError, match="native agent interaction"):
             manager.approve_task("T-approval")
+        with pytest.raises(ConnectionError, match="response loss"):
+            await manager.respond_agent_interaction(
+                interaction["id"], response={"outcome": "allowed-once"},
+                requested_by="user")
+        failed = collaboration_store.get_session_interaction(
+            manager.conn, interaction["id"])
+        assert failed["status"] == "failed"
+
         result = await manager.respond_agent_interaction(
             interaction["id"], response={"outcome": "allowed-once"},
             requested_by="user")
@@ -87,6 +100,7 @@ async def test_user_approval_delivers_action_intent_receipt(
         assert receipt["decidedBy"] == "user"
         assert receipt["nativeSessionId"] == "native-dsh"
         assert receipt["contextRevision"] == 1
+        assert attempts == 2
         saved = collaboration_store.get_session_interaction(
             manager.conn, interaction["id"])
         assert saved["status"] == "resolved"

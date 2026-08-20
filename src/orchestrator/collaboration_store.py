@@ -610,7 +610,7 @@ def resolve_session_interaction(
     row = get_session_interaction(conn, interaction_id)
     if row is None:
         raise KeyError(f"interaction not found: {interaction_id}")
-    if row["status"] not in {"pending", "responding"}:
+    if row["status"] not in {"pending", "responding", "failed"}:
         raise ValueError(f"interaction already {row['status']}")
     resolved_at = now_iso() if status in {"resolved", "failed"} else None
     try:

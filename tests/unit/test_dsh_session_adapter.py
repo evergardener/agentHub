@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
 import pytest
 
 from adapters.common import A2aTask
-from adapters.dsh.session import DshWebSessionAdapter
-from adapters.session import SessionMessage
+from adapters.dsh.session import DshNotAvailable, DshWebSessionAdapter
+from adapters.session import SessionCapabilityError, SessionMessage
 
 pytestmark = pytest.mark.anyio
 
@@ -264,12 +265,39 @@ async def test_dsh_native_approval_requires_action_intent_receipt(
             "interactionId": pending[0].interaction_id,
             "nativeRequestId": "rpc-approval-1",
         })
+        response = {"outcome": "allowed-once",
+                    "authorization": authorization}
+        original_post = adapter._post_response
+        post_calls = 0
+
+        async def accepted_but_response_lost(native_request_id, value):
+            nonlocal post_calls
+            post_calls += 1
+            await original_post(native_request_id, value)
+            raise DshNotAvailable("injected response loss after native accept")
+
+        adapter._post_response = accepted_but_response_lost
+        with pytest.raises(DshNotAvailable, match="response loss"):
+            await adapter.respond_interaction(
+                "S-dsh", pending[0].interaction_id, response,
+                responded_by="hermes")
+
+        # History now contains approval/decided. Retry reconciles that exact
+        # outcome and must not send a second /api/respond.
         accepted = await adapter.respond_interaction(
-            "S-dsh", pending[0].interaction_id,
-            {"outcome": "allowed-once", "authorization": authorization},
-            responded_by="hermes",
-        )
+            "S-dsh", pending[0].interaction_id, response,
+            responded_by="hermes")
         assert accepted.state == "working"
+        duplicate = await adapter.respond_interaction(
+            "S-dsh", pending[0].interaction_id, response,
+            responded_by="hermes")
+        assert duplicate.state == "working"
+        with pytest.raises(SessionCapabilityError, match="different response"):
+            await adapter.respond_interaction(
+                "S-dsh", pending[0].interaction_id,
+                {"outcome": "rejected"}, responded_by="hermes")
+        assert post_calls == 1
+        assert len(fixture.responses) == 1
         completed = await adapter.continue_after_interaction("S-dsh")
         assert completed.state == "completed"
         assert fixture.responses[0]["rpcId"] == "rpc-approval-1"
@@ -278,6 +306,33 @@ async def test_dsh_native_approval_requires_action_intent_receipt(
             "approvalId": "approval-1",
             "outcome": "allowed-once",
         }
+    finally:
+        await client.aclose()
+
+
+async def test_dsh_event_stream_loop_reconnects_after_disconnect(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path))
+    fixture = DshFixture()
+    adapter, client = _adapter(fixture)
+    try:
+        await adapter.start_session(_task(), session_id="S-dsh", metadata={})
+        calls = 0
+
+        async def flaky_stream():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ConnectionError("injected SSE disconnect")
+            adapter._event_stream_stop.set()
+
+        adapter._consume_event_stream = flaky_stream
+        await asyncio.wait_for(adapter._event_stream_loop(), timeout=1)
+        assert calls == 2
+        event = await asyncio.wait_for(
+            anext(adapter.stream_events("S-dsh")), timeout=1)
+        assert event.event_type == "dsh.stream.disconnected"
+        assert "injected SSE disconnect" in event.payload["error"]
     finally:
         await client.aclose()
 

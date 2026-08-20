@@ -117,6 +117,21 @@ def _pending_approval(entries: list[dict[str, Any]], after_seq: int) -> dict | N
     )
 
 
+def _approval_outcome(
+    entries: list[dict[str, Any]], approval_id: str | None,
+) -> str | None:
+    if not approval_id:
+        return None
+    for entry in reversed(entries):
+        event = _event(entry)
+        data = event.get("data") or {}
+        if (event.get("type") == "approval/decided"
+                and data.get("id") == approval_id):
+            outcome = data.get("outcome")
+            return outcome if isinstance(outcome, str) else None
+    return None
+
+
 def _history_tool_view(
     entries: list[dict[str, Any]], call_id: str
 ) -> dict[str, Any] | None:
@@ -355,6 +370,16 @@ class DshWebSessionAdapter(SessionAdapter):
                 )
                 if matches and interaction.status == "pending":
                     interaction.status = "resolved"
+                    if interaction.kind == "approval":
+                        interaction.response = {
+                            "outcome": payload.get("outcome"),
+                            "nativeResolution": True,
+                        }
+                    elif interaction.kind == "question":
+                        interaction.response = {
+                            "answer": payload.get("answer"),
+                            "nativeResolution": True,
+                        }
             self._interaction_changed.set()
 
         event_type = method or "event"
@@ -713,6 +738,16 @@ class DshWebSessionAdapter(SessionAdapter):
             session_id, {}).get(interaction_id)
         if interaction is None:
             raise KeyError(f"interaction not found: {interaction_id}")
+        if interaction.status in {"responded", "resolved"}:
+            previous = interaction.response or {}
+            if interaction.kind == "approval":
+                matches = previous.get("outcome") == response.get("outcome")
+            else:
+                matches = previous.get("answer") == response.get("answer")
+            if not matches:
+                raise SessionCapabilityError(
+                    "interaction was resolved with a different response")
+            return SessionTurnResult(state="working")
         if interaction.status != "pending":
             raise SessionCapabilityError(
                 f"interaction is already {interaction.status}")
@@ -768,7 +803,21 @@ class DshWebSessionAdapter(SessionAdapter):
         else:  # pragma: no cover - guarded by ingest
             raise ValueError(f"unsupported interaction kind: {interaction.kind}")
 
-        await self._post_response(interaction.native_request_id, value)
+        native_applied = False
+        if interaction.kind == "approval":
+            try:
+                decided = _approval_outcome(
+                    await self._history(native),
+                    interaction.payload.get("approvalId"),
+                )
+            except (DshApiError, DshNotAvailable):
+                decided = None
+            if decided is not None and decided != response.get("outcome"):
+                raise SessionCapabilityError(
+                    "native DSH approval has a conflicting outcome")
+            native_applied = decided == response.get("outcome")
+        if not native_applied:
+            await self._post_response(interaction.native_request_id, value)
         interaction.status = "responded"
         interaction.responded_by = responded_by
         interaction.response = dict(response)
