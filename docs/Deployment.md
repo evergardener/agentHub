@@ -183,10 +183,14 @@ Agent，已停用 Agent 单独标注，Registry 中遗留的集成测试 worker�
 collaboration 的旧任务只能展示当时保存的单条目标，WebUI 会明确标注无法还原更长
 的上游会话。
 
-「协作会话」卡片按持久 Collaboration 展示完整的用户、Hermes 与工具消息序列、
-`context_revision`、关联任务和可恢复 Agent Session，适合核验跨天续接是否仍在同一
-上下文。Artifact 按钮会先标识文件可用性，点击后在任务抽屉内显示加载状态、选中
-状态和内容；缺失或越界文件不会伪装成可点击产物。
+WebUI 使用三栏工作区：左侧是 Agent 状态和可滚动任务导航，中间是类似 Codex 的
+持久长对话视图，右侧保留审批、原生 Agent 交互、常驻授权和事件流。中央会话按
+Collaboration 展示完整的用户、Hermes 与工具消息序列、`context_revision`、关联任务
+和可恢复 Agent Session，适合核验跨天续接是否仍在同一上下文。点击左侧带
+Collaboration 的任务会同步切换中央会话并打开任务详情；没有创建 Task 的纯聊天仍
+可在会话选择器查看，但不会伪造成可审批、可执行的任务。Artifact 按钮会先标识文件
+可用性，点击后在任务抽屉内显示加载状态、选中状态和内容；缺失或越界文件不会伪装
+成可点击产物。
 
 ### 3.3.1 告警与通知
 
