@@ -68,12 +68,32 @@ def migrate(env_path: Path, backup_root: Path) -> dict[str, str]:
     return {"backup": str(backup), "manifest": str(manifest_path)}
 
 
+def rollback(env_path: Path, backup: Path) -> dict[str, str]:
+    manifest = json.loads((backup / "manifest.json").read_text())
+    if Path(manifest["source"]).resolve() != env_path.resolve():
+        raise ValueError("backup belongs to another environment file")
+    source = Path(manifest["backup"])
+    if not source.is_absolute():
+        source = backup / source.name
+    if _sha256(source) != manifest["sha256"]:
+        raise ValueError("backup checksum mismatch")
+    shutil.copyfile(source, env_path)
+    os.chmod(env_path, 0o600)
+    return {"restored": str(env_path), "backup": str(backup)}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", type=Path, required=True)
-    parser.add_argument("--backup-root", type=Path, required=True)
+    parser.add_argument("--backup-root", type=Path)
+    parser.add_argument("--rollback", type=Path)
     args = parser.parse_args()
-    result = migrate(args.env, args.backup_root)
+    if args.rollback:
+        result = rollback(args.env, args.rollback)
+    else:
+        if not args.backup_root:
+            parser.error("migration requires --backup-root")
+        result = migrate(args.env, args.backup_root)
     print(json.dumps(result, ensure_ascii=False))
 
 

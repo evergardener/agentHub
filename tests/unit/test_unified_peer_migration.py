@@ -34,3 +34,11 @@ def test_migration_backs_up_and_replaces_worker_bound_peers(tmp_path):
     assert stat.S_IMODE(
         (backup / "agenthub.env.before").stat().st_mode) == 0o600
     assert token not in (backup / "manifest.json").read_text()
+
+    restored = MODULE.rollback(env, backup)
+    assert restored["restored"] == str(env)
+    values = parse_env(env)
+    assert values["KEEP"] == "value"
+    assert json.loads(values["LAS_A2A_PEERS"]) == {
+        old_token: {"peer": "qishuo-dsh", "worker": "dsh"}}
+    assert "LAS_HERMES_GATEWAY_API_KEY" not in values
