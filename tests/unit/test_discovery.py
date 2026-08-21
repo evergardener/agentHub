@@ -129,3 +129,23 @@ def test_disabled_static_policy_overrides_ready_heartbeat(conn, tmp_path):
     assert dsh["reason"] == "agent_disabled"
     assert dsh["agent_id"] == "dsh"
     assert "不要创建、委派或重试" in dsh["hint"]
+
+
+def test_operator_enable_override_requires_fresh_heartbeat(conn, tmp_path):
+    tools = _tools(conn, tmp_path, static={
+        "kimi": {"enabled": False, "endpoint": "http://static:8202",
+                 "skills": ["research"]},
+    })
+    _heartbeat(conn, "kimi", endpoint="http://live:8202", skills=["research"])
+    from orchestrator import agent_control_store
+
+    agent_control_store.set_enabled(
+        conn, agent_id="kimi", enabled=True, updated_by="test")
+    pending = tools._agent_or_error("kimi")
+    assert "offline" in pending["error"]
+
+    _heartbeat(conn, "kimi", endpoint="http://live:8202", skills=["research"])
+    enabled = tools._agent_or_error("kimi")
+    assert enabled["enabled"] is True
+    assert enabled["online"] is True
+    assert enabled["endpoint"] == "http://live:8202"

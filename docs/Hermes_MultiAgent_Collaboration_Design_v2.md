@@ -1259,10 +1259,13 @@ A2A timeout（超过 task.timeout_seconds）
 ### 17.4 Worker 心跳与租约（v2 新增）
 
 - 每个 Adapter 每 **30 秒**发布 `agent.<id>.heartbeat`，payload 含 `lease_ttl_seconds: 90`。
-- `agents.yaml.enabled` 是人工设定的目标状态，优先于心跳观测状态。
+- `agents.yaml.enabled` 是初始目标状态；管理员通过 WebUI 设置的
+  `agent_controls.enabled` 是运行时目标状态并覆盖静态值，二者都优先于心跳观测状态。
 - State Writer 仅对已启用或动态新增的 Agent 更新 `agents.last_seen_at` 与
   `agents.lease_expires_at = now + lease_ttl`；已停用 Agent 的心跳只保留审计事件，
   不注册、不续租、不发现能力、不绑定 Profile。
+- 运行时停用会立即使旧租约失效；重新启用只进入 `probing/等待注册`，不得复用旧租约，
+  必须由新心跳完成注册后才可参与计划和委派。每次开关变更写入审计事件。
 - Hermes 对停用 Agent 的建计划、委派与批准路径统一返回
   `needs_confirmation / agent_disabled`；必须询问用户是否先启用并重新探测，
   或改派其他已启用 Agent，禁止静默改派。

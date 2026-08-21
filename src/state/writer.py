@@ -162,7 +162,12 @@ class StateWriter:
                 )
             elif event_type.startswith("agent.") and event_type.endswith(".heartbeat"):
                 policy = self.agent_policies.get(source)
-                if policy is not None and policy.get("enabled") is False:
+                from orchestrator import agent_control_store
+
+                enabled = agent_control_store.desired_enabled(
+                    self.conn, source,
+                    policy.get("enabled", True) if policy is not None else True)
+                if not enabled:
                     # Desired state is authoritative. Keep the heartbeat event
                     # for audit, but do not register, renew a lease, discover
                     # capabilities, or bind a profile for a disabled Agent.

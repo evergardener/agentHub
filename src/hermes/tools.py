@@ -159,17 +159,23 @@ class HermesTools:
         from state.db import CST
 
         now = datetime.now(CST).isoformat(timespec="seconds")
-        merged = {
-            k: {**v, "enabled": v.get("enabled", True), "online": None}
-            for k, v in self.agents.items()
-        }
+        from orchestrator import agent_control_store
+
+        merged = {}
+        for agent_id, spec in self.agents.items():
+            enabled = agent_control_store.desired_enabled(
+                self.tm.conn, agent_id, spec.get("enabled", True))
+            merged[agent_id] = {**spec, "enabled": enabled, "online": None}
         for r in self.tm.conn.execute(
                 "SELECT id, endpoint, skills_json, lease_expires_at,"
                 " template_id, profile_id"
                 " FROM agents;").fetchall():
             online = bool(r["lease_expires_at"] and r["lease_expires_at"] > now)
-            entry = merged.setdefault(
-                r["id"], {"endpoint": "", "skills": [], "enabled": True})
+            entry = merged.setdefault(r["id"], {
+                "endpoint": "", "skills": [],
+                "enabled": agent_control_store.desired_enabled(
+                    self.tm.conn, r["id"], True),
+            })
             if entry.get("enabled") is False:
                 entry["online"] = None
                 continue

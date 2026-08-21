@@ -52,10 +52,17 @@ def test_pg_migrations_and_core_flow(pg_url):
 
     conn = init_db(pg_url)
 
-    # 迁移：全部版本已应用，含 Profile、Session recovery 与 Task Plan
+    # 迁移：全部版本已应用，含 Profile、Session recovery、Task Plan 与 Agent 开关
     versions = [r[0] for r in conn.execute(
         "SELECT version FROM schema_migrations ORDER BY version;").fetchall()]
-    assert versions == list(range(1, 11))
+    assert versions == list(range(1, 12))
+
+    from orchestrator import agent_control_store
+
+    assert agent_control_store.desired_enabled(conn, "kimi", False) is False
+    agent_control_store.set_enabled(
+        conn, agent_id="kimi", enabled=True, updated_by="pg-test")
+    assert agent_control_store.desired_enabled(conn, "kimi", False) is True
 
     from orchestrator import collaboration_store
 

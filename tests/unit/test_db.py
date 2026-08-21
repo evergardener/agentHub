@@ -85,7 +85,7 @@ def test_migrations_upgrade_existing_database(tmp_path):
         " VALUES ('T-old', 'queued', 'keep me', 'now', 'now');")
     conn.commit()
 
-    assert migrate(conn) == [4, 5, 6, 7, 8, 9, 10]
+    assert migrate(conn) == [4, 5, 6, 7, 8, 9, 10, 11]
     assert conn.execute(
         "SELECT objective FROM tasks WHERE id = 'T-old';").fetchone()[0] == "keep me"
     assert conn.execute(

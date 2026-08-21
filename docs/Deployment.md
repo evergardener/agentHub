@@ -22,10 +22,12 @@
 
 核心原则：
 - worker agent **不进容器**——用宿主机原生环境与授权，经心跳自注册，没注册就不可用
-- `agents.yaml` 的 `enabled` 是控制面的目标状态，优先级高于 worker 心跳；
+- `agents.yaml` 的 `enabled` 是初始目标状态；管理员在 WebUI `AGENTS` 卡片设置的
+  数据库开关（`agent_controls`）优先级更高，二者都优先于 worker 心跳；
   停用 Agent 的心跳只保留审计事件，不注册、不续租、不发现能力，也不能委派任务。
   用户点名停用 Agent 时，Hermes 必须先询问是启用后重新探测，还是改派其他 Agent；
-  确认前不得创建计划任务或静默改派。
+  确认前不得创建计划任务或静默改派。重新启用会先清除旧租约并显示「等待注册」，
+  只有收到新心跳后才恢复在线和可委派状态。
 - 密钥只走环境变量 / `.env`（权限 600），不入库、不入仓、不用 Keychain
 - 状态唯一事实源是 PostgreSQL（可选 SQLite）；NATS 只是事件总线
 
@@ -181,19 +183,21 @@ Orchestrator 的 `/ready` 会验证数据库，agentgateway 则验证监听端�
     已 `pip install -e .`（注册 `agentctl` 入口点）。
 
 WebUI 的 `AGENTS` 卡片以 `config/agents.yaml` 生产目录为权威来源：仅显示目录内
-Agent，已停用 Agent 单独标注，Registry 中遗留的集成测试 worker（例如 `fake`）
-不会混入生产列表。任务详情的「委派指令（原文）」直接显示 `tasks.objective`，不做
+Agent，并以相同卡片样式展示已启用和已停用状态。管理员可手动切换目标状态；停用
+后不再探测注册，启用后等待新心跳。Registry 中遗留的集成测试 worker（例如
+`fake`）不会混入生产列表。任务详情的「委派指令（原文）」直接显示 `tasks.objective`，不做
 前端总结；结构化 Task Plan 会同时显示步骤、预期操作和验收条件。未绑定持久
 collaboration 的旧任务只能展示当时保存的单条目标，WebUI 会明确标注无法还原更长
 的上游会话。
 
-WebUI 使用三栏工作区：左侧是 Agent 状态和可滚动任务导航，中间是类似 Codex 的
-持久长对话视图，右侧保留审批、原生 Agent 交互、常驻授权和事件流。中央会话按
+WebUI 使用浅色磨砂三栏工作区：左侧是 Agent 状态和可筛选、可滚动的 Session
+导航，中间是类似 Codex 的持久长对话视图，右侧固定显示所选会话的关联任务详情；
+审批、原生 Agent 交互、常驻授权和事件流集中在顶栏「操作中心」抽屉。中央会话按
 Collaboration 展示完整的用户、Hermes 与工具消息序列、`context_revision`、关联任务
 和可恢复 Agent Session，适合核验跨天续接是否仍在同一上下文。点击左侧带
-Collaboration 的任务会同步切换中央会话并打开任务详情；没有创建 Task 的纯聊天仍
+Collaboration 的 Session 会同步切换中央会话，并在右侧打开首个关联任务；没有创建 Task 的纯聊天仍
 可在会话选择器查看，但不会伪造成可审批、可执行的任务。Artifact 按钮会先标识文件
-可用性，点击后在任务抽屉内显示加载状态、选中状态和内容；缺失或越界文件不会伪装
+可用性，点击后在右侧任务详情内显示加载状态、选中状态和内容；缺失或越界文件不会伪装
 成可点击产物。
 
 ### 3.3.1 告警与通知

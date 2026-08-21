@@ -531,6 +531,176 @@
                        font-size: 12px; color: var(--mut);
                        word-break: break-all; }
 
+  /* ── 浅色磨砂控制台主题 ── */
+  :root {
+    --bg: #dcecef; --card: rgba(255,255,255,.56);
+    --line: rgba(255,255,255,.76); --line-soft: rgba(63,88,91,.12);
+    --fg: #304348; --mut: #6d8083; --faint: #8da0a2;
+    --acc: #4e7883; --acc-soft: rgba(222,243,241,.70);
+    --ok: #397b63; --ok-soft: rgba(220,244,232,.72);
+    --warn: #a96f41; --warn-soft: rgba(255,237,217,.72);
+    --bad: #a95d61; --bad-soft: rgba(250,225,226,.74);
+    --run: #54768f; --run-soft: rgba(221,235,247,.74);
+    --radius: 16px;
+    --shadow: 0 12px 28px rgba(65,94,98,.12);
+  }
+  body {
+    background:
+      radial-gradient(circle at 74% 5%, rgba(255,236,194,.84), transparent 30%),
+      radial-gradient(circle at 88% 88%, rgba(187,223,201,.82), transparent 34%),
+      radial-gradient(circle at 13% 76%, rgba(183,220,232,.84), transparent 32%),
+      linear-gradient(135deg, #d5e9ef, #eff3d8 52%, #e6ddec);
+    overflow: hidden;
+  }
+  body::before {
+    content: ""; position: fixed; inset: -40px; pointer-events: none;
+    background:
+      radial-gradient(ellipse at 48% 22%, rgba(255,255,255,.58), transparent 38%),
+      repeating-linear-gradient(108deg, rgba(255,255,255,.13) 0 2px,
+        transparent 2px 16px);
+    filter: blur(10px); z-index: -1;
+  }
+  header {
+    height: 58px; background: rgba(255,255,255,.55);
+    border-bottom: 1px solid rgba(255,255,255,.78);
+    backdrop-filter: blur(26px) saturate(135%);
+    box-shadow: 0 4px 18px rgba(68,98,103,.10);
+  }
+  .logo .mark { border-radius: 50%; background: rgba(78,120,131,.88); }
+  .alert-nav, .top-action {
+    min-height: 32px; padding: 4px 7px 4px 11px; border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.78); background: rgba(255,255,255,.42);
+    color: var(--mut); font: inherit; font-size: 12px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 7px;
+  }
+  .top-action:hover, .alert-nav:hover { background: rgba(255,255,255,.66); color: var(--fg); }
+  .top-action-count {
+    min-width: 22px; height: 22px; padding: 0 6px; border-radius: 999px;
+    display: inline-grid; place-items: center; background: var(--acc-soft);
+    color: var(--acc); font-size: 11px; font-weight: 700;
+  }
+  .layout {
+    grid-template-columns: 280px minmax(460px, 1fr) minmax(330px, 390px);
+    gap: 12px; padding: 12px; height: calc(100vh - 58px); max-width: none;
+  }
+  .col { gap: 12px; }
+  .sidebar-col { height: 100%; }
+  .card, .task-detail-pane {
+    background: rgba(255,255,255,.54); border: 1px solid rgba(255,255,255,.76);
+    box-shadow: var(--shadow); backdrop-filter: blur(24px) saturate(132%);
+  }
+  .card > h2 { border-bottom-color: var(--line-soft); padding: 13px 15px 10px; }
+  .agent .ava { border-radius: 50%; }
+  .agent-toggle {
+    position: relative; width: 34px; height: 20px; flex: none; cursor: pointer;
+  }
+  .agent-toggle input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .agent-toggle span {
+    position: absolute; inset: 0; border-radius: 999px;
+    background: rgba(94,121,124,.28); transition: background .18s;
+  }
+  .agent-toggle span::after {
+    content: ""; position: absolute; width: 16px; height: 16px;
+    left: 2px; top: 2px; border-radius: 50%; background: rgba(255,255,255,.94);
+    box-shadow: 0 2px 5px rgba(53,79,82,.2); transition: transform .18s;
+  }
+  .agent-toggle input:checked + span { background: var(--acc); }
+  .agent-toggle input:checked + span::after { transform: translateX(14px); }
+  .agent-toggle input:disabled + span { opacity: .52; cursor: default; }
+  .session-filter {
+    max-width: 92px; padding: 4px 7px; border: 1px solid rgba(255,255,255,.76);
+    border-radius: 9px; background: rgba(255,255,255,.42); color: var(--fg);
+    font: inherit; font-size: 11.5px; letter-spacing: 0;
+  }
+  .task-card { overflow: hidden; }
+  .conversation-list { overflow-y: auto; min-height: 0; flex: 1; }
+  .conversation { border-bottom-color: var(--line-soft); padding: 12px 14px;
+                  border-left: 3px solid transparent; }
+  .conversation:hover { background: rgba(255,255,255,.34); }
+  .conversation.active { background: rgba(220,243,240,.68); border-left-color: var(--acc); }
+  .workspace-card { background: rgba(255,255,255,.48); height: 100%; min-height: 0; }
+  .chat-head, .chat-context, .chat-foot {
+    background: rgba(255,255,255,.30); border-color: var(--line-soft);
+    backdrop-filter: blur(16px);
+  }
+  .chat-transcript { padding: 20px clamp(16px, 3vw, 40px); }
+  .chat-transcript .message { display: grid; grid-template-columns: 32px minmax(0,1fr);
+                              gap: 9px; padding: 0; background: none; border: 0; }
+  .message-avatar {
+    width: 32px; height: 32px; border-radius: 50%; display: grid;
+    place-items: center; background: #768e96; color: #fff; font-weight: 700;
+    box-shadow: 0 4px 10px rgba(66,91,95,.15);
+  }
+  .message.user .message-avatar { background: #7088a2; }
+  .message.hermes .message-avatar { background: #7b789b; }
+  .message.tool .message-avatar { background: #a18268; }
+  .message-shell {
+    min-width: 0; padding: 10px 12px; border-radius: 4px 14px 14px 14px;
+    background: rgba(255,255,255,.48); border: 1px solid rgba(255,255,255,.66);
+    box-shadow: 0 6px 16px rgba(69,98,102,.09);
+  }
+  .message.user .message-shell { background: rgba(224,238,247,.60); }
+  .message.hermes .message-shell { background: rgba(227,242,236,.62); }
+  .message.tool .message-shell { background: rgba(255,239,218,.60); }
+  .chat-transcript .message.user { margin-left: 0; }
+  .task-detail-pane {
+    min-width: 0; min-height: 0; height: 100%; display: flex;
+    flex-direction: column; overflow: hidden; border-radius: var(--radius);
+  }
+  .task-detail-pane .d-head {
+    padding: 14px 16px; border-bottom: 1px solid var(--line-soft);
+    display: flex; align-items: center; gap: 10px;
+    background: rgba(255,255,255,.32); backdrop-filter: blur(16px);
+  }
+  .task-detail-pane .d-head > div { min-width: 0; flex: 1; }
+  .task-detail-pane .d-head .tid { display: block; overflow: hidden;
+                                   text-overflow: ellipsis; }
+  .pane-eyebrow { color: var(--faint); font-size: 10px; font-weight: 700;
+                  letter-spacing: .12em; }
+  .task-detail-pane .d-close {
+    border: 0; background: rgba(255,255,255,.36); color: var(--mut);
+    width: 28px; height: 28px; border-radius: 8px; cursor: pointer;
+  }
+  .task-detail-pane .d-body { padding: 16px; overflow-y: auto; flex: 1; }
+  .task-pane-empty { color: var(--faint); text-align: center; padding: 54px 18px; }
+  .instruction, .mono, .message, .tk-result pre, .tk-msg {
+    background: rgba(255,255,255,.38); border-color: rgba(255,255,255,.64);
+  }
+  .ops-drawer {
+    position: fixed; inset: 0 0 0 auto; z-index: 50; width: min(780px, 96vw);
+    background: rgba(233,243,242,.82); box-shadow: -12px 0 40px rgba(58,87,91,.18);
+    backdrop-filter: blur(30px) saturate(135%); transform: translateX(100%);
+    transition: transform .22s ease; display: flex; flex-direction: column;
+  }
+  .ops-drawer.show { transform: translateX(0); }
+  .ops-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr));
+              gap: 12px; padding: 14px; overflow-y: auto; }
+  .ops-grid .event-card { grid-column: 1 / -1; }
+  .alert-drawer, .alert-head, .modal-card {
+    background: rgba(240,248,247,.82); backdrop-filter: blur(28px) saturate(132%);
+  }
+  .panel-scrim { background: rgba(55,75,78,.22); backdrop-filter: blur(3px); }
+  .drawer, .overlay { display: none; }
+  ::-webkit-scrollbar-thumb { background: rgba(94,120,123,.26); }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(94,120,123,.40); }
+
+  @media (max-width: 1220px) {
+    .layout { grid-template-columns: 250px minmax(420px,1fr) 330px; }
+  }
+  @media (max-width: 980px) {
+    body { overflow: auto; }
+    .layout { grid-template-columns: 250px minmax(420px,1fr); height: auto; overflow: visible; }
+    .sidebar-col, .workspace-card { height: 76vh; min-height: 620px; }
+    .task-detail-pane { grid-column: 1 / -1; height: 70vh; min-height: 560px; }
+  }
+  @media (max-width: 660px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar-col, .workspace-card, .task-detail-pane { height: auto; min-height: 560px; }
+    .ops-grid { grid-template-columns: 1fr; }
+    .ops-grid .event-card { grid-column: auto; }
+    .top-action span:first-child, .alert-nav > span:first-child { display: none; }
+  }
+
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-thumb { background: #d4d8e0; border-radius: 4px; }
   ::-webkit-scrollbar-thumb:hover { background: #b9bfcb; }
@@ -542,6 +712,9 @@
 <header>
   <div class="logo"><span class="mark">aH</span>agentHub 控制台</div>
   <div class="spacer"></div>
+  <button class="top-action" id="ops-open" type="button" aria-label="打开操作中心">
+    <span>操作中心</span><span class="top-action-count" id="ops-nav-count">0</span>
+  </button>
   <button class="alert-nav" id="alert-open" type="button" aria-label="打开告警中心">
     <span>告警</span><span class="alert-nav-count" id="alert-nav-count">0</span>
   </button>
@@ -550,7 +723,7 @@
 </header>
 
 <div class="layout">
-  <!-- 左栏：Agent 状态 + 任务导航 -->
+  <!-- 左栏：Agent 状态 + Session 导航 -->
   <div class="col sidebar-col">
     <section class="card">
       <h2>AGENTS</h2>
@@ -558,9 +731,18 @@
     </section>
 
     <section class="card task-card">
-      <h2>任务导航 <span class="tid">点击查看详情</span></h2>
-      <div class="chips" id="status-chips"></div>
-      <div class="task-list" id="tasks"></div>
+      <h2>SESSIONS
+        <select class="session-filter" id="session-filter" aria-label="过滤 Session">
+          <option value="all">全部</option>
+          <option value="active">进行中</option>
+          <option value="blocked">待处理</option>
+          <option value="completed">已结束</option>
+          <option value="no-task">纯对话</option>
+        </select>
+      </h2>
+      <div class="conversation-list" id="conversation-list"></div>
+      <div id="status-chips" hidden></div>
+      <div id="tasks" hidden></div>
     </section>
   </div>
 
@@ -573,7 +755,7 @@
           <div class="sub" id="chat-subtitle">Hermes 多轮上下文追踪</div>
         </div>
         <span id="chat-badge"></span>
-        <select class="conversation-picker" id="conversation-select" aria-label="选择协作会话"></select>
+        <select class="conversation-picker" id="conversation-select" aria-label="选择协作会话" hidden></select>
       </div>
       <div class="chat-context" id="chat-context">
         <div class="chat-objective">选择一个协作会话查看完整过程。</div>
@@ -590,18 +772,42 @@
     </section>
   </main>
 
-  <!-- 右栏：审批、原生交互、授权和事件流 -->
-  <div class="col ops-col">
+  <!-- 右栏：当前 Session 的关联任务详情 -->
+  <aside class="card task-detail-pane" id="drawer" aria-label="关联任务详情">
+    <div class="d-head">
+      <div><div class="pane-eyebrow">关联任务</div><span class="tid" id="d-id">尚未选择任务</span></div>
+      <span id="d-badge"></span>
+      <button class="d-close" id="d-close" aria-label="清空任务选择">×</button>
+    </div>
+    <div class="d-body" id="d-body">
+      <div class="task-pane-empty">选择 Session 后，这里显示它创建的任务、审批、产物和介入操作。</div>
+    </div>
+  </aside>
+</div>
+
+<!-- 兼容旧任务刷新逻辑；任务详情现已固定在右栏 -->
+<div id="overlay" hidden></div>
+
+<!-- 操作中心：保留审批、原生交互、授权与实时事件 -->
+<div class="panel-scrim" id="ops-scrim"></div>
+<aside class="ops-drawer" id="ops-drawer" aria-labelledby="ops-title" aria-hidden="true">
+  <div class="alert-head">
+    <div>
+      <div class="alert-eyebrow">CONTROL</div>
+      <h2 id="ops-title">操作中心</h2>
+      <p>集中处理审批、Agent 原生交互、常驻授权和实时事件。</p>
+    </div>
+    <button class="icon-btn" id="ops-close" type="button" aria-label="关闭操作中心">✕</button>
+  </div>
+  <div class="ops-grid">
     <section class="card">
       <h2>审批中心 <span class="badge blocked" id="blocked-count" style="display:none"></span></h2>
       <div class="body" id="blocked"></div>
     </section>
-
     <section class="card">
       <h2>AGENT 交互 <span class="badge blocked" id="interaction-count" style="display:none"></span></h2>
       <div class="body" id="interactions"></div>
     </section>
-
     <section class="card">
       <h2>常驻授权</h2>
       <div class="body">
@@ -612,17 +818,14 @@
         <div id="grants"></div>
       </div>
     </section>
-
-    <section class="card">
+    <section class="card event-card">
       <h2>事件流
-        <span class="ev-tools">
-          <label><input type="checkbox" id="show-hb"> 心跳</label>
-        </span>
+        <span class="ev-tools"><label><input type="checkbox" id="show-hb"> 心跳</label></span>
       </h2>
       <div id="events"></div>
     </section>
   </div>
-</div>
+</aside>
 
 <!-- 告警中心：独立抽屉，不占用主控制台纵向空间 -->
 <div class="panel-scrim" id="alert-scrim"></div>
@@ -668,17 +871,6 @@
 
 <div class="toast-region" id="toasts" aria-live="polite"></div>
 
-<!-- 任务详情抽屉 -->
-<div class="overlay" id="overlay"></div>
-<aside class="drawer" id="drawer">
-  <div class="d-head">
-    <span class="tid" id="d-id"></span>
-    <span id="d-badge"></span>
-    <button class="d-close" id="d-close" title="关闭">✕</button>
-  </div>
-  <div class="d-body" id="d-body"></div>
-</aside>
-
 <script>
 "use strict";
 
@@ -693,6 +885,7 @@ const S = {
   detailId: null,
   collaborationId: null,
   collaborations: [],
+  sessionFilter: "all",
   interactions: new Map(),
   alerts: [],
   alertFilter: "all",
@@ -768,23 +961,54 @@ $("#confirm-layer").onclick = e => {
 
 /* ── 渲染：Agents ── */
 function renderAgents(agents) {
-  const active = agents.filter(a => a.enabled !== false);
-  const disabled = agents.filter(a => a.enabled === false);
-  $("#agents").innerHTML = active.map(a => {
-    const on = !!a.online;
+  $("#agents").innerHTML = agents.map(a => {
+    const enabled = a.enabled !== false;
+    const on = enabled && !!a.online;
+    const state = !enabled ? "停用" : on ? "在线" : "离线 · 等待注册";
+    const stateColor = !enabled ? "var(--faint)" : on ? "var(--ok)" : "var(--warn)";
     return `<div class="agent">
       <span class="ava" style="background:${agentColor(a.id)}">${esc((a.id || "?")[0].toUpperCase())}</span>
       <div class="meta">
         <div class="name">${esc(a.id)}</div>
         <div class="sub" title="${esc(a.endpoint || "")}">${esc(a.endpoint || "未注册 endpoint")}</div>
       </div>
-      <span class="live"><i style="background:${on ? "var(--ok)" : "var(--bad)"}"></i>${on ? "在线" : "离线"}</span>
+      <span class="live"><i style="background:${stateColor}"></i>${state}</span>
+      <label class="agent-toggle" aria-label="${enabled ? "停用" : "启用"} ${esc(a.id)}">
+        <input type="checkbox" data-agent-toggle="${esc(a.id)}" ${enabled ? "checked" : ""}
+          ${S.role === "admin" ? "" : "disabled"}><span></span>
+      </label>
     </div>`;
-  }).join("") || `<div class="empty">（无已启用 agent）</div>`;
-  if (disabled.length) {
-    $("#agents").insertAdjacentHTML("beforeend",
-      `<div class="agent-disabled">已停用：${disabled.map(a => esc(a.id)).join("、")}</div>`);
+  }).join("") || `<div class="empty">（无 Agent）</div>`;
+  document.querySelectorAll("[data-agent-toggle]").forEach(input =>
+    input.onchange = () => changeAgentState(input.dataset.agentToggle,
+      input.checked, input));
+}
+
+async function changeAgentState(agentId, enabled, input) {
+  const action = enabled ? "启用" : "停用";
+  const message = enabled
+    ? "启用后不会立即视为在线；控制面会等待下一次健康心跳重新探测和注册。"
+    : "停用后将立即清除租约，忽略后续心跳并阻止 Hermes 创建或委派该 Agent 的任务。";
+  if (!await requestConfirmation({
+    title: `${action} ${agentId}？`, message, label: action,
+    danger: !enabled,
+  })) {
+    input.checked = !enabled;
+    return;
   }
+  input.disabled = true;
+  const result = await fetchJson(`/api/agents/${encodeURIComponent(agentId)}`, {
+    method: "PATCH", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({enabled}),
+  });
+  if (result.error) {
+    input.checked = !enabled;
+    showToast(result.error, "error");
+  } else {
+    showToast(enabled ? `${agentId} 已启用，等待健康心跳` : `${agentId} 已停用`, "ok");
+  }
+  input.disabled = false;
+  loadAll();
 }
 
 const ALERT_GUIDANCE = {
@@ -920,6 +1144,22 @@ $("#alert-open").onclick = openAlerts;
 $("#alert-close").onclick = closeAlerts;
 $("#alert-scrim").onclick = closeAlerts;
 
+function openOps() {
+  $("#ops-scrim").classList.add("show");
+  $("#ops-drawer").classList.add("show");
+  $("#ops-drawer").setAttribute("aria-hidden", "false");
+  $("#ops-close").focus();
+}
+
+function closeOps() {
+  $("#ops-scrim").classList.remove("show");
+  $("#ops-drawer").classList.remove("show");
+  $("#ops-drawer").setAttribute("aria-hidden", "true");
+}
+$("#ops-open").onclick = openOps;
+$("#ops-close").onclick = closeOps;
+$("#ops-scrim").onclick = closeOps;
+
 /* ── 渲染：任务 ── */
 function renderChips(counts) {
   const states = ["queued", "assigned", "working", "blocked", "completed",
@@ -956,6 +1196,7 @@ function renderCollaborations(rows) {
   if (!rows.length) {
     picker.innerHTML = `<option value="">暂无协作会话</option>`;
     picker.disabled = true;
+    $("#conversation-list").innerHTML = `<div class="empty" style="padding:14px">暂无持久 Session。</div>`;
     S.collaborationId = null;
     renderEmptyConversation();
     return;
@@ -967,17 +1208,53 @@ function renderCollaborations(rows) {
     `<option value="${esc(x.id)}" ${x.id === S.collaborationId ? "selected" : ""}>` +
     `${esc((x.title || x.objective || x.id).slice(0, 52))} · ${esc(x.message_count)} 条</option>`
   ).join("");
+  const visible = rows.filter(x => {
+    if (S.sessionFilter === "all") return true;
+    if (S.sessionFilter === "no-task") return Number(x.task_count) === 0;
+    if (S.sessionFilter === "blocked")
+      return ["blocked", "awaiting_user", "input_required"].includes(x.phase);
+    if (S.sessionFilter === "completed")
+      return ["completed", "accepted", "failed", "cancelled", "closed"].includes(x.status) ||
+        ["completed", "accepted", "closed"].includes(x.phase);
+    return !["completed", "accepted", "failed", "cancelled", "closed"].includes(x.status) &&
+      !["completed", "accepted", "closed"].includes(x.phase);
+  });
+  $("#conversation-list").innerHTML = visible.map(x => {
+    const state = Number(x.task_count) === 0 ? "纯对话" :
+      ["blocked", "awaiting_user", "input_required"].includes(x.phase) ? "待处理" :
+      ["completed", "accepted", "closed"].includes(x.phase) ? "已结束" : "进行中";
+    return `<button class="conversation ${x.id === S.collaborationId ? "active" : ""}" ` +
+      `type="button" data-collaboration="${esc(x.id)}">
+      <div class="top"><span class="title">${esc(x.title || x.objective || x.id)}</span>${badge(state)}</div>
+      <div class="desc">${esc(x.objective || "（无会话目标）")}</div>
+      <div class="stats">Hermes · ${esc(x.message_count)} 条消息 · ` +
+        `${Number(x.task_count) ? `${esc(x.task_count)} 个任务` : "未创建任务"}</div>
+    </button>`;
+  }).join("") || `<div class="empty" style="padding:14px">当前筛选下没有 Session。</div>`;
+  document.querySelectorAll("[data-collaboration]").forEach(button =>
+    button.onclick = () => loadConversationPanel(button.dataset.collaboration));
 }
 
 $("#conversation-select").onchange = e => loadConversationPanel(e.target.value);
+$("#session-filter").onchange = e => {
+  S.sessionFilter = e.target.value;
+  renderCollaborations(S.collaborations);
+};
 
 /* ── 渲染：审批与授权 ── */
+function updateOpsCount() {
+  const total = Number($("#blocked-count").textContent || 0) +
+    Number($("#interaction-count").textContent || 0);
+  $("#ops-nav-count").textContent = total;
+}
+
 function renderBlocked(tasks) {
   const c = $("#blocked-count");
   if (tasks.length) {
     c.style.display = "";
     c.textContent = tasks.length;
   } else c.style.display = "none";
+  updateOpsCount();
   const nativeTasks = new Set([...S.interactions.values()].map(x => x.task_id));
   $("#blocked").innerHTML = tasks.map(x =>
     `<div class="appr">
@@ -999,6 +1276,7 @@ function renderInteractions(items) {
   const c = $("#interaction-count");
   c.style.display = items.length ? "" : "none";
   c.textContent = items.length;
+  updateOpsCount();
   S.interactions = new Map(items.map(x => [x.id, x]));
   $("#interactions").innerHTML = items.map(x => {
     let p = {};
@@ -1177,23 +1455,28 @@ function messageContent(message) {
 
 function renderMessageList(messages) {
   if (!messages?.length) return `<div class="empty">（无持久消息）</div>`;
-  const labels = {user: "用户", hermes: "Hermes", system: "工具/系统", agent: "子 Agent"};
   return `<div class="message-list">` + messages.map(m => {
-    const css = m.sender_type === "user" ? "user" :
-      m.sender_type === "hermes" ? "hermes" :
-      m.sender_type === "system" ? "tool" : "";
+    const isTool = m.sender_type === "system" || String(m.message_type || "").startsWith("tool.");
+    const isHermes = m.sender_type === "hermes" || String(m.sender_id || "").toLowerCase() === "hermes";
+    const css = m.sender_type === "user" ? "user" : isTool ? "tool" : isHermes ? "hermes" : "";
     const route = m.recipient_id ? ` → ${m.recipient_id}` : "";
+    const speaker = m.sender_type === "user" ? "用户" :
+      isHermes ? "Hermes" : m.sender_type === "system" ? "工具/系统" : m.sender_id || "Agent";
+    const avatar = String(m.sender_id || speaker || "?").charAt(0).toUpperCase();
     return `<article class="message ${css}">
-      <div class="mh"><strong>#${esc(m.sequence)} ${esc(labels[m.sender_type] || m.sender_id)}${esc(route)}</strong>
-        <span>${esc(m.message_type)}</span><span>revision ${esc(m.based_on_revision ?? "-")}</span>
-        <span>${esc(formatTime(m.created_at))}</span></div>
-      <div class="mc">${esc(messageContent(m))}</div>
+      <span class="message-avatar" aria-hidden="true">${esc(avatar)}</span>
+      <div class="message-shell">
+        <div class="mh"><strong>#${esc(m.sequence)} ${esc(speaker)}${esc(route)}</strong>
+          <span>${esc(m.message_type)}</span><span>revision ${esc(m.based_on_revision ?? "-")}</span>
+          <span>${esc(formatTime(m.created_at))}</span></div>
+        <div class="mc">${esc(messageContent(m))}</div>
+      </div>
     </article>`;
   }).join("") + `</div>`;
 }
 
 /* ── 任务 / 协作详情抽屉 ── */
-async function openDetail(id) {
+async function openDetail(id, {syncConversation = true} = {}) {
   S.detailId = id;
   const d = await fetchJson("/api/tasks/" + encodeURIComponent(id));
   if (d.error) { showToast(d.error, "error"); return; }
@@ -1203,7 +1486,7 @@ async function openDetail(id) {
   const t = d.task;
   document.querySelectorAll("[data-task]").forEach(item =>
     item.classList.toggle("active", item.dataset.task === t.id));
-  if (t.collaboration_id && t.collaboration_id !== S.collaborationId)
+  if (syncConversation && t.collaboration_id && t.collaboration_id !== S.collaborationId)
     await loadConversationPanel(t.collaboration_id);
   const collaboration = d.collaboration || {};
   const kv = [
@@ -1314,8 +1597,7 @@ async function openDetail(id) {
     b.onclick = () => interveneTask(
       t.id, currentSession.agent_id, b.dataset.intervene, b));
 
-  $("#overlay").classList.add("show");
-  $("#drawer").classList.add("show");
+  $("#d-body").scrollTop = 0;
 }
 
 function renderEmptyConversation() {
@@ -1327,6 +1609,14 @@ function renderEmptyConversation() {
   $("#chat-transcript").innerHTML =
     `<div class="chat-empty">暂无可显示的持久会话</div>`;
   $("#chat-refresh-state").textContent = "无会话";
+  renderEmptyTask("当前 Session 尚未创建任务。");
+}
+
+function renderEmptyTask(message = "选择 Session 后，这里显示它创建的任务、审批、产物和介入操作。") {
+  S.detailId = null;
+  $("#d-id").textContent = "尚未选择任务";
+  $("#d-badge").innerHTML = "";
+  $("#d-body").innerHTML = `<div class="task-pane-empty">${esc(message)}</div>`;
 }
 
 async function loadConversationPanel(id, {preserveScroll = false} = {}) {
@@ -1336,6 +1626,8 @@ async function loadConversationPanel(id, {preserveScroll = false} = {}) {
   if ([...picker.options].some(option => option.value === id)) picker.value = id;
   const transcript = $("#chat-transcript");
   const previousScroll = transcript.scrollTop;
+  const taskPane = $("#d-body");
+  const previousTaskScroll = taskPane.scrollTop;
   const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
   $("#chat-refresh-state").textContent = "同步中…";
   const d = await fetchJson("/api/collaborations/" + encodeURIComponent(id));
@@ -1364,24 +1656,33 @@ async function loadConversationPanel(id, {preserveScroll = false} = {}) {
   transcript.innerHTML = renderMessageList(d.messages || []);
   document.querySelectorAll("[data-chat-task]").forEach(button =>
     button.onclick = () => openDetail(button.dataset.chatTask));
+  document.querySelectorAll("[data-collaboration]").forEach(button =>
+    button.classList.toggle("active", button.dataset.collaboration === id));
+  const linkedTasks = d.tasks || [];
+  if (linkedTasks.length) {
+    const selected = linkedTasks.find(task => task.id === S.detailId) || linkedTasks[0];
+    const sameTask = selected.id === S.detailId;
+    await openDetail(selected.id, {syncConversation: false});
+    if (preserveScroll && sameTask) taskPane.scrollTop = previousTaskScroll;
+  } else {
+    renderEmptyTask("此 Session 尚未创建任务；对话上下文仍会持续保留。");
+  }
   if (!preserveScroll || nearBottom) transcript.scrollTop = transcript.scrollHeight;
   else transcript.scrollTop = previousScroll;
   $("#chat-refresh-state").textContent = `已同步 ${formatTime(new Date().toISOString())}`;
 }
 
 function closeDetail() {
-  S.detailId = null;
   document.querySelectorAll("[data-task]").forEach(item =>
     item.classList.remove("active"));
-  $("#overlay").classList.remove("show");
-  $("#drawer").classList.remove("show");
+  renderEmptyTask();
 }
-$("#overlay").onclick = closeDetail;
 $("#d-close").onclick = closeDetail;
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if ($("#confirm-layer").classList.contains("show")) finishConfirmation(false);
   else if ($("#alert-drawer").classList.contains("show")) closeAlerts();
+  else if ($("#ops-drawer").classList.contains("show")) closeOps();
   else closeDetail();
 });
 

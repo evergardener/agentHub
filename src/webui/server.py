@@ -187,7 +187,8 @@ def create_app() -> FastAPI:
                 return JSONResponse({"error": "CSRF token invalid"},
                                     status_code=403)
             required = ("viewer" if request.url.path == "/api/auth/logout"
-                        else "admin" if request.url.path.startswith("/api/grants")
+                        else "admin" if request.url.path.startswith(
+                            ("/api/grants", "/api/agents"))
                         else "operator")
             if ROLES[claims["role"]] < ROLES[required]:
                 return JSONResponse(
@@ -285,6 +286,7 @@ def create_app() -> FastAPI:
         from datetime import datetime
 
         from hermes.tools import load_agents
+        from orchestrator import agent_control_store
         from state.db import CST
 
         conn = _conn()
@@ -301,7 +303,8 @@ def create_app() -> FastAPI:
             # not be presented as deployable Agents in the control console.
             for agent_id, spec in catalog.items():
                 row = live.get(agent_id) or {}
-                enabled = spec.get("enabled", True) is not False
+                enabled = agent_control_store.desired_enabled(
+                    conn, agent_id, spec.get("enabled", True) is not False)
                 online = bool(
                     enabled and row.get("lease_expires_at")
                     and row["lease_expires_at"] > now
@@ -333,6 +336,29 @@ def create_app() -> FastAPI:
             }
             return {"agents": agents, "task_counts": counts, "grants": grants,
                     "alert_counts": alert_counts}
+        finally:
+            conn.close()
+
+    @app.patch("/api/agents/{agent_id}")
+    async def update_agent(agent_id: str, request: Request):
+        from hermes.tools import load_agents
+        from orchestrator import agent_control_store
+
+        catalog = load_agents()
+        if agent_id not in catalog:
+            return JSONResponse({"error": "agent not found"}, status_code=404)
+        try:
+            body = await request.json()
+        except (ValueError, json.JSONDecodeError):
+            body = {}
+        if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
+            return JSONResponse(
+                {"error": "enabled must be boolean"}, status_code=400)
+        conn = _conn()
+        try:
+            return agent_control_store.set_enabled(
+                conn, agent_id=agent_id, enabled=body["enabled"],
+                updated_by=f"webui:{request.state.role}")
         finally:
             conn.close()
 

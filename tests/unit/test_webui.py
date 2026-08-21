@@ -103,6 +103,26 @@ def test_overview(client):
     assert ov["alert_counts"] == {"warning": 1}
 
 
+def test_agent_control_requires_boolean_and_updates_overview(client):
+    assert client.patch("/api/agents/nope", json={"enabled": True}).status_code == 404
+    assert client.patch("/api/agents/kimi", json={"enabled": "yes"}).status_code == 400
+    enabled = client.patch("/api/agents/kimi", json={"enabled": True})
+    assert enabled.status_code == 200
+    assert enabled.json()["status"] == "probing"
+    kimi = next(a for a in client.get("/api/overview").json()["agents"]
+                if a["id"] == "kimi")
+    assert kimi["enabled"] is True
+    assert kimi["status"] == "offline"
+
+    disabled = client.patch("/api/agents/kimi", json={"enabled": False})
+    assert disabled.status_code == 200
+    assert disabled.json()["status"] == "disabled"
+    kimi = next(a for a in client.get("/api/overview").json()["agents"]
+                if a["id"] == "kimi")
+    assert kimi["enabled"] is False
+    assert kimi["status"] == "disabled"
+
+
 def test_tasks_and_detail(client):
     tasks = client.get("/api/tasks").json()["tasks"]
     assert len(tasks) == 2
@@ -179,7 +199,15 @@ def test_index_page(client):
     assert "归还 Hermes 并重新规划" in r.text
     assert "协作会话" in r.text
     assert "委派指令（原文）" in r.text
-    assert "任务导航" in r.text
+    assert "SESSIONS" in r.text
+    assert "任务导航" not in r.text
+    assert "点击查看详情" not in r.text
+    assert 'id="session-filter"' in r.text
+    assert 'id="conversation-list"' in r.text
+    assert 'class="card task-detail-pane" id="drawer"' in r.text
+    assert 'id="ops-drawer"' in r.text
+    assert 'data-agent-toggle=' in r.text
+    assert "backdrop-filter: blur(24px)" in r.text
     assert 'aria-label="协作会话工作区"' in r.text
     assert 'id="conversation-select"' in r.text
     assert 'id="chat-transcript"' in r.text
@@ -358,6 +386,15 @@ def test_secure_webui_role_boundaries(secure_client, monkeypatch):
     assert secure_client.post(
         f"/api/alerts/{alert_id}/acknowledge", json={"note": "owned"},
         headers={"X-CSRF-Token": operator_csrf}).status_code == 200
+    assert secure_client.patch(
+        "/api/agents/kimi", json={"enabled": True},
+        headers={"X-CSRF-Token": operator_csrf}).status_code == 403
+
+    admin, admin_csrf = _login(secure_client, "admin-token-0123456789")
+    assert admin.status_code == 200
+    assert secure_client.patch(
+        "/api/agents/kimi", json={"enabled": True},
+        headers={"X-CSRF-Token": admin_csrf}).status_code == 200
 
 
 def test_secure_webui_rejects_tampered_cookie(secure_client):

@@ -164,3 +164,34 @@ def test_disabled_agent_heartbeat_is_audited_but_not_registered(tmp_path):
     assert writer.conn.execute(
         "SELECT status FROM agents WHERE id = 'codex';"
     ).fetchone()[0] == "online"
+
+
+def test_operator_override_controls_future_heartbeat_registration(tmp_path):
+    agents_path = tmp_path / "agents.yaml"
+    agents_path.write_text(
+        "agents:\n  kimi:\n    enabled: false\n", encoding="utf-8")
+    writer = StateWriter(tmp_path / "writer.db", agents_path=agents_path)
+    from orchestrator import agent_control_store
+
+    agent_control_store.set_enabled(
+        writer.conn, agent_id="kimi", enabled=True, updated_by="test")
+    event = {
+        "event_id": "E-kimi-enabled-heartbeat",
+        "event_type": "agent.kimi.heartbeat", "source": "kimi",
+        "payload": {"lease_ttl_seconds": 90,
+                    "endpoint": "http://127.0.0.1:8202"},
+    }
+    assert writer.apply(event) == "applied"
+    assert writer.conn.execute(
+        "SELECT status FROM agents WHERE id = 'kimi';"
+    ).fetchone()[0] == "online"
+
+    agent_control_store.set_enabled(
+        writer.conn, agent_id="kimi", enabled=False, updated_by="test")
+    second = {**event, "event_id": "E-kimi-disabled-heartbeat"}
+    assert writer.apply(second) == "ignored"
+    row = writer.conn.execute(
+        "SELECT status, lease_expires_at FROM agents WHERE id = 'kimi';"
+    ).fetchone()
+    assert row["status"] == "disabled"
+    assert row["lease_expires_at"] is None
