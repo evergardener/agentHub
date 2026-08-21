@@ -1,9 +1,6 @@
 # yaml-language-server: $schema=https://agentgateway.dev/schema/config
-# agentgateway 容器内配置（docker compose 栈，Evolution v3 M2）
-#
-# 与 config.yaml（宿主机版）的差异：backends 指向 host.docker.internal ——
-# worker adapter 由用户装在宿主机，容器经此回连宿主机。
-# 认证/ACL/限流/超时策略与宿主机版一致；key 经 $GATEWAY_API_KEY 注入。
+# Docker 生产剖面：qishuo 只能访问单一 agentHub 入口；
+# orchestrator 通过通配 worker 路由回到 Registry 动态代理。
 
 gateways:
   default:
@@ -13,72 +10,25 @@ gateways:
       keys:
       - key: "$GATEWAY_API_KEY"
         metadata:
-          user: hermes
+          user: agenthub-orchestrator
           role: orchestrator
-          agents: codex,kimi,dsh   # ACL：允许访问的 agent 列表
+      - key: "$HERMES_GATEWAY_API_KEY"
+        metadata:
+          user: qishuo
+          role: hermes
 
 routes:
-- name: agent-codex
+- name: agenthub-hermes-entry
   matches:
   - path:
-      pathPrefix: /agents/codex
-  policies:
-    urlRewrite:
-      path:
-        prefix: /            # 剥掉 /agents/codex 前缀
-    authorization:
-      rules:
-      - require: 'apiKey.agents.split(",").exists(a, a == "codex")'
-    localRateLimit:
-    - maxTokens: 30
-      tokensPerFill: 30
-      fillInterval: 60s
-      type: requests
-    timeout:
-      requestTimeout: 900s   # codex 任务可能很长
-    retry:
-      attempts: 2
-      backoff: 500ms
-      codes: [502, 503]
-  backends:
-  - host: host.docker.internal:8201
-
-- name: agent-kimi
-  matches:
-  - path:
-      pathPrefix: /agents/kimi
+      pathPrefix: /agenthub
   policies:
     urlRewrite:
       path:
         prefix: /
     authorization:
       rules:
-      - require: 'apiKey.agents.split(",").exists(a, a == "kimi")'
-    localRateLimit:
-    - maxTokens: 30
-      tokensPerFill: 30
-      fillInterval: 60s
-      type: requests
-    timeout:
-      requestTimeout: 300s
-    retry:
-      attempts: 2
-      backoff: 500ms
-      codes: [502, 503]
-  backends:
-  - host: host.docker.internal:8202
-
-- name: agent-dsh
-  matches:
-  - path:
-      pathPrefix: /agents/dsh
-  policies:
-    urlRewrite:
-      path:
-        prefix: /
-    authorization:
-      rules:
-      - require: 'apiKey.agents.split(",").exists(a, a == "dsh")'
+      - require: 'apiKey.role == "hermes"'
     localRateLimit:
     - maxTokens: 30
       tokensPerFill: 30
@@ -91,4 +41,29 @@ routes:
       backoff: 500ms
       codes: [502, 503]
   backends:
-  - host: host.docker.internal:8203
+  - host: orchestrator:8310
+
+- name: agenthub-dynamic-workers
+  matches:
+  - path:
+      pathPrefix: /agents
+  policies:
+    urlRewrite:
+      path:
+        prefix: /worker-proxy
+    authorization:
+      rules:
+      - require: 'apiKey.role == "orchestrator"'
+    localRateLimit:
+    - maxTokens: 30
+      tokensPerFill: 30
+      fillInterval: 60s
+      type: requests
+    timeout:
+      requestTimeout: 900s
+    retry:
+      attempts: 2
+      backoff: 500ms
+      codes: [502, 503]
+  backends:
+  - host: orchestrator:8310

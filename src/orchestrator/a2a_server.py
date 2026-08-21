@@ -10,8 +10,8 @@
   POST /a2a
     SendMessage   A2A v1.0：text Part 支持 {"text": ..., "mediaType": ...}
                   与 legacy {"kind": "text", ...}；响应包装为 {"task": ...}。
-                  peer identity（Bearer）固定路由到映射 worker；
-                  legacy identity（X-Agent-Token）走 metadata.agent。
+                  peer identity（Bearer）通过 agentHub 控制包调用 Registry；
+                  legacy identity（X-Agent-Token）仍走 metadata.agent。
     message/send  legacy：新任务 metadata.agent 必填；响应为 bare Task。
                   metadata.taskId + 自然语言「批准/拒绝」跟进（deprecated，
                   仅留 legacy client；compatibility 路径不走它）。
@@ -21,8 +21,8 @@
                   （精确动作；重复/晚到/终态返回稳定错误，不重复委派）
 
 鉴权（/health 外全路径）：
-  Authorization: Bearer <token>  LAS_A2A_PEERS 配置的 peer token →
-                                 peer identity {peer, worker}（固定路由）
+  Authorization: Bearer <token>  LAS_A2A_PEERS 配置的 caller token →
+                                 peer identity（worker 由 Registry 动态发现）
   X-Agent-Token: <token>         LAS_API_TOKEN（回退 LAS_ADAPTER_TOKEN）→
                                  legacy identity（metadata.agent 路由）
   两 header 同时出现且值不一致 → 401。均未配置只允许 loopback 开发模式；
@@ -41,8 +41,9 @@ import os
 import uuid
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from common import config as cfg
 from common.models import A2A_STATE_MAP, TaskStatus
@@ -89,6 +90,11 @@ def _now(conn) -> str:
 
 def _resolve_agent(conn, agent_id: str) -> tuple[dict | None, str | None]:
     """从注册表解析在线 worker；返回 (info, error)。"""
+    from orchestrator import agent_control_store
+
+    if not agent_control_store.desired_enabled(conn, agent_id, True):
+        return None, (f"agent disabled: {agent_id}（不参与探测或委派；"
+                      "需询问用户是否启用后重新探测）")
     row = conn.execute(
         "SELECT id, endpoint, lease_expires_at FROM agents WHERE id = ?;",
         (agent_id,)).fetchone()
@@ -102,6 +108,33 @@ def _resolve_agent(conn, agent_id: str) -> tuple[dict | None, str | None]:
     if not row["endpoint"]:
         return None, f"agent {agent_id} 无可用 endpoint（未完成注册）"
     return {"id": row["id"], "endpoint": row["endpoint"]}, None
+
+
+def _text_message(text: str, context_id: str | None = None) -> dict:
+    message = {
+        "role": "agent",
+        "parts": [{"text": text, "mediaType": "text/plain"}],
+        "messageId": uuid.uuid4().hex,
+    }
+    if context_id:
+        message["contextId"] = context_id
+    return message
+
+
+def _hub_command(text: str) -> tuple[dict | None, str | None]:
+    """解析 qishuo 经原生 a2a_call 发送的严格 agentHub v1 控制包。"""
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return None, "消息必须是 agentHub v1 JSON 控制包"
+    if not isinstance(value, dict) or value.get("agenthub") != "v1":
+        return None, "消息缺少 agenthub=v1"
+    action = value.get("action")
+    if action not in {
+            "agents/list", "tasks/create", "tasks/get",
+            "tasks/approve", "tasks/reject"}:
+        return None, f"未知 agentHub action: {action}"
+    return value, None
 
 
 def _approval_pending(conn, task_id: str) -> dict | None:
@@ -119,7 +152,7 @@ def _approval_pending(conn, task_id: str) -> dict | None:
     return None
 
 
-def _to_a2a(conn, row) -> dict:
+def _to_a2a(conn, row, *, context_id: str | None = None) -> dict:
     """内部任务行 → A2A Task；created/queued + 待批准 → input-required。"""
     task_id = row["id"]
     pending = _approval_pending(conn, task_id)
@@ -138,10 +171,11 @@ def _to_a2a(conn, row) -> dict:
     return {
         "id": task_id,
         "status": {"state": state, "timestamp": row["updated_at"],
-                   "message": message},
+                   "message": _text_message(message, context_id)},
         "artifacts": artifacts,
         "metadata": {"assigned_to": row["assigned_to"],
                      "internal_status": row["status"]},
+        **({"contextId": context_id} if context_id else {}),
     }
 
 
@@ -171,7 +205,8 @@ def create_app(tm: TaskManager | None = None,
     policy = policy or ApprovalPolicy()
 
     legacy_token = cfg.api_token()
-    peers = cfg.a2a_peers()  # token → {peer, worker}
+    peers = cfg.a2a_peers()  # token → {peer}
+    gateway_token = cfg.gateway_bearer_token()
     auth_enabled = bool(legacy_token or peers)
     if cfg.orchestrator_require_auth() and not auth_enabled:
         raise RuntimeError(
@@ -184,11 +219,10 @@ def create_app(tm: TaskManager | None = None,
     def _authenticate(request: Request) -> dict | None:
         """解析调用方 identity；未认证返回 None。
 
-        identity: {"peer": <逻辑名>, "worker": <固定 worker 或 None>}
-        worker=None 表示 legacy identity，走 metadata.agent 路由。
+        identity: {"peer": <逻辑名>, "kind": "hub"|"legacy"|"gateway"}
         """
         if not auth_enabled:
-            return {"peer": "dev-local", "worker": None}
+            return {"peer": "dev-local", "kind": "legacy"}
         x_tok = request.headers.get("x-agent-token")
         auth = request.headers.get("authorization", "")
         bearer = auth[7:] if auth.lower().startswith("bearer ") else None
@@ -199,9 +233,11 @@ def create_app(tm: TaskManager | None = None,
             return None
         for candidate, meta in peers.items():
             if hmac.compare_digest(tok, candidate):
-                return {"peer": meta["peer"], "worker": meta["worker"]}
+                return {"peer": meta["peer"], "kind": "hub"}
+        if gateway_token and hmac.compare_digest(tok, gateway_token):
+            return {"peer": "agentgateway", "kind": "gateway"}
         if legacy_token and hmac.compare_digest(tok, legacy_token):
-            return {"peer": "legacy", "worker": None}
+            return {"peer": "legacy", "kind": "legacy"}
         return None
 
     @app.middleware("http")
@@ -230,7 +266,8 @@ def create_app(tm: TaskManager | None = None,
 
     @app.get("/.well-known/agent-card.json")
     async def card(request: Request) -> dict:
-        base = str(request.base_url).rstrip("/")
+        base = os.environ.get("LAS_ORCH_PUBLIC_URL", "").rstrip("/") \
+            or str(request.base_url).rstrip("/")
         return {
             "name": "agenthub-orchestrator",
             "description": "agentHub 编排执行平面：任务委派、审批门禁、"
@@ -247,8 +284,10 @@ def create_app(tm: TaskManager | None = None,
             "capabilities": {"streaming": False},
             "skills": [
                 {"id": "orchestrate",
-                 "description": "提交任务目标，按 peer identity 固定路由到 "
-                                "worker 执行"},
+                 "description": "查询 Registry，选择已启用且在线的 "
+                                "Agent 并委派"},
+                {"id": "registry-discovery",
+                 "description": "agents/list 返回实时 Agent/Profile 发现视图"},
                 {"id": "approval-gate",
                  "description": "写操作审批：input-required + "
                                 "tasks/approve | tasks/reject 放行"},
@@ -286,10 +325,44 @@ def create_app(tm: TaskManager | None = None,
                                          approve=False)
         return _error(rpc_id, -32601, f"method not found: {method}")
 
+    @app.api_route("/worker-proxy/{agent_id}/{path:path}",
+                   methods=["GET", "POST"])
+    async def worker_proxy(agent_id: str, path: str, request: Request):
+        """gateway 后的通用 worker 路由；目标每次从 Registry 解析。"""
+        identity = request.state.identity
+        if identity.get("kind") != "gateway":
+            return JSONResponse({"error": "gateway identity required"},
+                                status_code=403)
+        agent, err = _resolve_agent(tm.conn, agent_id)
+        if err:
+            return JSONResponse({"error": err}, status_code=503)
+        target = f"{agent['endpoint'].rstrip('/')}/{path.lstrip('/')}"
+        headers = {
+            name: value for name, value in request.headers.items()
+            if name.lower() in {
+                "content-type", "accept", "a2a-version", "x-agent-token",
+                "idempotency-key", "traceparent", "tracestate"}
+        }
+        try:
+            async with httpx.AsyncClient(
+                    timeout=900, follow_redirects=False,
+                    trust_env=False) as client:
+                response = await client.request(
+                    request.method, target, params=request.query_params,
+                    content=await request.body(), headers=headers)
+        except httpx.HTTPError as exc:
+            return JSONResponse(
+                {"error": f"worker proxy unavailable: {type(exc).__name__}"},
+                status_code=502)
+        return Response(
+            content=response.content, status_code=response.status_code,
+            media_type=response.headers.get("content-type"))
+
     async def _message_send(params: dict, rpc_id, identity: dict,
                             v1: bool) -> JSONResponse:
         metadata = params.get("message", {}).get("metadata", {}) or {}
         text = _extract_text(params).strip()
+        context_id = params.get("message", {}).get("contextId")
         task_id = metadata.get("taskId")
         if task_id:
             if v1:
@@ -303,16 +376,43 @@ def create_app(tm: TaskManager | None = None,
         if not text:
             return _error(rpc_id, -32602, "message has no text part")
 
-        fixed = identity.get("worker")
-        claimed = (metadata.get("agent") or "").strip()
-        if fixed:
-            if claimed and claimed != fixed:
+        if identity.get("kind") == "hub":
+            command, err = _hub_command(text)
+            if err:
+                return _error(rpc_id, -32602, err)
+            action = command["action"]
+            if action == "agents/list":
+                from hermes.tools import HermesTools
+
+                agents = HermesTools(tm, policy)._resolve_agents()
+                public = [{
+                    "id": agent_id,
+                    "enabled": info.get("enabled") is not False,
+                    "online": info.get("online"),
+                    "skills": info.get("skills") or [],
+                    "profile_id": info.get("profile_id"),
+                } for agent_id, info in sorted(agents.items())]
+                message = _text_message(json.dumps(
+                    {"agents": public}, ensure_ascii=False), context_id)
+                return _result(rpc_id, {"message": message})
+            if action == "tasks/get":
+                return _tasks_get({"id": command.get("task_id")}, rpc_id,
+                                  context_id=context_id, wrapped=True)
+            if action in {"tasks/approve", "tasks/reject"}:
+                return await _tasks_approval(
+                    {"id": command.get("task_id")}, rpc_id, identity,
+                    approve=action == "tasks/approve", context_id=context_id,
+                    wrapped=True)
+            agent_id = str(command.get("agent") or "").strip()
+            text = str(command.get("objective") or "").strip()
+            if not agent_id or not text:
                 return _error(
                     rpc_id, -32602,
-                    f"peer {identity['peer']} 固定路由到 {fixed}，"
-                    f"与 metadata.agent={claimed} 冲突，拒绝")
-            agent_id = fixed
+                    "tasks/create 需要非空 agent 和 objective；"
+                    "先用 agents/list 发现")
+            metadata = {"project": command.get("project")}
         else:
+            claimed = (metadata.get("agent") or "").strip()
             if not claimed:
                 return _error(rpc_id, -32602,
                               "metadata.agent 必填（可用 agent 见 "
@@ -336,7 +436,7 @@ def create_app(tm: TaskManager | None = None,
                          "reason": decision.reason})
             await tm.delegate_task(tid, agent["endpoint"], agent_id)
         row = state_store.get_task(tm.conn, tid)
-        task = _to_a2a(tm.conn, row)
+        task = _to_a2a(tm.conn, row, context_id=context_id)
         # v1.0 SendMessageResponse：{"task": ...}；legacy 保持 bare Task
         return _result(rpc_id, {"task": task} if v1 else task)
 
@@ -370,7 +470,8 @@ def create_app(tm: TaskManager | None = None,
         return _result(rpc_id, _to_a2a(tm.conn, row))
 
     async def _tasks_approval(params: dict, rpc_id, identity: dict,
-                              approve: bool) -> JSONResponse:
+                              approve: bool, *, context_id: str | None = None,
+                              wrapped: bool = False) -> JSONResponse:
         """精确审批动作（A2A v1.0 compatibility 的唯一审批通道）。"""
         task_id = params.get("id")
         if not task_id:
@@ -395,14 +496,17 @@ def create_app(tm: TaskManager | None = None,
             state_store.transition_task(tm.conn, task_id,
                                         TaskStatus.CANCELLED)
         row = state_store.get_task(tm.conn, task_id)
-        return _result(rpc_id, _to_a2a(tm.conn, row))
+        task = _to_a2a(tm.conn, row, context_id=context_id)
+        return _result(rpc_id, {"task": task} if wrapped else task)
 
-    def _tasks_get(params: dict, rpc_id) -> JSONResponse:
+    def _tasks_get(params: dict, rpc_id, *, context_id: str | None = None,
+                   wrapped: bool = False) -> JSONResponse:
         task_id = params.get("id")
         row = state_store.get_task(tm.conn, task_id) if task_id else None
         if row is None:
             return _error(rpc_id, -32602, f"task not found: {task_id}")
-        return _result(rpc_id, _to_a2a(tm.conn, row))
+        task = _to_a2a(tm.conn, row, context_id=context_id)
+        return _result(rpc_id, {"task": task} if wrapped else task)
 
     return app
 

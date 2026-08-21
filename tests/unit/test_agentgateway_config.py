@@ -20,15 +20,12 @@ AGW_BIN = ROOT / "infra" / "agentgateway" / "bin" / "agentgateway"
 
 
 @pytest.mark.parametrize("config_path", CONFIGS)
-def test_each_agent_route_has_an_independent_request_bucket(config_path: Path):
+def test_gateway_has_separate_hermes_and_dynamic_worker_routes(config_path: Path):
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     routes = config["routes"]
 
     assert {route["name"] for route in routes} == {
-        "agent-codex",
-        "agent-kimi",
-        "agent-dsh",
-    }
+        "agenthub-hermes-entry", "agenthub-dynamic-workers"}
     for route in routes:
         assert route["policies"]["localRateLimit"] == [
             {
@@ -88,7 +85,8 @@ def test_remote_compose_is_isolated_and_mounts_identity_read_only():
 @pytest.mark.skipif(not AGW_BIN.exists(), reason="local agentgateway binary not installed")
 @pytest.mark.parametrize("config_path", CONFIGS)
 def test_config_is_accepted_by_bundled_agentgateway(config_path: Path):
-    env = dict(os.environ, GATEWAY_API_KEY="schema-validation-only-key")
+    env = dict(os.environ, GATEWAY_API_KEY="schema-validation-only-key",
+               HERMES_GATEWAY_API_KEY="schema-validation-hermes-key")
     result = subprocess.run(
         [str(AGW_BIN), "--validate-only", "-f", str(config_path)],
         env=env,

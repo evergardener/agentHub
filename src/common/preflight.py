@@ -239,7 +239,6 @@ def check_production_env(
 
     api_token = env.get("LAS_API_TOKEN", "") or adapter_token
     raw_peers = env.get("LAS_A2A_PEERS", "")
-    peer_workers: set[str] = set()
     if not api_token and not raw_peers:
         findings.append(Finding(
             "error", "LAS_API_TOKEN/LAS_A2A_PEERS", "至少配置一种 A2A 身份"))
@@ -253,14 +252,11 @@ def check_production_env(
                 raise ValueError
             if any(not isinstance(token, str) or len(token) < 24
                    or not isinstance(meta, dict)
-                   or meta.get("worker") not in {"codex", "kimi", "dsh"}
+                   or "worker" in meta
                    or not meta.get("peer") for token, meta in peers.items()):
                 findings.append(Finding(
                     "error", "LAS_A2A_PEERS",
-                    "token 至少 24 字符，且每项必须含合法 peer/worker"))
-            else:
-                peer_workers = {str(meta["worker"])
-                                for meta in peers.values()}
+                    "token 至少 24 字符，每项只标识 peer，不得绑定 worker"))
         except (json.JSONDecodeError, ValueError):
             findings.append(Finding(
                 "error", "LAS_A2A_PEERS", "不是合法的非空 peer 映射 JSON"))
@@ -282,16 +278,24 @@ def check_production_env(
         findings.append(Finding(
             "error", "LAS_DSH_AGENT_PRESET",
             "DSH 生产会话必须使用已审计的 standard preset"))
-    if "dsh" in peer_workers and not dsh_enabled:
-        findings.append(Finding(
-            "error", "LAS_A2A_PEERS",
-            "DSH peer 需要 LAS_DSH_PRODUCTION_ENABLED=true"))
-
-    if (_enabled(env.get("LAS_KIMI_PRODUCTION_ENABLED", ""))
-            or "kimi" in peer_workers):
+    if _enabled(env.get("LAS_KIMI_PRODUCTION_ENABLED", "")):
         findings.append(Finding(
             "error", "LAS_KIMI_PRODUCTION_ENABLED",
             "Kimi 当前因真实 ACP 调用配额耗尽而排除生产路由"))
+
+    hermes_gateway_token = env.get("LAS_HERMES_GATEWAY_API_KEY", "")
+    if len(hermes_gateway_token) < 24:
+        findings.append(Finding(
+            "error", "LAS_HERMES_GATEWAY_API_KEY", "Hermes gateway token 至少 24 字符"))
+    elif raw_peers:
+        try:
+            peers = json.loads(raw_peers)
+            if hermes_gateway_token not in peers:
+                findings.append(Finding(
+                    "error", "LAS_HERMES_GATEWAY_API_KEY",
+                    "gateway 与 orchestrator 必须共用同一 qishuo identity token"))
+        except json.JSONDecodeError:
+            pass
 
     if not _enabled(env.get("LAS_WEBUI_COOKIE_SECURE", "false")):
         findings.append(Finding(

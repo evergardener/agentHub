@@ -18,7 +18,7 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-def test_initializer_preserves_codex_removes_kimi_and_adds_dsh(tmp_path):
+def test_initializer_migrates_worker_peers_to_one_hub_peer(tmp_path):
     env = tmp_path / ".env"
     codex_token = "c" * 48
     kimi_token = "k" * 48
@@ -38,7 +38,9 @@ def test_initializer_preserves_codex_removes_kimi_and_adds_dsh(tmp_path):
 
     values = parse_env(env)
     peers = json.loads(values["LAS_A2A_PEERS"])
-    assert {meta["worker"] for meta in peers.values()} == {"codex", "dsh"}
+    assert len(peers) == 1
+    assert list(peers.values()) == [{"peer": "qishuo"}]
+    assert values["LAS_HERMES_GATEWAY_API_KEY"] in peers
     assert values["LAS_DSH_AGENT_PRESET"] == "standard"
     assert values["LAS_DSH_PERMISSION_PRESET"] == "read-only"
     assert values["LAS_KIMI_PRODUCTION_ENABLED"] == "false"
@@ -51,5 +53,5 @@ def test_initializer_preserves_codex_removes_kimi_and_adds_dsh(tmp_path):
     saved = json.loads(credentials.read_text(encoding="utf-8"))
     assert saved["webuiAdminToken"] in json.loads(
         values["LAS_WEBUI_TOKENS"])
-    assert saved["dshPeerToken"] in peers
+    assert saved["agenthubPeerToken"] in peers
     assert Path(str(result["backup"])).is_file()

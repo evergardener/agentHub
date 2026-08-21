@@ -64,7 +64,7 @@ def test_write_op_requires_approval(env):
     r = client.post("/a2a", json=_send("在工作区创建文件 x.md", agent="codex"))
     task = r.json()["result"]
     assert task["status"]["state"] == "input-required"
-    assert "批准" in task["status"]["message"]
+    assert "批准" in task["status"]["message"]["parts"][0]["text"]
     assert not delegated  # 未委派
 
 

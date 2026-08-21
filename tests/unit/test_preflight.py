@@ -17,6 +17,7 @@ def _secure_env() -> str:
     return "\n".join([
         "LAS_LLM_API_KEY=" + "l" * 32,
         "LAS_GATEWAY_API_KEY=" + "g" * 48,
+        "LAS_HERMES_GATEWAY_API_KEY=" + "h" * 48,
         "LAS_PG_PASSWORD=" + "p" * 32,
         "LAS_ADAPTER_TOKEN=" + "a" * 48,
         "LAS_ACTION_RECEIPT_SECRET=" + "r" * 64,
@@ -163,12 +164,14 @@ def test_dsh_production_route_must_be_explicitly_enabled(tmp_path):
     assert {item.key for item in findings} == {"LAS_DSH_PRODUCTION_ENABLED"}
 
 
-def test_dsh_peer_route_is_allowed_with_verified_production_config(tmp_path):
+def test_unified_peer_is_allowed_with_verified_production_config(tmp_path):
     token = "d" * 48
-    peers = json.dumps({token: {"peer": "reviewer", "worker": "dsh"}})
+    peers = json.dumps({token: {"peer": "qishuo"}})
     env_file = tmp_path / ".env"
     env_file.write_text(_secure_env().replace(
-        "LAS_A2A_PEERS=", f"LAS_A2A_PEERS={peers}"), encoding="utf-8")
+        "LAS_A2A_PEERS=", f"LAS_A2A_PEERS={peers}").replace(
+        "LAS_HERMES_GATEWAY_API_KEY=" + "h" * 48,
+        "LAS_HERMES_GATEWAY_API_KEY=" + token), encoding="utf-8")
     env_file.chmod(0o600)
     findings = check_production_env(env_file)
     assert findings == []
@@ -187,12 +190,9 @@ def test_agent_catalog_requires_release_candidate_enablement(tmp_path):
         "config/agents.yaml:dsh.enabled"]
 
 
-def test_kimi_peer_and_production_flag_remain_blocked(tmp_path):
-    token = "k" * 48
-    peers = json.dumps({token: {"peer": "frontend", "worker": "kimi"}})
+def test_kimi_production_flag_remains_blocked(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(_secure_env().replace(
-        "LAS_A2A_PEERS=", f"LAS_A2A_PEERS={peers}").replace(
         "LAS_KIMI_PRODUCTION_ENABLED=false",
         "LAS_KIMI_PRODUCTION_ENABLED=true"), encoding="utf-8")
     env_file.chmod(0o600)

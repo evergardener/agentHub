@@ -270,20 +270,15 @@ def validate_alert_webhook(url: str, token: str = "") -> None:
         raise ValueError("LAS_ALERT_WEBHOOK_TOKEN 至少 16 个字符")
 
 
-# peer→worker 固定映射允许的 worker 白名单（Hermes 接入约定，
-# 新增 worker 需在此显式放行，防止外部总控 fan-out 到未约定的执行体）。
-ALLOWED_PEER_WORKERS = frozenset({"codex", "kimi", "dsh"})
-
-
 def a2a_peers() -> dict[str, dict[str, str]]:
-    """orchestrator A2A v1.0 Bearer peer 映射：token → {peer, worker}。
+    """orchestrator A2A v1.0 Bearer caller 映射：token → {peer}。
 
     LAS_A2A_PEERS 为单行 JSON：
-      {"<token>": {"peer": "qishuo-codex", "worker": "codex"}, ...}
+      {"<token>": {"peer": "qishuo"}, ...}
 
-    每个 token 代表一个外部总控（hermes）注册的逻辑 peer，服务端依据
-    认证 identity 固定路由到指定 worker——不信任请求体自称的
-    metadata.agent。worker 仅允许 ALLOWED_PEER_WORKERS 内的值。
+    token 只标识外部总控（Hermes），不绑定 worker。可用 Agent 由
+    agentHub Registry 的实时心跳、启停策略和 Profile 共同决定；因此新增
+    Agent 不需改 Hermes peer 或本配置的 worker 白名单。
     空 = 未配置任何 peer（此时仅 legacy X-Agent-Token 可用）。
     配置畸形直接抛 ValueError：安全相关配置必须启动即失败，不静默降级。
     """
@@ -297,18 +292,17 @@ def a2a_peers() -> dict[str, dict[str, str]]:
     except json.JSONDecodeError as e:
         raise ValueError(f"LAS_A2A_PEERS 不是合法 JSON: {e}") from e
     if not isinstance(data, dict):
-        raise ValueError("LAS_A2A_PEERS 必须是 {token: {peer, worker}} 字典")
+        raise ValueError("LAS_A2A_PEERS 必须是 {token: {peer}} 字典")
     peers: dict[str, dict[str, str]] = {}
     for token, meta in data.items():
         if not token or not isinstance(meta, dict):
-            raise ValueError("LAS_A2A_PEERS 每项必须是 token: {peer, worker}")
-        peer, worker = str(meta.get("peer", "")).strip(), str(
-            meta.get("worker", "")).strip()
-        if not peer or worker not in ALLOWED_PEER_WORKERS:
+            raise ValueError("LAS_A2A_PEERS 每项必须是 token: {peer}")
+        peer = str(meta.get("peer", "")).strip()
+        if not peer or "worker" in meta:
             raise ValueError(
                 f"LAS_A2A_PEERS 项 {peer or token[:6] + '…'} 非法："
-                f"peer 必填，worker 仅允许 {sorted(ALLOWED_PEER_WORKERS)}")
-        peers[token] = {"peer": peer, "worker": worker}
+                "peer 必填且不得绑定 worker")
+        peers[token] = {"peer": peer}
     return peers
 
 

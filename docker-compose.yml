@@ -136,6 +136,7 @@ services:
     environment:
       # 在 .env 里配置 LAS_GATEWAY_API_KEY；留空则 gateway 拒绝所有请求
       GATEWAY_API_KEY: ${LAS_GATEWAY_API_KEY:-}
+      HERMES_GATEWAY_API_KEY: ${LAS_HERMES_GATEWAY_API_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"   # 访问宿主机 worker
     ports:
@@ -160,9 +161,10 @@ services:
       LAS_GATEWAY_API_KEY: ${LAS_GATEWAY_API_KEY:-}
       LAS_API_TOKEN: ${LAS_API_TOKEN:-}
       LAS_ADAPTER_TOKEN: ${LAS_ADAPTER_TOKEN:-}
-      LAS_A2A_PEERS: ${LAS_A2A_PEERS:-}   # hermes peer token→worker 映射（JSON）
+      LAS_A2A_PEERS: ${LAS_A2A_PEERS:-}   # hermes caller token→peer 映射（JSON）
       LAS_ORCH_REQUIRE_AUTH: "true"
       LAS_ORCH_BIND: 0.0.0.0   # 容器内监听；宿主映射收 loopback
+      LAS_ORCH_PUBLIC_URL: http://127.0.0.1:8300/agenthub
     ports:
       - "127.0.0.1:8310:8310"
     depends_on:
