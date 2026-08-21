@@ -1,5 +1,8 @@
 # Hermes 原生 A2A ↔ agentHub 接入开发交接
 
+> **已废弃（2026-08-21）**：固定 peer→worker 过渡方案仅供历史审计。
+> 当前生产契约见 `Hermes_AgentHub_Profile_Integration.md`。
+
 - 状态：proposed
 - 日期：2026-08-18
 - 目标：不用 MCP。通过 Hermes 已实现的原生 A2A client tools 接入 local-agent-system（agentHub）。

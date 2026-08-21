@@ -124,7 +124,8 @@ python3 scripts/rotate-postgres-password.py \
 | `LAS_PG_PASSWORD` | PostgreSQL 密码；**已有数据卷时改它会导致认证失败**（见 §6.2） |
 | `LAS_ADAPTER_TOKEN` | 留空即可——worker 首启自动生成随机值回写本文件 |
 | `LAS_ACTION_RECEIPT_SECRET` | ActionIntent receipt HMAC 密钥；生产用 `openssl rand -hex 32` 独立生成；暂时可回退 adapter token |
-| `LAS_API_TOKEN` / `LAS_A2A_PEERS` | 外部 Hermes A2A 身份；至少配置一项（或由 API token 回退到 adapter token），compose 无认证会拒绝启动 |
+| `LAS_API_TOKEN` / `LAS_A2A_PEERS` | 外部 Hermes A2A 身份；`LAS_A2A_PEERS` 是 token→peer，不绑定 worker |
+| `LAS_HERMES_GATEWAY_API_KEY` | qishuo 访问 gateway `/agenthub` 的 token；必须同时是 `LAS_A2A_PEERS` 的 key |
 | `LAS_WEBUI_TOKENS` | WebUI 登录 token→role JSON；token 用 `openssl rand -hex 24` 生成，role 为 `viewer` / `operator` / `admin` |
 | `LAS_WEBUI_SESSION_SECRET` | WebUI 签名 session cookie 的独立 HMAC 密钥，使用 `openssl rand -hex 32`；未配置时 WebUI 拒绝启动 |
 | `LAS_ADAPTER_BIND` | worker 监听地址，默认 `127.0.0.1`；需容器回连时加宿主机 LAN IP |
@@ -170,10 +171,10 @@ Orchestrator 的 `/ready` 会验证数据库，agentgateway 则验证监听端�
 入口：
 - Web UI（看板/审批/事件流/复审记录）：http://127.0.0.1:18070；首次打开输入 `.env` 中某个 `LAS_WEBUI_TOKENS` key
 - Jaeger：http://127.0.0.1:16686
-- **外部总控 A2A 端点**（自建 hermes 接入）：http://127.0.0.1:8310，
+- **外部总控 A2A 端点**（qishuo 生产接入）：http://127.0.0.1:8300/agenthub，
   契约见 [docs/orchestrator-a2a.md](orchestrator-a2a.md)。支持 A2A v1.0
-  `SendMessage`（Bearer peer token，`LAS_A2A_PEERS` 配置 peer→worker
-  固定映射）与 legacy `message/send`（`X-Agent-Token`，`LAS_API_TOKEN`
+  `SendMessage`（Bearer caller token，Registry 动态发现 worker）与
+  legacy `message/send`（`X-Agent-Token`，`LAS_API_TOKEN`
   回退 `LAS_ADAPTER_TOKEN`）；审批走 `tasks/approve` / `tasks/reject`
 - 与 hermes 对话（二选一）：
   - 容器模式：`docker compose run --rm agentctl chat`
@@ -464,10 +465,11 @@ offline，检查 WebSocket 426 修复后的 Adapter 版本、standard preset、r
 `disabled` 不是 `offline`：前者是人工策略门禁，即使 Adapter 仍发送有效心跳也
 不会恢复在线或参与路由；后者表示已启用但当前租约过期。
 
-### 6.6 委派非 codex/kimi 的 agent 失败
-gateway 路由表（`infra/agentgateway/config.docker.yaml`）目前只静态映射
-codex/kimi/dsh。临时绕过：`LAS_GATEWAY_URL=` 置空走直连；长期方案是 gateway
-动态路由（见 Evolution v3 §8.2）。
+### 6.6 新 Agent 不能委派
+
+不要给 qishuo 或 gateway 添加 Agent 专用路由。检查 Adapter 心跳、Registry
+租约、人工 enabled 开关和 Agent Profile。gateway `/agents/{id}` 是通配路由，
+目标 endpoint 由 Registry 解析。
 
 ## 7. 备份
 

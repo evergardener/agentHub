@@ -1,5 +1,8 @@
 # Hermes Phase B 接入指令 — agentHub A2A peer 注册与联调
 
+> **已废弃（2026-08-21）**：每 worker peer/token 已被单一 `agenthub` peer +
+> Registry 动态发现取代。生产请使用 `Hermes_AgentHub_Profile_Integration.md`。
+
 - 状态：ready（agentHub 侧 Phase A 已上线，commit `5ec68f2`）
 - 日期：2026-08-18
 - 前置文档：`Hermes_Native_A2A_Integration_Handoff.md`（§4/§5 已在 agentHub 侧落地）
