@@ -37,6 +37,10 @@ routes:
       requestTimeout: 900s
   backends:
   - host: 127.0.0.1:8310
+    policies:
+      backendAuth:
+        key:
+          value: "$HERMES_BACKEND_TOKEN"
 
 - name: agenthub-dynamic-workers
   matches:
@@ -58,3 +62,7 @@ routes:
       requestTimeout: 900s
   backends:
   - host: 127.0.0.1:8310
+    policies:
+      backendAuth:
+        key:
+          value: "$GATEWAY_API_KEY"

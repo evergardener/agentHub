@@ -37,9 +37,10 @@ a2a_agents:
 ```
 
 profile `.env` 仅保存 `AGENTHUB_A2A_TOKEN`，权限必须为 `0600`。token 值与
-agentHub `.env` 的 `LAS_HERMES_GATEWAY_API_KEY` 一致，并作为
-`LAS_A2A_PEERS` 中 `{ "peer": "qishuo" }` 的 key。不在文档、日志或
-shell 历史中打印 token。
+agentHub `.env` 的 `LAS_HERMES_GATEWAY_API_KEY` 一致。gateway 使用独立的
+`LAS_HERMES_BACKEND_TOKEN` 访问 Orchestrator，它才是 `LAS_A2A_PEERS` 中
+`{ "peer": "qishuo" }` 的 key，不得写入 qishuo。不在文档、日志或 shell
+历史中打印任一 token。
 
 ## Hermes 调用契约
 

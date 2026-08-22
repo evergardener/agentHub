@@ -77,8 +77,8 @@ def initialize(
     web_tokens[admin_token] = "admin"
 
     peers = _valid_peers(current.get("LAS_A2A_PEERS", ""))
-    hermes_token = next(iter(peers), None) or _token(24)
-    peers = {hermes_token: {"peer": "qishuo"}}
+    hermes_backend_token = next(iter(peers), None) or _token(24)
+    peers = {hermes_backend_token: {"peer": "qishuo"}}
 
     def existing_or(key: str, bytes_count: int) -> str:
         value = current.get(key, "")
@@ -98,7 +98,9 @@ def initialize(
         "LAS_DSH_AGENT_PRESET": "standard",
         "LAS_KIMI_PRODUCTION_ENABLED": "false",
         "LAS_GATEWAY_API_KEY": existing_or("LAS_GATEWAY_API_KEY", 24),
-        "LAS_HERMES_GATEWAY_API_KEY": hermes_token,
+        "LAS_HERMES_GATEWAY_API_KEY": existing_or(
+            "LAS_HERMES_GATEWAY_API_KEY", 24),
+        "LAS_HERMES_BACKEND_TOKEN": hermes_backend_token,
         "LAS_ADAPTER_TOKEN": existing_or("LAS_ADAPTER_TOKEN", 24),
         "LAS_ACTION_RECEIPT_SECRET": existing_or(
             "LAS_ACTION_RECEIPT_SECRET", 32),
@@ -114,7 +116,7 @@ def initialize(
     credentials_path.parent.mkdir(parents=True, exist_ok=True)
     credentials_path.write_text(json.dumps({
         "webuiAdminToken": admin_token,
-        "agenthubPeerToken": hermes_token,
+        "qishuoGatewayToken": updates["LAS_HERMES_GATEWAY_API_KEY"],
         "webuiUrl": "http://127.0.0.1:18070",
         "note": "owner-readable bootstrap credentials; move to your secret store",
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

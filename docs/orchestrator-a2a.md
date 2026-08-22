@@ -23,11 +23,12 @@ agentgateway 处理认证、ACL、限流、超时、重试和观测。Registry �
 |---|---|---|
 | `/agenthub/**` | `LAS_HERMES_GATEWAY_API_KEY` | 只允许 `role=hermes` |
 | `/agents/**` | `LAS_GATEWAY_API_KEY` | 只允许 `role=orchestrator` |
-| Orchestrator A2A | `LAS_A2A_PEERS` 中的同一 Hermes token | token→peer，不绑 worker |
+| Orchestrator A2A | gateway 注入 `LAS_HERMES_BACKEND_TOKEN` | token→peer，不绑 worker |
 | Adapter | `LAS_ADAPTER_TOKEN` | 由 Registry 动态代理透传 |
 
-qishuo token 同时是 `LAS_HERMES_GATEWAY_API_KEY` 和 `LAS_A2A_PEERS` 的
-key。内部 orchestrator token 不得交给 qishuo，否则会破坏 worker 路由隔离。
+qishuo 只持有 `LAS_HERMES_GATEWAY_API_KEY`。gateway 验证该身份后删除/替换
+外部 Authorization，以 `LAS_HERMES_BACKEND_TOKEN` 访问 Orchestrator；后者是
+`LAS_A2A_PEERS` 的 key，不得交给 qishuo。两枚 token 必须不同。
 
 ## Agent Card
 

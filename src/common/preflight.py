@@ -287,13 +287,21 @@ def check_production_env(
     if len(hermes_gateway_token) < 24:
         findings.append(Finding(
             "error", "LAS_HERMES_GATEWAY_API_KEY", "Hermes gateway token 至少 24 字符"))
+    hermes_backend_token = env.get("LAS_HERMES_BACKEND_TOKEN", "")
+    if len(hermes_backend_token) < 24:
+        findings.append(Finding(
+            "error", "LAS_HERMES_BACKEND_TOKEN", "Hermes backend token 至少 24 字符"))
+    elif hermes_backend_token == hermes_gateway_token:
+        findings.append(Finding(
+            "error", "LAS_HERMES_BACKEND_TOKEN",
+            "gateway 外部身份与 orchestrator 内部身份必须分离"))
     elif raw_peers:
         try:
             peers = json.loads(raw_peers)
-            if hermes_gateway_token not in peers:
+            if hermes_backend_token not in peers:
                 findings.append(Finding(
-                    "error", "LAS_HERMES_GATEWAY_API_KEY",
-                    "gateway 与 orchestrator 必须共用同一 qishuo identity token"))
+                    "error", "LAS_HERMES_BACKEND_TOKEN",
+                    "orchestrator 内部 token 必须是 LAS_A2A_PEERS 的 key"))
         except json.JSONDecodeError:
             pass
 

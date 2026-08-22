@@ -43,11 +43,15 @@ def migrate(env_path: Path, backup_root: Path) -> dict[str, str]:
     token = current.get("LAS_HERMES_GATEWAY_API_KEY", "")
     if len(token) < 48:
         token = secrets.token_hex(24)
+    backend_token = current.get("LAS_HERMES_BACKEND_TOKEN", "")
+    if len(backend_token) < 48 or backend_token == token:
+        backend_token = secrets.token_hex(24)
     peers = json.dumps(
-        {token: {"peer": "qishuo"}},
+        {backend_token: {"peer": "qishuo"}},
         ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     set_values(env_path, {
         "LAS_HERMES_GATEWAY_API_KEY": token,
+        "LAS_HERMES_BACKEND_TOKEN": backend_token,
         "LAS_A2A_PEERS": peers,
     })
     os.chmod(env_path, stat.S_IRUSR | stat.S_IWUSR)

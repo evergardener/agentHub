@@ -137,6 +137,7 @@ services:
       # 在 .env 里配置 LAS_GATEWAY_API_KEY；留空则 gateway 拒绝所有请求
       GATEWAY_API_KEY: ${LAS_GATEWAY_API_KEY:-}
       HERMES_GATEWAY_API_KEY: ${LAS_HERMES_GATEWAY_API_KEY:-}
+      HERMES_BACKEND_TOKEN: ${LAS_HERMES_BACKEND_TOKEN:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"   # 访问宿主机 worker
     ports:

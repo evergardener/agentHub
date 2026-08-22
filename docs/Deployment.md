@@ -125,7 +125,8 @@ python3 scripts/rotate-postgres-password.py \
 | `LAS_ADAPTER_TOKEN` | 留空即可——worker 首启自动生成随机值回写本文件 |
 | `LAS_ACTION_RECEIPT_SECRET` | ActionIntent receipt HMAC 密钥；生产用 `openssl rand -hex 32` 独立生成；暂时可回退 adapter token |
 | `LAS_API_TOKEN` / `LAS_A2A_PEERS` | 外部 Hermes A2A 身份；`LAS_A2A_PEERS` 是 token→peer，不绑定 worker |
-| `LAS_HERMES_GATEWAY_API_KEY` | qishuo 访问 gateway `/agenthub` 的 token；必须同时是 `LAS_A2A_PEERS` 的 key |
+| `LAS_HERMES_GATEWAY_API_KEY` | qishuo 访问 gateway `/agenthub` 的外部 token |
+| `LAS_HERMES_BACKEND_TOKEN` | gateway 注入 Orchestrator 的内部 token；是 `LAS_A2A_PEERS` 的 key，不交给 qishuo |
 | `LAS_WEBUI_TOKENS` | WebUI 登录 token→role JSON；token 用 `openssl rand -hex 24` 生成，role 为 `viewer` / `operator` / `admin` |
 | `LAS_WEBUI_SESSION_SECRET` | WebUI 签名 session cookie 的独立 HMAC 密钥，使用 `openssl rand -hex 32`；未配置时 WebUI 拒绝启动 |
 | `LAS_ADAPTER_BIND` | worker 监听地址，默认 `127.0.0.1`；需容器回连时加宿主机 LAN IP |

@@ -18,6 +18,7 @@ def _secure_env() -> str:
         "LAS_LLM_API_KEY=" + "l" * 32,
         "LAS_GATEWAY_API_KEY=" + "g" * 48,
         "LAS_HERMES_GATEWAY_API_KEY=" + "h" * 48,
+        "LAS_HERMES_BACKEND_TOKEN=" + "b" * 48,
         "LAS_PG_PASSWORD=" + "p" * 32,
         "LAS_ADAPTER_TOKEN=" + "a" * 48,
         "LAS_ACTION_RECEIPT_SECRET=" + "r" * 64,
@@ -170,8 +171,8 @@ def test_unified_peer_is_allowed_with_verified_production_config(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(_secure_env().replace(
         "LAS_A2A_PEERS=", f"LAS_A2A_PEERS={peers}").replace(
-        "LAS_HERMES_GATEWAY_API_KEY=" + "h" * 48,
-        "LAS_HERMES_GATEWAY_API_KEY=" + token), encoding="utf-8")
+        "LAS_HERMES_BACKEND_TOKEN=" + "b" * 48,
+        "LAS_HERMES_BACKEND_TOKEN=" + token), encoding="utf-8")
     env_file.chmod(0o600)
     findings = check_production_env(env_file)
     assert findings == []

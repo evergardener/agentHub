@@ -42,6 +42,10 @@ routes:
       codes: [502, 503]
   backends:
   - host: orchestrator:8310
+    policies:
+      backendAuth:
+        key:
+          value: "$HERMES_BACKEND_TOKEN"
 
 - name: agenthub-dynamic-workers
   matches:
@@ -67,3 +71,7 @@ routes:
       codes: [502, 503]
   backends:
   - host: orchestrator:8310
+    policies:
+      backendAuth:
+        key:
+          value: "$GATEWAY_API_KEY"

@@ -24,16 +24,20 @@ def test_migration_backs_up_and_replaces_worker_bound_peers(tmp_path):
     env.chmod(0o600)
     result = MODULE.migrate(env, tmp_path / "backups")
     values = parse_env(env)
-    token = values["LAS_HERMES_GATEWAY_API_KEY"]
-    assert len(token) == 48
+    gateway_token = values["LAS_HERMES_GATEWAY_API_KEY"]
+    backend_token = values["LAS_HERMES_BACKEND_TOKEN"]
+    assert len(gateway_token) == len(backend_token) == 48
+    assert gateway_token != backend_token
     assert json.loads(values["LAS_A2A_PEERS"]) == {
-        token: {"peer": "qishuo"}}
+        backend_token: {"peer": "qishuo"}}
     assert values["KEEP"] == "value"
     backup = Path(result["backup"])
     assert stat.S_IMODE(backup.stat().st_mode) == 0o700
     assert stat.S_IMODE(
         (backup / "agenthub.env.before").stat().st_mode) == 0o600
-    assert token not in (backup / "manifest.json").read_text()
+    manifest_text = (backup / "manifest.json").read_text()
+    assert gateway_token not in manifest_text
+    assert backend_token not in manifest_text
 
     restored = MODULE.rollback(env, backup)
     assert restored["restored"] == str(env)
@@ -42,3 +46,4 @@ def test_migration_backs_up_and_replaces_worker_bound_peers(tmp_path):
     assert json.loads(values["LAS_A2A_PEERS"]) == {
         old_token: {"peer": "qishuo-dsh", "worker": "dsh"}}
     assert "LAS_HERMES_GATEWAY_API_KEY" not in values
+    assert "LAS_HERMES_BACKEND_TOKEN" not in values
