@@ -30,6 +30,18 @@ def test_read_auto_approved(policy, conn):
     assert d.action == "auto" and d.risk == "read"
 
 
+def test_english_read_only_objective_is_auto_approved(policy, conn):
+    d = policy.decide(
+        conn, "Strictly read-only inspection: check Git status and report it; "
+              "do not modify any files")
+    assert d.action == "auto" and d.risk == "read"
+
+
+def test_english_write_requires_approval(policy, conn):
+    d = policy.decide(conn, "Modify the runtime")
+    assert d.action == "ask" and d.risk == "write"
+
+
 def test_write_needs_approval_without_grant(policy, conn):
     d = policy.decide(conn, "重启 nginx")
     assert d.action == "ask" and d.risk == "write"

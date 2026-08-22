@@ -176,6 +176,42 @@ def test_approve_and_reject(client):
     assert client.post("/api/tasks/T-2/reject", json={}).status_code == 409
 
 
+def test_predelegation_approval_is_listed_and_can_be_approved(
+        client, monkeypatch):
+    from common.models import TaskStatus
+    from orchestrator import state_store
+    from orchestrator.task_manager import TaskManager
+    from state.db import connect
+
+    conn = connect()
+    state_store.create_task(
+        conn, task_id="T-3", objective="modify config", created_by="qishuo",
+        status=TaskStatus.QUEUED)
+    state_store.record_event(conn, {
+        "event_id": "approval-T-3",
+        "event_type": "task.approval_requested", "task_id": "T-3",
+        "payload": {"agent_id": "codex", "endpoint": "http://x:8201",
+                    "risk": "write", "reason": "test"},
+    })
+    conn.close()
+
+    async def fake_delegate(self, task_id, endpoint, agent_id, attempt=1):
+        state_store.transition_task(self.conn, task_id, TaskStatus.ASSIGNED)
+
+    monkeypatch.setattr(TaskManager, "delegate_task", fake_delegate)
+    approvals = client.get("/api/approvals").json()["tasks"]
+    pending = next(item for item in approvals if item["id"] == "T-3")
+    assert pending["status"] == "input_required"
+    assert pending["approval_kind"] == "delegation"
+
+    approved = client.post(
+        "/api/tasks/T-3/approve", json={"notes": "approved once"})
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "assigned"
+    assert "T-3" not in {
+        item["id"] for item in client.get("/api/approvals").json()["tasks"]}
+
+
 def test_grants_api(client):
     r = client.post("/api/grants", json={"pattern": "重启"}).json()
     assert r["grant_id"] >= 1

@@ -1,6 +1,6 @@
 # qishuo Hermes → agentHub 生产接入
 
-状态：2026-08-21 单一 Hub peer 契约。
+状态：2026-08-22 单一 Hub peer 契约。
 
 ## 边界
 
@@ -51,9 +51,14 @@ qishuo 原生 `a2a_call` 不提供自定义 `metadata.agent`，因此 agentHub
 1. `agents/list`；
 2. Hermes 根据用户预设、能力、enabled/online 状态选择 Agent；
 3. `tasks/create` 传递未总结的完整 objective；
-4. `input-required` 时向用户请求批准；
-5. 使用同一 `context_id` 调用 `tasks/get/approve/reject`；
-6. 核对终态、产物和审计记录后汇报。
+4. 从可见状态消息保存 `task_id=T-...`（Hermes renderer 可能不展示结构化
+   `task.id`）；
+5. `input-required` 时向用户请求批准，也可在 WebUI 审批中心处理；
+6. 使用同一 `context_id` 调用 `tasks/get/approve/reject`；
+7. 核对终态、产物和审计记录后汇报。
+
+WebUI 审批中心同时列出委派前的 queued/input-required 门禁与 worker 已运行后
+产生的 blocked 原生审批；两者使用同一批准/拒绝按钮，但审计事件保留来源。
 
 Kimi 停用时，`agents/list` 会标记 `enabled=false`；如用户仍指定 Kimi，
 `tasks/create` 稳定返回 `agent disabled` 与需用户确认的说明，不探测、

@@ -738,6 +738,57 @@ class TaskManager:
 
     # ---------- 审批（§5.4 input-required 闭环） ----------
 
+    def pending_delegation_approval(self, task_id: str) -> dict | None:
+        """Return the latest pre-delegation approval gate, if still pending."""
+        row = state_store.get_task(self.conn, task_id)
+        if row is None or row["status"] not in {
+                TaskStatus.CREATED.value, TaskStatus.QUEUED.value}:
+            return None
+        event = self.conn.execute(
+            "SELECT event_type, payload_json FROM events WHERE task_id = ?"
+            " AND event_type IN (?,?,?) ORDER BY seq DESC LIMIT 1;",
+            (task_id, "task.approval_requested", "task.approved",
+             "task.rejected"),
+        ).fetchone()
+        if event is None or event["event_type"] != "task.approval_requested":
+            return None
+        return json.loads(event["payload_json"] or "{}")
+
+    async def approve_task_request(
+            self, task_id: str, *, notes: str = "", decided_by: str = "user",
+            via: str = "webui") -> str:
+        """Approve either a queued delegation gate or a blocked native turn."""
+        pending = self.pending_delegation_approval(task_id)
+        if pending is None:
+            return self.approve_task(task_id, notes=notes)
+        agent_id = pending.get("agent_id")
+        endpoint = pending.get("endpoint")
+        if not agent_id or not endpoint:
+            raise ValueError("pending delegation approval is incomplete")
+        state_store.record_event(self.conn, {
+            "event_id": f"approval-{task_id}-{uuid.uuid4().hex[:8]}",
+            "event_type": "task.approved", "task_id": task_id,
+            "payload": {"by": decided_by, "via": via, "notes": notes},
+        })
+        await self.delegate_task(task_id, endpoint, agent_id)
+        row = state_store.get_task(self.conn, task_id)
+        return row["status"]
+
+    async def reject_task_request(
+            self, task_id: str, *, notes: str = "", decided_by: str = "user",
+            via: str = "webui") -> str:
+        """Reject either a queued delegation gate or a blocked native turn."""
+        pending = self.pending_delegation_approval(task_id)
+        if pending is None:
+            return self.reject_task(task_id, notes=notes)
+        state_store.record_event(self.conn, {
+            "event_id": f"rejection-{task_id}-{uuid.uuid4().hex[:8]}",
+            "event_type": "task.rejected", "task_id": task_id,
+            "payload": {"by": decided_by, "via": via, "notes": notes},
+        })
+        state_store.transition_task(self.conn, task_id, TaskStatus.CANCELLED)
+        return TaskStatus.CANCELLED.value
+
     def approve_task(self, task_id: str, *, notes: str = "") -> str:
         """blocked（A2A input-required）→ working：用户批准继续。"""
         row = state_store.get_task(self.conn, task_id)

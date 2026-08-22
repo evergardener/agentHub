@@ -4,7 +4,7 @@
   Dashboard   Agent 在线状态/租约 + 任务按状态计数
   任务列表/详情  状态时间线、runs、artifacts、关联事件
   事件流      /api/events/stream（SSE，seq 游标轮询）
-  审批中心    blocked 任务批准/拒绝；常驻授权（grants）管理
+  审批中心    委派前门禁与 blocked 原生任务批准/拒绝；常驻授权管理
 
 生产支持 token 登录、签名 HttpOnly session cookie、CSRF 与 RBAC。启动：
   python -m webui.server   # LAS_WEBUI_HOST/PORT 可覆盖（默认 127.0.0.1:8080）
@@ -374,6 +374,32 @@ def create_app() -> FastAPI:
         finally:
             conn.close()
 
+    @app.get("/api/approvals")
+    def approvals(limit: int = 200):
+        """List both pre-delegation gates and blocked native agent turns."""
+        conn = _conn()
+        try:
+            rows = _rows(conn.execute(
+                "SELECT t.* FROM tasks t WHERE t.status = 'blocked' OR ("
+                " t.status IN ('created','queued') AND"
+                " (SELECT e.event_type FROM events e"
+                "  WHERE e.task_id = t.id AND e.event_type IN (?,?,?)"
+                "  ORDER BY e.seq DESC LIMIT 1) = ?"
+                ") ORDER BY t.created_at DESC LIMIT ?;",
+                ("task.approval_requested", "task.approved",
+                 "task.rejected", "task.approval_requested",
+                 min(max(int(limit), 1), 500)),
+            ))
+            for row in rows:
+                if row["status"] in {"created", "queued"}:
+                    row["status"] = "input_required"
+                    row["approval_kind"] = "delegation"
+                else:
+                    row["approval_kind"] = "native"
+            return {"tasks": rows}
+        finally:
+            conn.close()
+
     @app.get("/api/tasks/{task_id}")
     def task_detail(task_id: str):
         from orchestrator.state_store import get_task
@@ -688,13 +714,14 @@ def create_app() -> FastAPI:
             tm.close()
 
     @app.post("/api/tasks/{task_id}/approve")
-    def approve(task_id: str, body: dict | None = None):
+    async def approve(task_id: str, body: dict | None = None):
         from orchestrator.task_manager import TaskManager
 
         tm = TaskManager()
         try:
-            status = tm.approve_task(
-                task_id, notes=(body or {}).get("notes", "webui"))
+            status = await tm.approve_task_request(
+                task_id, notes=(body or {}).get("notes", "webui"),
+                decided_by="user", via="webui")
             return {"task_id": task_id, "status": status}
         except Exception as e:
             return JSONResponse({"error": f"{type(e).__name__}: {e}"},
@@ -703,13 +730,14 @@ def create_app() -> FastAPI:
             tm.close()
 
     @app.post("/api/tasks/{task_id}/reject")
-    def reject(task_id: str, body: dict | None = None):
+    async def reject(task_id: str, body: dict | None = None):
         from orchestrator.task_manager import TaskManager
 
         tm = TaskManager()
         try:
-            status = tm.reject_task(
-                task_id, notes=(body or {}).get("notes", "webui"))
+            status = await tm.reject_task_request(
+                task_id, notes=(body or {}).get("notes", "webui"),
+                decided_by="user", via="webui")
             return {"task_id": task_id, "status": status}
         except Exception as e:
             return JSONResponse({"error": f"{type(e).__name__}: {e}"},

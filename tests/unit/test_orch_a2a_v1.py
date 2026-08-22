@@ -113,6 +113,8 @@ def test_task_response_is_native_hermes_readable(env):
     task = response["result"]["task"]
     assert task["status"]["state"] == "submitted"
     assert task["status"]["message"]["role"] == "agent"
+    text = task["status"]["message"]["parts"][0]["text"]
+    assert f"task_id={task['id']}" in text
     assert task["contextId"] == "ctx-live"
     assert delegated == [(task["id"], "codex")]
 
@@ -134,6 +136,8 @@ def test_approval_and_get_work_through_same_peer(env):
                               objective="在工作区创建 x.md"),
         headers=_bearer()).json()["result"]["task"]
     assert created["status"]["state"] == "input-required"
+    text = created["status"]["message"]["parts"][0]["text"]
+    assert f"task_id={created['id']}" in text
     assert not delegated
 
     approved = client.post(
@@ -158,6 +162,28 @@ def test_auth_and_card_contract(env):
     assert card["supportedInterfaces"][0]["protocolVersion"] == "1.0"
     assert {item["id"] for item in card["skills"]} >= {
         "orchestrate", "registry-discovery", "approval-gate"}
+
+
+def test_worker_proxy_treats_adapter_token_as_downstream_credential(
+        env, monkeypatch):
+    tm, _, _ = env
+    gateway_token = "test-gateway-token-0123456789"
+    monkeypatch.setenv("LAS_GATEWAY_API_KEY", gateway_token)
+    client = TestClient(create_app(tm=tm, policy=ApprovalPolicy()))
+    headers = {
+        "Authorization": f"Bearer {gateway_token}",
+        "X-Agent-Token": "different-downstream-adapter-token",
+    }
+    # Authentication reaches registry resolution instead of rejecting the
+    # intentionally different downstream adapter credential as a conflict.
+    response = client.get("/worker-proxy/not-registered/health",
+                          headers=headers)
+    assert response.status_code == 503
+    assert "unknown agent" in response.json()["error"]
+    # The exception is narrowly scoped: normal control-plane routes continue
+    # to reject conflicting identity headers.
+    assert client.post("/a2a", json=_control("agents/list"),
+                       headers=headers).status_code == 401
 
 
 def test_legacy_metadata_agent_remains_compatible(env):

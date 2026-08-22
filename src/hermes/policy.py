@@ -12,6 +12,7 @@ fail-closed 原则要求批准，不能默认视为只读。
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,11 +24,29 @@ DEFAULT_PERMISSIONS = Path(__file__).resolve().parents[2] / "config" / "permissi
 
 # 内置兜底（permissions.yaml 缺失时）
 FALLBACK = {
-    "auto_approve": ["查询", "读取", "分析", "检索", "总结", "列出", "状态"],
+    "auto_approve": [
+        "查询", "读取", "分析", "检索", "总结", "列出", "状态",
+        "read-only", "read only", "inspect", "check", "report", "list",
+        "status", "summarize", "analyse", "analyze", "query", "review",
+    ],
     "require_user": ["修改", "写入", "创建文件", "部署", "重启", "安装",
-                     "删除文件", "提交", "推送"],
-    "never_grant": ["删除", "发布", "对外", "生产"],
+                     "删除文件", "提交", "推送", "modify", "write",
+                     "create file", "deploy", "restart", "install", "pull",
+                     "commit", "push"],
+    "never_grant": ["删除", "发布", "对外", "生产", "delete", "publish",
+                    "external"],
 }
+
+_NEGATED_ENGLISH_WRITE = re.compile(
+    r"\b(?:do not|don't|must not|never|without)\s+(?:directly\s+)?"
+    r"(?:modify|modifying|write|writing|create|creating|delete|deleting|"
+    r"deploy|deploying|restart|restarting|install|installing|pull|pulling|"
+    r"commit|committing|push|pushing|publish|publishing)\b",
+)
+_NEGATED_CHINESE_WRITE = (
+    "不要修改", "不得修改", "禁止修改", "不写入", "不得写入", "禁止写入",
+    "不删除", "不得删除", "禁止删除",
+)
 
 
 @dataclass
@@ -51,11 +70,15 @@ class ApprovalPolicy:
 
     def classify(self, objective: str) -> str:
         """按关键词粗分风险等级；未知操作 fail-closed。"""
-        if any(k in objective for k in self.never_grant):
+        normalized = objective.casefold()
+        effective = _NEGATED_ENGLISH_WRITE.sub("", normalized)
+        for phrase in _NEGATED_CHINESE_WRITE:
+            effective = effective.replace(phrase, "")
+        if any(str(k).casefold() in effective for k in self.never_grant):
             return "critical"
-        if any(k in objective for k in self.require_user):
+        if any(str(k).casefold() in effective for k in self.require_user):
             return "write"
-        if any(k in objective for k in self.auto_approve):
+        if any(str(k).casefold() in effective for k in self.auto_approve):
             return "read"
         return "unknown"
 

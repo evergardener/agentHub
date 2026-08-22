@@ -158,12 +158,16 @@ def _to_a2a(conn, row, *, context_id: str | None = None) -> dict:
     pending = _approval_pending(conn, task_id)
     if pending:
         state = "input-required"
-        message = (f"写操作需批准（risk={pending.get('risk')}）："
+        message = (f"task_id={task_id}; 写操作需批准"
+                   f"（risk={pending.get('risk')}）："
                    f"{pending.get('reason')}。拟委派 {pending.get('agent_id')}。"
                    "以 tasks/approve 放行或 tasks/reject 取消。")
     else:
         state = A2A_STATE_MAP[TaskStatus(row["status"])]
-        message = row["error_message"] or row["result_summary"] or ""
+        detail = row["error_message"] or row["result_summary"] or ""
+        message = f"task_id={task_id}; status={state}"
+        if detail:
+            message += f"; {detail}"
     artifacts = [
         {"name": a["name"], "type": a["type"], "path": a["path"]}
         for a in state_store.list_artifacts(conn, task_id)
@@ -226,6 +230,15 @@ def create_app(tm: TaskManager | None = None,
         x_tok = request.headers.get("x-agent-token")
         auth = request.headers.get("authorization", "")
         bearer = auth[7:] if auth.lower().startswith("bearer ") else None
+        # /worker-proxy carries two deliberately different credentials:
+        # Bearer authenticates agentgateway to this control plane, while
+        # X-Agent-Token is an opaque downstream adapter credential that must
+        # survive the proxy hop.  Do not compare those two identities.
+        if request.url.path.startswith("/worker-proxy/"):
+            if (bearer and gateway_token
+                    and hmac.compare_digest(bearer, gateway_token)):
+                return {"peer": "agentgateway", "kind": "gateway"}
+            return None
         if x_tok and bearer and not hmac.compare_digest(x_tok, bearer):
             return None  # 双 header 冲突，拒绝
         tok = bearer or x_tok
@@ -453,15 +466,11 @@ def create_app(tm: TaskManager | None = None,
                           f"（当前 {row['status']}）")
         word = text.strip().lower()
         if word in _APPROVE_WORDS:
-            _record("task.approved", task_id,
-                    {"by": identity["peer"], "via": "legacy-nl"})
-            await tm.delegate_task(task_id, pending["endpoint"],
-                                   pending["agent_id"])
+            await tm.approve_task_request(
+                task_id, decided_by=identity["peer"], via="legacy-nl")
         elif word in _REJECT_WORDS:
-            _record("task.rejected", task_id,
-                    {"by": identity["peer"], "via": "legacy-nl"})
-            state_store.transition_task(tm.conn, task_id,
-                                        TaskStatus.CANCELLED)
+            await tm.reject_task_request(
+                task_id, decided_by=identity["peer"], via="legacy-nl")
         else:
             return _error(rpc_id, -32602,
                           "无法解析审批意见：请回复「批准」或「拒绝」，"
@@ -484,17 +493,12 @@ def create_app(tm: TaskManager | None = None,
             return _error(rpc_id, -32602,
                           f"task {task_id} 不在待批准状态"
                           f"（当前 {row['status']}），忽略重复/晚到操作")
-        action = "approve" if approve else "reject"
         if approve:
-            _record("task.approved", task_id,
-                    {"by": identity["peer"], "via": "tasks/approve"})
-            await tm.delegate_task(task_id, pending["endpoint"],
-                                   pending["agent_id"])
+            await tm.approve_task_request(
+                task_id, decided_by=identity["peer"], via="tasks/approve")
         else:
-            _record("task.rejected", task_id,
-                    {"by": identity["peer"], "via": "tasks/reject"})
-            state_store.transition_task(tm.conn, task_id,
-                                        TaskStatus.CANCELLED)
+            await tm.reject_task_request(
+                task_id, decided_by=identity["peer"], via="tasks/reject")
         row = state_store.get_task(tm.conn, task_id)
         task = _to_a2a(tm.conn, row, context_id=context_id)
         return _result(rpc_id, {"task": task} if wrapped else task)

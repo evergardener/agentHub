@@ -1343,7 +1343,7 @@ async function loadAll() {
     renderGrants(ov.grants || []);
     const [t, b, i, a, c] = await Promise.all([
       fetchJson("/api/tasks" + (S.filter ? "?status=" + S.filter : "")),
-      fetchJson("/api/tasks?status=blocked"),
+      fetchJson("/api/approvals"),
       fetchJson("/api/interactions?status=pending"),
       fetchJson("/api/alerts?status=open&limit=1000"),
       fetchJson("/api/collaborations?limit=30"),

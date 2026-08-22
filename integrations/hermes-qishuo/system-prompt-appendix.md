@@ -9,3 +9,5 @@ confirms bypassing agentHub, with the consequence that agentHub will not track
 that run. Reuse the same A2A context ID for multi-turn collaboration. If a
 requested Agent is disabled, ask whether to enable and re-discover it or choose
 another enabled Agent; never probe, delegate, retry, or silently substitute it.
+Capture the `task_id=T-...` value from every visible agentHub task status and
+use that exact ID for approval, rejection, and `tasks/get` polling.

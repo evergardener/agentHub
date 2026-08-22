@@ -10,6 +10,18 @@ auto_approve:        # 明确命中的只读/查询类：hermes 直接批准
   - 列出
   - 状态
   - 调研
+  - read-only
+  - read only
+  - inspect
+  - check
+  - report
+  - list
+  - status
+  - summarize
+  - analyse
+  - analyze
+  - query
+  - review
 
 require_user:        # 写操作：需批准（对话内 / Web UI / 常驻授权）
   - 修改
@@ -21,11 +33,23 @@ require_user:        # 写操作：需批准（对话内 / Web UI / 常驻授权
   - 拉取
   - 提交
   - 推送
+  - modify
+  - write
+  - create file
+  - deploy
+  - restart
+  - install
+  - pull
+  - commit
+  - push
 
 never_grant:         # 高危：只允许用户逐次批准，禁止常驻授权
   - 删除
   - 发布
   - 对外
   - 生产
+  - delete
+  - publish
+  - external
 
 # 未命中以上任何关键词的操作分类为 unknown，必须请求批准（fail-closed）。

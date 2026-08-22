@@ -84,7 +84,12 @@ Orchestrator 每次从 Registry 解析 `agent`。未知、offline 或 disabled �
 ```
 
 重复、晚到或终态审批稳定失败，不重复委派。A2A Task 的
-`status.message` 是标准 Message 对象，Hermes 原生 client 可直接读取。
+`status.message` 是标准 Message 对象，并始终显式包含 `task_id=T-...`。
+这是 Hermes 原生 renderer 不展示结构化 `task.id` 时的稳定续接标识。
+
+`/agents/**` 经 Orchestrator 动态代理时同时携带两个不同用途的凭据：Bearer
+只认证 agentgateway，`X-Agent-Token` 只透传给 Adapter。Orchestrator 仅在
+`/worker-proxy/**` 接受这种双身份形状；其他控制面路径仍拒绝冲突 header。
 
 ## Context 与审计
 

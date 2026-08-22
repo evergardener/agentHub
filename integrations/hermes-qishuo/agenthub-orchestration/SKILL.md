@@ -52,6 +52,10 @@ Query a task:
 {"agenthub":"v1","action":"tasks/get","task_id":"T-..."}
 ```
 
+Every task response includes `task_id=T-...` in the visible status message.
+Capture that exact ID immediately; Hermes' native A2A renderer may omit the
+structured `task.id` field even though agentHub returned it.
+
 Approve or reject only after the user decision is clear:
 
 ```json
