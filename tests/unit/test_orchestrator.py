@@ -137,6 +137,7 @@ def test_janitor_resolves_artifact_alert_after_file_recovers(conn, tmp_path):
     conn.commit()
     janitor = Janitor.__new__(Janitor)
     janitor.conn, janitor.alerts = conn, []
+    janitor.artifact_roots = (tmp_path.resolve(),)
 
     missing = janitor.sweep()
     assert missing["artifact_alerts"] == 1
@@ -145,6 +146,31 @@ def test_janitor_resolves_artifact_alert_after_file_recovers(conn, tmp_path):
     artifact.write_text("recovered", encoding="utf-8")
     recovered = janitor.sweep()
     assert recovered["artifact_resolved"] == 1
+    assert alert_store.list_alerts(conn, status="open") == []
+
+
+def test_janitor_ignores_and_resolves_artifacts_outside_managed_roots(
+        conn, tmp_path):
+    tid = _task(conn, status=TaskStatus.COMPLETED)
+    unmanaged = tmp_path / "historical-test" / "missing.md"
+    conn.execute(
+        "INSERT INTO artifacts (id, task_id, name, type, path, sha256,"
+        " created_at) VALUES (?,?,?,?,?,?,?);",
+        ("A-outside", tid, "missing.md", "report", str(unmanaged), "abc", "now"),
+    )
+    conn.commit()
+    alert_store.upsert_alert(
+        conn, kind="artifact_missing", severity="warning", source="janitor",
+        task_id=tid, detail=str(unmanaged))
+    janitor = Janitor.__new__(Janitor)
+    janitor.conn, janitor.alerts = conn, []
+    janitor.artifact_roots = ((tmp_path / "managed").resolve(),)
+
+    stats = janitor.sweep()
+
+    assert stats["artifact_ignored"] == 1
+    assert stats["artifact_alerts"] == 0
+    assert stats["artifact_resolved"] == 1
     assert alert_store.list_alerts(conn, status="open") == []
 
 

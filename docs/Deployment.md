@@ -214,6 +214,10 @@ Janitor 的租约过期、执行超时、产物缺失，以及重试耗尽的任
 宿主 Adapter 的 `${HOME}/AgentWorkspace` 以同一绝对路径只读挂载到 janitor，
 避免容器因看不到真实文件而误报 `artifact_missing`；文件恢复可见后，对应的 open
 条件告警会由 janitor 自动转为 `resolved`，无需用户把误报逐条标记已知。
+Janitor 只对 `LAS_ARTIFACT_ROOTS` 逗号分隔的明确受管根目录执行存在性检查；
+Compose 默认为 `/data/workspace,${HOME}/AgentWorkspace`。历史测试留下的
+`/tmp` 或 macOS 临时目录路径仍保留在数据库用于审计，但不再触发生产缺失告警；
+旧的 open 误报会自动转为 `resolved`。
 若历史告警引用的任务记录已经不存在，WebUI 会保留告警及技术详情用于审计，但不再
 显示「打开任务」按钮，避免跳转到必然返回 `not found` 的页面。
 

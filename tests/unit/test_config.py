@@ -8,6 +8,7 @@ from common import config as cfg
 
 ALL_KEYS = [
     "LAS_WORKSPACE", "AGENT_WORKSPACE",
+    "LAS_ARTIFACT_ROOTS",
     "LAS_STATE_DB", "AGENT_STATE_DB",
     "LAS_NATS_URL", "NATS_URL",
     "LAS_GATEWAY_URL", "AGENT_GATEWAY_URL",
@@ -76,6 +77,19 @@ def test_gateway_jwt_file_rejects_invalid_content(monkeypatch, tmp_path, content
 def test_state_db_derived_from_workspace(monkeypatch, tmp_path):
     monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path))
     assert cfg.state_db() == tmp_path / "runtime" / "agent-state.db"
+
+
+def test_artifact_roots_default_to_workspace(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path / "workspace"))
+    assert cfg.artifact_roots() == ((tmp_path / "workspace").resolve(),)
+
+
+def test_artifact_roots_are_explicit_deduplicated_boundaries(monkeypatch, tmp_path):
+    first = tmp_path / "one"
+    second = tmp_path / "two"
+    monkeypatch.setenv(
+        "LAS_ARTIFACT_ROOTS", f"{first}, {second}, {first}")
+    assert cfg.artifact_roots() == (first.resolve(), second.resolve())
 
 
 def test_state_db_explicit(monkeypatch, tmp_path):

@@ -43,8 +43,11 @@ def test_agentctl_compose_service_preserves_cli_entrypoint_for_subcommands():
 
 def test_janitor_can_read_host_adapter_artifacts():
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
-    mounts = compose["services"]["janitor"]["volumes"]
+    janitor = compose["services"]["janitor"]
+    mounts = janitor["volumes"]
     assert "${HOME}/AgentWorkspace:${HOME}/AgentWorkspace:ro" in mounts
+    assert janitor["environment"]["LAS_ARTIFACT_ROOTS"] == (
+        "/data/workspace,${HOME}/AgentWorkspace")
 
 
 def test_release_smoke_targets_codex_and_dsh_without_kimi():

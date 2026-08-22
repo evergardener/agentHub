@@ -5,6 +5,7 @@
 
 变量一览（正式名 → 旧别名）：
   LAS_WORKSPACE         → AGENT_WORKSPACE      任务工作区根目录
+  LAS_ARTIFACT_ROOTS    （无别名）              Janitor 可检查的产物根目录（逗号分隔）
   LAS_STATE_DB          → AGENT_STATE_DB       SQLite 状态库路径
   LAS_NATS_URL          → NATS_URL             NATS 地址
   LAS_DATABASE_URL      （无别名）              postgresql://… 或 sqlite:///…
@@ -55,6 +56,29 @@ def _env(primary: str, *aliases: str, default: str = "") -> str:
 def workspace() -> Path:
     return Path(_env("LAS_WORKSPACE", "AGENT_WORKSPACE",
                      default=str(DEFAULT_WORKSPACE)))
+
+
+def artifact_roots() -> tuple[Path, ...]:
+    """Return the explicit filesystem boundary for artifact reconciliation.
+
+    Historical/test artifact rows can legitimately point outside the production
+    workspace.  Treating every database path as managed creates false alerts,
+    so Janitor only checks roots configured here.  The task workspace remains
+    the safe default for non-container deployments.
+    """
+    raw = _env("LAS_ARTIFACT_ROOTS").strip()
+    values = raw.split(",") if raw else [str(workspace())]
+    roots: list[Path] = []
+    for value in values:
+        value = value.strip()
+        if not value:
+            continue
+        root = Path(value).expanduser().resolve(strict=False)
+        if root not in roots:
+            roots.append(root)
+    if not roots:
+        raise ValueError("LAS_ARTIFACT_ROOTS 至少需要一个有效根目录")
+    return tuple(roots)
 
 
 def state_db() -> Path:

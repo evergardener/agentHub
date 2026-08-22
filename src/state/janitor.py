@@ -28,14 +28,23 @@ SWEEP_INTERVAL = float(os.environ.get("JANITOR_INTERVAL", "60"))
 
 
 class Janitor:
-    def __init__(self, db_path: str | Path | None = None):
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        *,
+        artifact_roots: tuple[Path, ...] | None = None,
+    ):
         self.conn: sqlite3.Connection = init_db(db_path)  # None → LAS_DATABASE_URL
         self.alerts: list[dict] = []
+        self.artifact_roots = tuple(
+            root.expanduser().resolve(strict=False)
+            for root in (artifact_roots or cfg.artifact_roots())
+        )
 
     def sweep(self) -> dict:
         stats = {"requeued": 0, "failed_timeout": 0,
                  "cascade_cancelled": 0, "artifact_alerts": 0,
-                 "artifact_resolved": 0}
+                 "artifact_resolved": 0, "artifact_ignored": 0}
         self._sweep_dead_leases(stats)
         self._sweep_timeouts(stats)
         self._sweep_cascade(stats)
@@ -110,10 +119,21 @@ class Janitor:
     def _sweep_artifacts(self, stats: dict) -> None:
         rows = self.conn.execute("SELECT id, task_id, path FROM artifacts;").fetchall()
         for r in rows:
-            if r["path"] and not Path(r["path"]).exists():
+            if not r["path"]:
+                continue
+            path = Path(r["path"]).expanduser().resolve(strict=False)
+            roots = getattr(self, "artifact_roots", None) or cfg.artifact_roots()
+            managed = any(path == root or root in path.parents for root in roots)
+            if not managed:
+                stats["artifact_ignored"] += 1
+                if alert_store.resolve_condition(
+                        self.conn, kind="artifact_missing", task_id=r["task_id"],
+                        detail=r["path"], source="janitor:outside-managed-roots"):
+                    stats["artifact_resolved"] += 1
+            elif not path.exists():
                 stats["artifact_alerts"] += 1
                 self._alert("artifact_missing", r["task_id"], r["path"])
-            elif r["path"] and alert_store.resolve_condition(
+            elif alert_store.resolve_condition(
                     self.conn, kind="artifact_missing", task_id=r["task_id"],
                     detail=r["path"], source="janitor"):
                 stats["artifact_resolved"] += 1

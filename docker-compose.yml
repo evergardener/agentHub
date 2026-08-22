@@ -94,7 +94,11 @@ services:
   janitor:
     <<: *agenthub
     command: ["python", "-m", "state.janitor"]
-    environment: *agenthub-env
+    environment:
+      <<: *agenthub-env
+      # 仅对这两个生产工作区根目录执行产物缺失对账；
+      # 历史测试的 /tmp 路径保留在 DB 但不会触发生产告警。
+      LAS_ARTIFACT_ROOTS: /data/workspace,${HOME}/AgentWorkspace
     volumes:
       - agent-data:/data
       # Host adapters persist canonical artifacts here. Mount the identical
