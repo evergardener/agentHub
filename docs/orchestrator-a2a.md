@@ -96,6 +96,9 @@ Orchestrator 每次从 Registry 解析 `agent`。未知、offline 或 disabled �
 qishuo 对同一协作持续传递 `context_id`。agentHub 在 Task 中回显 `contextId`，
 并以 task ID 连接状态、审批、Adapter run、产物和事件。初始
 `submitted` 不代表已完成；Hermes 必须查询终态和产物后再汇报。
+未写入静态 catalog 的新 Agent 可凭有效 Registry lease 自动出现，无需
+为 Hermes 增加 peer 或路由；Registry-only Agent 租约过期后从发现结果移除，
+避免历史测试 worker（如 `fake`）或已卸载 worker 持续暴露给 Hermes。
 完成事件的 `result_summary` 从 worker 的规范 `last-message.md` 提取，最多
 4000 字符；完整原文和其他输出仍以 artifact 为准。路径必须位于配置的
 workspace 内，否则只返回不含内容的 artifact 提示，避免越界读取。

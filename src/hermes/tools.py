@@ -148,10 +148,13 @@ class HermesTools:
     def _resolve_agents(self) -> dict:
         """发现视图（v3 M2）：静态 agents.yaml 为种子，DB 中心跳注册的
         agent 覆盖/补充；带 online 标记（lease 未过期）。静态启停策略是
-        desired state，优先级高于 worker 心跳；停用 Agent 不参与发现视图。
+        desired state，优先级高于 worker 心跳；停用 Agent 保留可见状态
+        但不参与委派。
 
         语义：worker 由用户自装、经心跳自注册；DB 中 lease 过期 = offline，
         未注册的 agent 仅在静态 yaml 显式配置时可用（static）。
+        Registry-only 的动态 Agent 只在 lease 有效时出现；过期的测试或
+        已卸载 worker 不应永久污染 Hermes 发现列表。
         """
         import json as _json
         from datetime import datetime
@@ -171,11 +174,16 @@ class HermesTools:
                 " template_id, profile_id"
                 " FROM agents;").fetchall():
             online = bool(r["lease_expires_at"] and r["lease_expires_at"] > now)
-            entry = merged.setdefault(r["id"], {
-                "endpoint": "", "skills": [],
-                "enabled": agent_control_store.desired_enabled(
-                    self.tm.conn, r["id"], True),
-            })
+            entry = merged.get(r["id"])
+            if entry is None:
+                if not online:
+                    continue
+                entry = {
+                    "endpoint": "", "skills": [],
+                    "enabled": agent_control_store.desired_enabled(
+                        self.tm.conn, r["id"], True),
+                }
+                merged[r["id"]] = entry
             if entry.get("enabled") is False:
                 entry["online"] = None
                 continue

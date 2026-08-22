@@ -65,7 +65,7 @@ def test_resolve_merges_online_over_static(conn, tmp_path):
     assert agents["codex"]["skills"] == ["coding", "devops"]
 
 
-def test_resolve_marks_offline_and_unknown(conn, tmp_path):
+def test_resolve_hides_expired_registry_only_agent(conn, tmp_path):
     tools = _tools(conn, tmp_path, static={
         "codex": {"endpoint": "http://static:8201", "skills": []}})
     # 租约已过期的注册：直接写一条过期记录
@@ -77,7 +77,7 @@ def test_resolve_marks_offline_and_unknown(conn, tmp_path):
                   .isoformat(timespec="seconds"),))
     conn.commit()
     agents = tools._resolve_agents()
-    assert agents["kimi"]["online"] is False
+    assert "kimi" not in agents
     assert agents["codex"]["online"] is None  # 仅静态配置
 
 
@@ -92,7 +92,7 @@ def test_delegate_gate_offline_and_unknown(conn, tmp_path):
                   .isoformat(timespec="seconds"),))
     conn.commit()
 
-    assert "offline" in tools._agent_or_error("kimi")["error"]
+    assert "unknown agent" in tools._agent_or_error("kimi")["error"]
     err = tools._agent_or_error("pi")  # 未安装未注册
     assert "unknown agent" in err["error"]
     assert "codex" in err["known"]  # 静态种子的已知列表
@@ -116,6 +116,16 @@ def test_list_agents_status_view(conn, tmp_path):
     assert by_id["codex"]["status"] == "static"
     assert by_id["dsh"]["status"] == "disabled"
     assert "disabled" in tools._agent_or_error("dsh")["error"]
+
+
+def test_online_registry_only_agent_is_dynamically_discovered(conn, tmp_path):
+    tools = _tools(conn, tmp_path)
+    _heartbeat(conn, "pi", endpoint="http://live:8299", skills=["coding"])
+
+    agents = tools._resolve_agents()
+
+    assert agents["pi"]["online"] is True
+    assert agents["pi"]["endpoint"] == "http://live:8299"
 
 
 def test_disabled_static_policy_overrides_ready_heartbeat(conn, tmp_path):

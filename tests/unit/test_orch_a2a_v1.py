@@ -68,12 +68,19 @@ def _legacy(text: str, **metadata) -> dict:
 
 
 def test_registry_discovery_uses_single_peer(env):
-    _, client, delegated = env
+    tm, client, delegated = env
+    state_store.update_heartbeat(tm.conn, "fake",
+                                 endpoint="http://worker:8298")
+    tm.conn.execute(
+        "UPDATE agents SET lease_expires_at = '2000-01-01T00:00:00+08:00'"
+        " WHERE id = 'fake';")
+    tm.conn.commit()
     response = client.post("/a2a", json=_control("agents/list"),
                            headers=_bearer()).json()
     message = response["result"]["message"]
     payload = json.loads(message["parts"][0]["text"])
     assert {item["id"] for item in payload["agents"]} >= {"codex", "kimi"}
+    assert "fake" not in {item["id"] for item in payload["agents"]}
     assert message["contextId"] == "ctx-live"
     assert not delegated
 
