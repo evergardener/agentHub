@@ -5,6 +5,7 @@ import json
 import stat
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -66,3 +67,38 @@ def test_manifest_does_not_contain_token(tmp_path):
     backup, _ = MODULE._backup(profile)
     manifest = json.loads((backup / "manifest.json").read_text())
     assert token not in json.dumps(manifest)
+
+
+def test_install_replaces_managed_prompt_block(tmp_path):
+    profile = tmp_path / "qishuo"
+    profile.mkdir()
+    managed = (
+        f"keep before\n\n{MODULE.PROMPT_START}\nold rule\n"
+        f"{MODULE.PROMPT_END}\nkeep after")
+    (profile / "config.yaml").write_text(
+        yaml.safe_dump({"agent": {"system_prompt": managed}}),
+        encoding="utf-8")
+    (profile / ".env").write_text("KEEP=value\n", encoding="utf-8")
+    agenthub_env = tmp_path / "agenthub.env"
+    agenthub_env.write_text(
+        "LAS_HERMES_GATEWAY_API_KEY=" + "t" * 48 + "\n",
+        encoding="utf-8")
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("skill", encoding="utf-8")
+    appendix = tmp_path / "appendix.md"
+    appendix.write_text("new task id rule", encoding="utf-8")
+
+    MODULE.install(profile, agenthub_env, skill, appendix)
+    prompt = yaml.safe_load(
+        (profile / "config.yaml").read_text())["agent"]["system_prompt"]
+    assert "old rule" not in prompt
+    assert "new task id rule" in prompt
+    assert "keep before" in prompt and "keep after" in prompt
+    assert prompt.count(MODULE.PROMPT_START) == 1
+    assert prompt.count(MODULE.PROMPT_END) == 1
+
+
+def test_incomplete_managed_prompt_block_fails_closed():
+    with pytest.raises(ValueError, match="boundary is incomplete"):
+        MODULE._upsert_prompt_appendix(MODULE.PROMPT_START, "new rule")

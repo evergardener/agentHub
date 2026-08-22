@@ -82,6 +82,22 @@ def _verify_restore_drill(backup: Path, manifest: dict) -> None:
                 raise RuntimeError(f"rollback drill checksum failed: {name}")
 
 
+def _upsert_prompt_appendix(existing: str, appendix: str) -> str:
+    """Insert or replace exactly one managed prompt block."""
+    has_start = PROMPT_START in existing
+    has_end = PROMPT_END in existing
+    if has_start != has_end:
+        raise ValueError("agentHub prompt boundary is incomplete")
+    if existing.count(PROMPT_START) > 1 or existing.count(PROMPT_END) > 1:
+        raise ValueError("multiple agentHub prompt boundaries found")
+    block = f"{PROMPT_START}\n{appendix.strip()}\n{PROMPT_END}"
+    if not has_start:
+        return f"{existing.rstrip()}\n\n{block}\n"
+    before, remainder = existing.split(PROMPT_START, 1)
+    _, after = remainder.split(PROMPT_END, 1)
+    return f"{before.rstrip()}\n\n{block}{after}"
+
+
 def install(profile: Path, agenthub_env: Path, skill_source: Path,
             prompt_appendix: Path) -> dict[str, str]:
     backup, manifest = _backup(profile)
@@ -107,9 +123,7 @@ def install(profile: Path, agenthub_env: Path, skill_source: Path,
     agent = config.setdefault("agent", {})
     existing_prompt = str(agent.get("system_prompt") or "").rstrip()
     appendix = prompt_appendix.read_text(encoding="utf-8").strip()
-    if PROMPT_START not in existing_prompt:
-        agent["system_prompt"] = (
-            f"{existing_prompt}\n\n{PROMPT_START}\n{appendix}\n{PROMPT_END}\n")
+    agent["system_prompt"] = _upsert_prompt_appendix(existing_prompt, appendix)
     rendered = yaml.safe_dump(
         config, allow_unicode=True, sort_keys=False, width=100)
     config_path.write_text(rendered, encoding="utf-8")
