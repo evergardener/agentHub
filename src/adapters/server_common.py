@@ -17,6 +17,7 @@ import os
 import uuid
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
+from pathlib import Path
 from typing import Awaitable, Callable
 
 from fastapi import FastAPI, Request
@@ -40,6 +41,27 @@ from common.ids import temp_task_id
 RunnerFn = Callable[[A2aTask], Awaitable[list[dict]]]
 CardFn = Callable[[str], dict]
 HealthFn = Callable[[], Awaitable[dict]]
+MAX_RESULT_SUMMARY_CHARS = 4000
+
+
+def _result_summary(agent_id: str, artifacts: list[dict]) -> str:
+    """Return a bounded assistant result from the canonical report artifact."""
+    root = cfg.workspace().resolve()
+    for artifact in artifacts:
+        if artifact.get("name") != "last-message.md":
+            continue
+        try:
+            path = Path(str(artifact["path"])).resolve(strict=True)
+            path.relative_to(root)
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except (KeyError, OSError, ValueError):
+            continue
+        if not text:
+            continue
+        if len(text) > MAX_RESULT_SUMMARY_CHARS:
+            return text[:MAX_RESULT_SUMMARY_CHARS].rstrip() + "\n…"
+        return text
+    return f"{agent_id} completed (see artifacts)"
 
 
 def _card_skills(card_fn: CardFn) -> list[str]:
@@ -420,7 +442,9 @@ def build_app(
                     await publisher.publish(
                         "task.completed", task.id,
                         {"status_from": "working", "status_to": "completed",
-                         "attempt": 1, "summary": f"{agent_id} done",
+                         "attempt": 1,
+                         "summary": _result_summary(
+                             agent_id, result.artifacts),
                          "artifacts": [a["name"] for a in result.artifacts]},
                         trace_id=trace_id,
                     )
@@ -555,6 +579,9 @@ def build_app(
                     event_type, task.id,
                     {"interaction_id": interaction_id,
                      "status_to": result.state,
+                     **({"summary": _result_summary(
+                         agent_id, result.artifacts)}
+                        if result.state == "completed" else {}),
                      "interactions": [
                          item.to_dict() for item in
                          session_adapter.list_pending_interactions(
