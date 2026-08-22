@@ -6,6 +6,7 @@ from common.models import TaskStatus
 from orchestrator import state_store
 from orchestrator.recovery import recover
 from orchestrator.registry import Registry
+from state import alert_store
 from state.db import init_db, next_task_id
 from state.janitor import Janitor
 from orchestrator.task_manager import TaskManager
@@ -123,6 +124,28 @@ def test_janitor_cascade_cancel(conn):
     stats = j.sweep()
     assert stats["cascade_cancelled"] == 1
     assert state_store.get_task(conn, child)["status"] == "cancelled"
+
+
+def test_janitor_resolves_artifact_alert_after_file_recovers(conn, tmp_path):
+    tid = _task(conn, status=TaskStatus.COMPLETED)
+    artifact = tmp_path / "result.md"
+    conn.execute(
+        "INSERT INTO artifacts (id, task_id, name, type, path, sha256,"
+        " created_at) VALUES (?,?,?,?,?,?,?);",
+        ("A-1", tid, "result.md", "report", str(artifact), "abc", "now"),
+    )
+    conn.commit()
+    janitor = Janitor.__new__(Janitor)
+    janitor.conn, janitor.alerts = conn, []
+
+    missing = janitor.sweep()
+    assert missing["artifact_alerts"] == 1
+    assert len(alert_store.list_alerts(conn, status="open")) == 1
+
+    artifact.write_text("recovered", encoding="utf-8")
+    recovered = janitor.sweep()
+    assert recovered["artifact_resolved"] == 1
+    assert alert_store.list_alerts(conn, status="open") == []
 
 
 # ---------- task_manager 级联取消 ----------

@@ -124,3 +124,23 @@ def acknowledge_alert(
     )
     conn.commit()
     return cur.rowcount == 1
+
+
+def resolve_condition(
+    conn,
+    *,
+    kind: str,
+    task_id: str | None = None,
+    detail: str | None = None,
+    source: str = "system",
+) -> bool:
+    """Close an open condition alert after the source verifies recovery."""
+    cur = conn.execute(
+        "UPDATE alerts SET status = 'resolved', acknowledged_at = ?,"
+        " acknowledged_by = ?, acknowledgement_note = ?"
+        " WHERE dedupe_key = ? AND status = 'open';",
+        (now_iso(), source, "condition recovered",
+         _dedupe_key(kind, task_id, detail)),
+    )
+    conn.commit()
+    return cur.rowcount == 1

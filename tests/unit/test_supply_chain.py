@@ -41,6 +41,12 @@ def test_agentctl_compose_service_preserves_cli_entrypoint_for_subcommands():
     assert service["command"] == ["chat"]
 
 
+def test_janitor_can_read_host_adapter_artifacts():
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    mounts = compose["services"]["janitor"]["volumes"]
+    assert "${HOME}/AgentWorkspace:${HOME}/AgentWorkspace:ro" in mounts
+
+
 def test_release_smoke_targets_codex_and_dsh_without_kimi():
     smoke = (ROOT / "scripts" / "e2e_phase_a.py").read_text()
     assert '"codex"' in smoke

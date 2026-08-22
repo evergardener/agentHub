@@ -97,6 +97,9 @@ services:
     environment: *agenthub-env
     volumes:
       - agent-data:/data
+      # Host adapters persist canonical artifacts here. Mount the identical
+      # absolute path read-only so artifact existence checks do not false-alarm.
+      - ${HOME}/AgentWorkspace:${HOME}/AgentWorkspace:ro
     depends_on:
       state-writer:
         condition: service_healthy

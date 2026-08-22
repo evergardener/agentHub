@@ -34,7 +34,8 @@ class Janitor:
 
     def sweep(self) -> dict:
         stats = {"requeued": 0, "failed_timeout": 0,
-                 "cascade_cancelled": 0, "artifact_alerts": 0}
+                 "cascade_cancelled": 0, "artifact_alerts": 0,
+                 "artifact_resolved": 0}
         self._sweep_dead_leases(stats)
         self._sweep_timeouts(stats)
         self._sweep_cascade(stats)
@@ -112,6 +113,10 @@ class Janitor:
             if r["path"] and not Path(r["path"]).exists():
                 stats["artifact_alerts"] += 1
                 self._alert("artifact_missing", r["task_id"], r["path"])
+            elif r["path"] and alert_store.resolve_condition(
+                    self.conn, kind="artifact_missing", task_id=r["task_id"],
+                    detail=r["path"], source="janitor"):
+                stats["artifact_resolved"] += 1
 
     def _alert(self, kind: str, task_id: str | None, detail: str | None) -> None:
         severity = ("critical" if kind == "timeout_swept" else "warning")

@@ -211,6 +211,9 @@ Janitor 的租约过期、执行超时、产物缺失，以及重试耗尽的任
 「标记已知」，`viewer` 只读；标记已知只从待处理列表移除，**不会**修复、重试或
 取消任务，应先按建议完成处置。同一 kind/task/detail 只建立一条告警，重复发生
 增加 `occurrences`，不会形成通知风暴。
+宿主 Adapter 的 `${HOME}/AgentWorkspace` 以同一绝对路径只读挂载到 janitor，
+避免容器因看不到真实文件而误报 `artifact_missing`；文件恢复可见后，对应的 open
+条件告警会由 janitor 自动转为 `resolved`，无需用户把误报逐条标记已知。
 若历史告警引用的任务记录已经不存在，WebUI 会保留告警及技术详情用于审计，但不再
 显示「打开任务」按钮，避免跳转到必然返回 `not found` 的页面。
 
