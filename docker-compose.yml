@@ -12,9 +12,9 @@
 #   docker compose up -d                 # 控制面
 #   docker compose run --rm agentctl chat   # 与 hermes 对话（交互 CLI）
 
-# 兼容身份：即使仓库目录改名为 agentHub，仍复用现有容器、卷和网络。
-# 基础设施资源改名必须作为独立的备份/迁移操作，不得随目录改名隐式发生。
-name: local-agent-system
+# Compose 身份与仓库品牌一致。历史 local-agent-system 数据通过经校验的
+# control-plane 备份恢复到本项目的新命名卷；不要绕过备份直接改此名称。
+name: agenthub
 
 x-agenthub: &agenthub
   image: agenthub:latest
@@ -278,7 +278,8 @@ volumes:
 # Keep Docker Desktop allocations outside the physical 192.168.7.0/24 LAN.
 networks:
   default:
-    name: local-agent-system_default
+    name: agenthub_default
     ipam:
       config:
-        - subnet: 10.252.0.0/24
+        # 与保留供回退的 local-agent-system_default (10.252.0.0/24) 并存。
+        - subnet: 10.253.0.0/24

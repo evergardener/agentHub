@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,28 +17,29 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from common.preflight import parse_env  # noqa: E402
 
-BASE = "http://127.0.0.1:8310"
-TERMINAL = {"completed", "failed", "canceled", "rejected"}
+ENV = parse_env(ROOT / ".env")
+BASE = os.environ.get(
+    "LAS_AGENTHUB_SMOKE_BASE", "http://127.0.0.1:8300/agenthub")
+TOKEN = ENV.get("LAS_HERMES_GATEWAY_API_KEY", "")
+FAILURE_STATES = {"failed", "canceled", "rejected"}
 
 
-def _peer_tokens() -> dict[str, str]:
-    peers = json.loads(parse_env(ROOT / ".env")["LAS_A2A_PEERS"])
-    tokens = {meta["worker"]: token for token, meta in peers.items()}
-    missing = {"codex", "dsh"} - tokens.keys()
-    if missing:
-        raise RuntimeError(f"missing peer token for: {', '.join(sorted(missing))}")
-    return tokens
+def _error_body(exc: urllib.error.HTTPError) -> dict:
+    raw = exc.read()
+    try:
+        value = json.loads(raw or b"{}")
+    except json.JSONDecodeError:
+        return {"body": raw.decode(errors="replace")}
+    return value if isinstance(value, dict) else {"body": value}
 
 
-TOKENS = _peer_tokens()
-
-
-def call(method: str, params: dict, token: str | None = None) -> tuple[int, dict]:
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+def call(method: str, params: dict) -> tuple[int, dict]:
+    headers = {
+        "Authorization": f"Bearer {TOKEN}",
+        "Content-Type": "application/json",
+    }
     request = urllib.request.Request(
-        BASE + "/a2a", headers=headers,
+        BASE.rstrip("/") + "/a2a", headers=headers,
         data=json.dumps({
             "jsonrpc": "2.0", "id": "production-smoke",
             "method": method, "params": params,
@@ -46,101 +49,115 @@ def call(method: str, params: dict, token: str | None = None) -> tuple[int, dict
         with urllib.request.urlopen(request, timeout=30) as response:
             return response.status, json.load(response)
     except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read() or b"{}")
+        return exc.code, _error_body(exc)
 
 
-def get(path: str, token: str | None = None) -> tuple[int, dict]:
-    request = urllib.request.Request(BASE + path)
-    if token:
-        request.add_header("Authorization", f"Bearer {token}")
+def get(path: str, *, authenticated: bool = True) -> tuple[int, dict]:
+    request = urllib.request.Request(BASE.rstrip("/") + path)
+    if authenticated:
+        request.add_header("Authorization", f"Bearer {TOKEN}")
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return response.status, json.load(response)
     except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read() or b"{}")
+        return exc.code, _error_body(exc)
 
 
-def send(text: str, worker: str, **metadata) -> dict:
-    status, response = call("SendMessage", {"message": {
+def control(action: str, *, context_id: str | None = None, **params) -> dict:
+    command = {"agenthub": "v1", "action": action, **params}
+    message = {
         "role": "user",
-        "parts": [{"text": text, "mediaType": "text/plain"}],
-        "metadata": metadata,
-    }}, TOKENS[worker])
+        "parts": [{
+            "text": json.dumps(command, ensure_ascii=False),
+            "mediaType": "application/json",
+        }],
+    }
+    if context_id:
+        message["contextId"] = context_id
+    status, response = call("SendMessage", {"message": message})
     if status != 200 or "error" in response:
-        raise RuntimeError(f"{worker} SendMessage failed: {response}")
-    return response["result"]["task"]
+        raise RuntimeError(f"{action} failed: HTTP {status}: {response}")
+    return response["result"]
 
 
-def wait_terminal(task_id: str, worker: str, timeout: float = 600) -> dict:
+def wait_for_acceptance(
+        task_id: str, context_id: str, timeout: float = 600) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        status, response = call(
-            "tasks/get", {"id": task_id}, TOKENS[worker])
-        if status != 200 or "error" in response:
-            raise RuntimeError(f"tasks/get failed: {response}")
-        task = response["result"]
+        task = control("tasks/get", context_id=context_id, task_id=task_id)[
+            "task"]
         state = task["status"]["state"]
-        if state in TERMINAL:
+        kind = task.get("metadata", {}).get("input_required_kind")
+        if state == "input-required" and kind == "acceptance":
             return task
+        if state in FAILURE_STATES:
+            raise RuntimeError(f"task failed before acceptance: {task}")
         if state == "input-required":
             raise RuntimeError(
-                f"unexpected native approval during read-only smoke: {task_id}")
+                f"unexpected {kind or 'unknown'} input request: {task_id}")
         time.sleep(2)
-    raise TimeoutError(f"task did not finish within {timeout}s: {task_id}")
+    raise TimeoutError(f"task did not reach acceptance within {timeout}s: {task_id}")
 
 
 def main() -> int:
-    assert get("/.well-known/agent-card.json")[0] == 401
-    status, card = get(
-        "/.well-known/agent-card.json", TOKENS["codex"])
+    if len(TOKEN) < 16:
+        raise RuntimeError("LAS_HERMES_GATEWAY_API_KEY is missing or too short")
+    assert get("/.well-known/agent-card.json", authenticated=False)[0] == 401
+    status, card = get("/.well-known/agent-card.json")
     assert status == 200 and card["name"] == "agenthub-orchestrator"
-    print("PASS: orchestrator authentication and agent card")
-    return 0
+    print("PASS: gateway authentication and agent card")
 
+    discovered = control("agents/list")
+    agents = {item["id"]: item for item in json.loads(
+        discovered["message"]["parts"][0]["text"])["agents"]}
+    assert all(agents[name]["enabled"] and agents[name]["online"]
+               for name in ("codex", "dsh"))
+    print("PASS: Codex and DSH are enabled and online")
 
-def _run() -> int:
-    # Keep the route-conflict check outside send(), where an error is expected.
-    status, response = call("SendMessage", {"message": {
-        "role": "user",
-        "parts": [{"text": "查询路由安全状态", "mediaType": "text/plain"}],
-        "metadata": {"agent": "dsh"},
-    }}, TOKENS["codex"])
-    assert status == 200 and response["error"]["code"] == -32602
-    print("PASS: peer identity rejects forged worker routing")
+    context_id = f"production-smoke-{uuid.uuid4().hex}"
+    for worker in ("codex", "dsh"):
+        created = control(
+            "tasks/create",
+            context_id=context_id,
+            agent=worker,
+            objective=(
+                "只读验收：运行 pwd -P 检查当前工作目录，不得修改任何文件；"
+                "最终回复必须包含 pwd 的绝对路径。"),
+            project="agentHub",
+            workspace=str(ROOT),
+        )["task"]
+        pending = wait_for_acceptance(created["id"], context_id)
+        assert pending["metadata"]["internal_status"] == "awaiting_acceptance"
+        assert pending["metadata"]["execution_workspace"] == str(ROOT)
+        message = pending["status"]["message"]["parts"][0]["text"]
+        assert str(ROOT) in message, pending
+        assert pending["artifacts"], pending
 
-    completed: dict[str, dict] = {}
-    prompts = {
-        "codex": "总结此标记并只回复 CODEX_PRODUCTION_SMOKE_OK："
-                 "CODEX_PRODUCTION_SMOKE_OK",
-        "dsh": "总结此标记并只回复 DSH_PRODUCTION_SMOKE_OK："
-               "DSH_PRODUCTION_SMOKE_OK",
-    }
-    for worker, prompt in prompts.items():
-        task = send(prompt, worker)
-        final = wait_terminal(task["id"], worker)
-        assert final["status"]["state"] == "completed", final
-        assert final["metadata"]["assigned_to"] == worker
-        completed[worker] = final
-        print(f"PASS: {worker} production task completed: {task['id']}")
+        accepted = control(
+            "tasks/accept", context_id=context_id, task_id=created["id"],
+            notes="production read-only workspace smoke passed",
+        )["task"]
+        assert accepted["status"]["state"] == "completed", accepted
+        assert accepted["metadata"]["internal_status"] == "accepted", accepted
+        print(f"PASS: {worker} workspace task accepted: {created['id']}")
 
-    status, cross_peer = call(
-        "tasks/get", {"id": completed["codex"]["id"]}, TOKENS["dsh"])
-    assert status == 200 and cross_peer["result"]["id"] == completed["codex"]["id"]
-    print("PASS: cross-peer task status remains traceable")
-
-    pending = send(
-        "写入 production-smoke-must-not-exist.txt", "codex")
-    assert pending["status"]["state"] == "input-required", pending
-    status, rejected = call(
-        "tasks/reject", {"id": pending["id"]}, TOKENS["codex"])
-    assert status == 200
-    assert rejected["result"]["status"]["state"] == "canceled"
+    gated = control(
+        "tasks/create",
+        context_id=context_id,
+        agent="codex",
+        objective="在工作区写入 production-smoke-must-not-exist.txt",
+        project="agentHub",
+        workspace=str(ROOT),
+    )["task"]
+    assert gated["status"]["state"] == "input-required", gated
+    assert gated["metadata"]["input_required_kind"] == "delegation", gated
+    rejected = control(
+        "tasks/reject", context_id=context_id, task_id=gated["id"])["task"]
+    assert rejected["status"]["state"] == "canceled", rejected
+    assert not (ROOT / "production-smoke-must-not-exist.txt").exists()
     print("PASS: write task stayed gated and was rejected without delegation")
     return 0
 
 
 if __name__ == "__main__":
-    # main() performs the unauthenticated/authenticated card checks; _run()
-    # performs expected-error routing and task lifecycle checks.
-    main()
-    raise SystemExit(_run())
+    raise SystemExit(main())

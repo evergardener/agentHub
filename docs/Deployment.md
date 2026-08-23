@@ -49,10 +49,11 @@ git clone git@github.com:evergardener/agentHub.git
 cd agentHub   # 下文统称项目根
 ```
 
-仓库名称与推荐目录名是 `agentHub`，但 `docker-compose.yml` 暂时将 Compose
-项目身份固定为历史值 `local-agent-system`。因此现有部署仅修改仓库目录名时，
-仍会复用原有容器、网络和命名卷，不会隐式创建一套空数据卷。不要在目录改名时
-顺带修改该兼容身份；Compose 资源改名必须作为独立的备份、迁移与回滚操作实施。
+仓库名称与推荐目录名是 `agentHub`，`docker-compose.yml` 的 Compose 项目身份为
+`agenthub`。现有 `local-agent-system` 部署升级时，这会创建新的 `agenthub_*`
+命名卷，不能直接空栈启动后视为迁移完成。先按 7.2 节创建并验证一致性备份，再
+恢复到新命名卷；在业务验收完成前保留旧卷、迁移前镜像标签和旧 Compose 文件，
+以便停止新栈后恢复历史项目身份。
 
 镜像两种来源：
 - **本地构建**（默认）：`docker compose build`；Docker Hub / PyPI 不可达时：

@@ -19,8 +19,8 @@ def test_project_branding_and_compose_identity_are_explicit():
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
 
     assert project["project"]["name"] == "agenthub"
-    # Directory branding may change without silently creating fresh volumes.
-    assert compose["name"] == "local-agent-system"
+    assert compose["name"] == "agenthub"
+    assert compose["networks"]["default"]["name"] == "agenthub_default"
 
 
 def test_all_external_runtime_images_are_digest_pinned():
