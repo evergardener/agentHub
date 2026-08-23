@@ -893,6 +893,21 @@
   .composer-target:disabled { opacity: .5; cursor: default; }
   .composer-note { margin-top: 5px; color: var(--faint); font-size: 10px; }
 
+  .task-action-input {
+    width: 100%; box-sizing: border-box; min-height: 64px; margin-top: 8px;
+    resize: vertical; padding: 9px 11px; border: 1px solid rgba(255,255,255,.84);
+    border-radius: 12px; outline: none; color: var(--fg);
+    background: rgba(255,255,255,.46); box-shadow: inset 0 1px 0 rgba(255,255,255,.52);
+    backdrop-filter: blur(16px) saturate(125%); font: inherit;
+    transition: border-color .16s, box-shadow .16s, background .16s;
+  }
+  .task-action-input::placeholder { color: var(--faint); }
+  .task-action-input:hover { background: rgba(255,255,255,.56); }
+  .task-action-input:focus {
+    border-color: rgba(78,120,131,.58); background: rgba(255,255,255,.62);
+    box-shadow: 0 0 0 3px rgba(222,243,241,.66), inset 0 1px 0 rgba(255,255,255,.58);
+  }
+
   /* 右栏任务：目标、交付和执行分区 */
   .task-switcher {
     display: flex; gap: 6px; padding: 8px 10px; overflow-x: auto;
@@ -2123,12 +2138,12 @@ async function openDetail(id, {syncConversation = true} = {}) {
   const acceptanceControls = needsAcceptance && S.role !== "viewer" ?
     `<section class="task-detail-block"><div class="task-section-label">用户验收</div>` +
     `<div class="task-result">确认交付物和验收条件后接受；需要返工时必须写明原因。</div>` +
-    `<textarea id="acceptance-feedback" rows="2" style="width:100%;box-sizing:border-box;margin-top:8px" ` +
+    `<textarea class="task-action-input" id="acceptance-feedback" rows="2" ` +
     `placeholder="验收备注，或需要返工的具体原因"></textarea>` +
     `<div class="artifact-actions"><button class="btn ok" data-accept-task="${esc(t.id)}">接受结果</button>` +
     `<button class="btn no" data-rework-task="${esc(t.id)}">要求返工</button></div></section>` : "";
   const controls = canControl ? `<section class="task-detail-block"><div class="task-section-label">任务控制</div>` +
-    `<textarea id="d-intervention-text" rows="2" style="width:100%;box-sizing:border-box;margin-top:8px" ` +
+    `<textarea class="task-action-input" id="d-intervention-text" rows="2" ` +
     `placeholder="补充给 Hermes 或纠正当前 Agent"></textarea>` +
     `<div class="artifact-actions"><button class="btn" data-intervene="comment">备注给 Hermes</button>` +
     (sessionCaps.steer ? `<button class="btn" data-intervene="steer">直接纠正 ${esc(t.assigned_to || "Agent")}</button>` : "") +

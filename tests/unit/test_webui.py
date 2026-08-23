@@ -303,6 +303,11 @@ def test_index_page(client):
     assert "function parseComposerTarget" in r.text
     assert "多个 @ 接收者" in r.text
     assert 'agent_id: target.id' in r.text
+    assert 'class="task-action-input" id="acceptance-feedback"' in r.text
+    assert 'class="task-action-input" id="d-intervention-text"' in r.text
+    assert ".task-action-input:focus" in r.text
+    assert 'id="acceptance-feedback" rows="2" style=' not in r.text
+    assert 'id="d-intervention-text" rows="2" style=' not in r.text
     assert 'data-task-detail-tab="goals"' in r.text
     assert 'data-task-detail-tab="execution"' in r.text
     assert "目标与交付" in r.text
