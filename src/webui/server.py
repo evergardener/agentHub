@@ -25,10 +25,15 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import (FileResponse, JSONResponse,
                                StreamingResponse)
+from markdown_it import MarkdownIt
 
 STATIC = Path(__file__).parent / "static"
 COOKIE_NAME = "agenthub_session"
 ROLES = {"viewer": 1, "operator": 2, "admin": 3}
+MARKDOWN = MarkdownIt(
+    "commonmark",
+    {"html": False, "linkify": False, "typographer": False},
+).enable(["strikethrough", "table"])
 
 
 def _b64encode(data: bytes) -> str:
@@ -195,6 +200,33 @@ def _with_legacy_task_results(messages: list[dict],
             "created_at": task.get("updated_at") or task.get("created_at"),
         })
     return merged
+
+
+def _message_text(message: dict) -> str:
+    """Extract the human-readable text from a persisted message payload."""
+    value = message.get("content_json", "")
+    try:
+        value = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return str(value or "")
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("content", "text"):
+            if isinstance(value.get(key), str):
+                return value[key]
+    return ""
+
+
+def _with_rendered_markdown(messages: list[dict]) -> list[dict]:
+    """Add safe CommonMark HTML while preserving the original message JSON."""
+    rendered = []
+    for message in messages:
+        item = dict(message)
+        text = _message_text(item)
+        item["content_html"] = MARKDOWN.render(text) if text.strip() else ""
+        rendered.append(item)
+    return rendered
 
 
 def create_app() -> FastAPI:
@@ -668,8 +700,9 @@ def create_app() -> FastAPI:
                 " created_at, last_active_at FROM agent_session_bindings"
                 " WHERE collaboration_id = ? ORDER BY created_at;",
                 (collaboration_id,)))
+            merged_messages = _with_legacy_task_results(messages, tasks)
             return {"collaboration": collaboration,
-                    "messages": _with_legacy_task_results(messages, tasks),
+                    "messages": _with_rendered_markdown(merged_messages),
                     "tasks": tasks, "sessions": sessions}
         finally:
             conn.close()

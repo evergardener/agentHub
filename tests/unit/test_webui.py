@@ -301,11 +301,51 @@ def test_index_page(client):
     assert "目标与交付" in r.text
     assert "执行记录" in r.text
     assert ".workspace-card > .chat-transcript" in r.text
+    assert "overscroll-behavior: contain" in r.text
+    assert 'class="markdown-body"' in r.text
     assert ".task-detail-pane .d-body" in r.text
     assert "canWriteHermes" in r.text
     assert "/messages`" in r.text
     assert "产物已显示在右侧" in r.text
     assert '<div class="task-section-label">结果摘要</div>' not in r.text
+
+
+def test_collaboration_detail_renders_safe_markdown(client):
+    from orchestrator import collaboration_store
+    from state.db import connect
+
+    conn = connect()
+    collaboration = conn.execute(
+        "SELECT id, conversation_id, context_revision FROM collaborations"
+        " ORDER BY created_at LIMIT 1;"
+    ).fetchone()
+    collaboration_store.append_message(
+        conn,
+        conversation_id=collaboration["conversation_id"],
+        collaboration_id=collaboration["id"],
+        sender_type="agent",
+        sender_id="codex",
+        message_type="llm.assistant",
+        content={"text": (
+            "# 修复结果\n\n- 支持列表\n- 支持 `code`\n\n"
+            "| 项目 | 状态 |\n| --- | --- |\n| WebUI | 完成 |\n\n"
+            "<script>alert(1)</script>\n\n[x](javascript:alert(1))"
+        )},
+        based_on_revision=collaboration["context_revision"],
+    )
+    conn.close()
+
+    detail = client.get(
+        f"/api/collaborations/{collaboration['id']}"
+    ).json()
+    html = detail["messages"][-1]["content_html"]
+    assert "<h1>修复结果</h1>" in html
+    assert "<li>支持列表</li>" in html
+    assert "<code>code</code>" in html
+    assert "<table>" in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "<script>" not in html
+    assert 'href="javascript:' not in html
 
 
 def test_index_has_bounded_alert_center_and_in_page_dialogs(client):

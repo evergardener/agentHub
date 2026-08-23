@@ -584,6 +584,9 @@
     gap: 12px; padding: 12px; height: calc(100vh - 58px); max-width: none;
   }
   .col { gap: 12px; }
+  .layout > .col {
+    height: 100%; min-height: 0; overflow: hidden;
+  }
   .sidebar-col { height: 100%; }
   .card, .task-detail-pane {
     background: rgba(255,255,255,.54); border: 1px solid rgba(255,255,255,.76);
@@ -619,7 +622,7 @@
   .conversation:hover { background: rgba(255,255,255,.34); }
   .conversation.active { background: rgba(220,243,240,.68); border-left-color: var(--acc); }
   .workspace-card {
-    height: 100%; min-height: 0; gap: 12px; overflow: visible;
+    flex: 1; height: 100%; min-height: 0; gap: 12px; overflow: hidden;
     background: transparent; border: 0; border-radius: 0;
     box-shadow: none; backdrop-filter: none;
   }
@@ -631,7 +634,10 @@
     backdrop-filter: blur(24px) saturate(132%);
   }
   .workspace-card > .chat-head { flex: none; }
-  .workspace-card > .chat-transcript { flex: 1; min-height: 0; }
+  .workspace-card > .chat-transcript {
+    flex: 1; min-height: 0; overflow-y: auto;
+    overscroll-behavior: contain; scrollbar-gutter: stable;
+  }
   .workspace-card > .chat-composer { flex: none; }
   .chat-head, .chat-context, .chat-foot {
     background: rgba(255,255,255,.30); border-color: var(--line-soft);
@@ -777,6 +783,39 @@
                                                        border-radius: 14px 4px 14px 14px; }
   .message-agent-label { color: var(--mut); }
   .message .mc { font-family: inherit; font-size: 13px; line-height: 1.72; }
+  .message .mc, .markdown-body { min-width: 0; overflow-wrap: anywhere; }
+  .markdown-body > :first-child { margin-top: 0; }
+  .markdown-body > :last-child { margin-bottom: 0; }
+  .markdown-body p { margin: 0 0 .72em; }
+  .markdown-body h1, .markdown-body h2, .markdown-body h3,
+  .markdown-body h4, .markdown-body h5, .markdown-body h6 {
+    margin: 1em 0 .45em; line-height: 1.35; color: var(--fg);
+  }
+  .markdown-body h1 { font-size: 1.35em; }
+  .markdown-body h2 { font-size: 1.22em; }
+  .markdown-body h3 { font-size: 1.12em; }
+  .markdown-body ul, .markdown-body ol { margin: .5em 0 .75em; padding-left: 1.65em; }
+  .markdown-body li + li { margin-top: .22em; }
+  .markdown-body blockquote {
+    margin: .65em 0; padding: .25em .8em; border-left: 3px solid var(--acc);
+    color: var(--mut); background: rgba(255,255,255,.30);
+  }
+  .markdown-body code {
+    padding: .12em .34em; border-radius: 5px; background: rgba(72,99,103,.10);
+    font: .92em/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .markdown-body pre {
+    max-width: 100%; margin: .7em 0; padding: 10px 12px; overflow: auto;
+    border: 1px solid rgba(89,115,119,.16); border-radius: 9px;
+    background: rgba(39,55,60,.88); color: #eef5f4;
+  }
+  .markdown-body pre code { padding: 0; background: none; color: inherit; }
+  .markdown-body a { color: var(--acc); text-underline-offset: 2px; }
+  .markdown-body table { display: block; max-width: 100%; overflow-x: auto;
+                         border-collapse: collapse; margin: .7em 0; }
+  .markdown-body th, .markdown-body td {
+    padding: 5px 8px; border: 1px solid rgba(89,115,119,.20); text-align: left;
+  }
   .tool-stack { display: grid; gap: 7px; margin-top: 8px; }
   .tool-card {
     border: 1px solid rgba(167,127,83,.22); border-radius: 10px;
@@ -1889,7 +1928,10 @@ function renderMessageBody(message, value) {
     typeof value?.content === "string" ? value.content :
     typeof value?.text === "string" ? value.text : "";
   const calls = Array.isArray(value?.tool_calls) ? value.tool_calls : [];
-  let html = text.trim() ? `<div>${esc(text)}</div>` : "";
+  const markdown = typeof message.content_html === "string" ? message.content_html : "";
+  let html = text.trim()
+    ? `<div class="markdown-body">${markdown || `<p>${esc(text)}</p>`}</div>`
+    : "";
   if (calls.length) {
     html += `<div class="tool-stack">` + calls.map(call => {
       const fn = call.function || call;
