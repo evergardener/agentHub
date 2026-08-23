@@ -151,7 +151,7 @@ async def test_state_plane_end_to_end(tmp_path, monkeypatch):
         assert "rejected" not in results
 
         row = state_store.get_task(writer.conn, task_id)
-        assert row["status"] == "completed"
+        assert row["status"] == TaskStatus.AWAITING_ACCEPTANCE.value
         assert row["result_summary"]
         arts = writer.conn.execute(
             "SELECT * FROM artifacts WHERE task_id = ?;", (task_id,)).fetchall()
@@ -172,7 +172,9 @@ async def test_state_plane_end_to_end(tmp_path, monkeypatch):
             "payload": {"status_from": "assigned", "status_to": "working",
                         "attempt": 2},
         }
-        assert writer.apply(illegal) == "rejected"  # completed 后不得回 working
+        # Worker completion waits for explicit user acceptance and a late
+        # task.started event must not revive that result.
+        assert writer.apply(illegal) == "rejected"
         assert writer.audit_log, "illegal transition must leave audit record"
 
         # ── agentctl 查询路径（直接调 cmd 函数）──
@@ -238,7 +240,8 @@ async def test_durable_writer_recovers_after_nats_restart_and_dedupes(
         resumed = StateWriter(db_path)
         stop = asyncio.Event()
         consumer = asyncio.create_task(consume(resumed, stop))
-        await _wait_status(resumed.conn, task_id, "completed")
+        await _wait_status(
+            resumed.conn, task_id, TaskStatus.AWAITING_ACCEPTANCE.value)
         stop.set()
         await asyncio.wait_for(consumer, timeout=5)
 
