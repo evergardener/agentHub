@@ -57,8 +57,10 @@ def card(base_url):
 async def test_a2a_steer_reaches_current_turn_with_revision():
     adapter = SteerAdapter()
     app = build_app("steer", card, session_adapter=adapter)
+    published = []
 
     async def publish(*args, **kwargs):
+        published.append((args, kwargs))
         return True
 
     app.state.publisher.publish = publish
@@ -96,3 +98,13 @@ async def test_a2a_steer_reaches_current_turn_with_revision():
         duplicate = (await client.post("/a2a", json=steer_payload)).json()
         assert "result" in duplicate
         assert len(adapter.steers) == 1
+        deadline = time.monotonic() + 1
+        while not any(call[0][0] == "task.completed" for call in published):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("task.completed was not published")
+            await asyncio.sleep(0.01)
+        completed = next(
+            call[0][2] for call in published
+            if call[0][0] == "task.completed")
+        assert completed["summary"] == "steer completed (see artifacts)"
+        assert completed["result_text"] == completed["summary"]

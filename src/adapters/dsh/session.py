@@ -58,6 +58,21 @@ DEFAULT_TIMEOUT_SECONDS = 3600
 SAFE_PERMISSION_PRESETS = frozenset({"read-only"})
 REQUIRED_APPROVAL_POLICY = "ask"
 REQUIRED_AGENT_PRESET = "standard"
+MAX_DSH_REPORT_CHARS = 1_000_000
+MAX_DSH_HISTORY_EVENTS = 5_000
+MAX_DSH_HISTORY_FIELD_CHARS = 65_536
+MAX_DSH_HISTORY_MESSAGES = 1_000
+
+
+def _contains_oversized_string(value: Any, limit: int) -> bool:
+    if isinstance(value, str):
+        return len(value) > limit
+    if isinstance(value, list):
+        return any(_contains_oversized_string(item, limit) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_oversized_string(item, limit)
+                   for item in value.values())
+    return False
 
 
 class DshNotAvailable(RuntimeError):
@@ -479,7 +494,8 @@ class DshWebSessionAdapter(SessionAdapter):
     async def _history(self, native_session_id: str) -> list[dict[str, Any]]:
         value = await self._request(
             "session.history",
-            {"sessionId": native_session_id, "maxMessages": 200},
+            {"sessionId": native_session_id,
+             "maxMessages": MAX_DSH_HISTORY_MESSAGES},
         )
         entries = value.get("events", [])
         if not isinstance(entries, list):
@@ -953,17 +969,37 @@ class DshWebSessionAdapter(SessionAdapter):
         self, task: A2aTask, entries: list[dict[str, Any]],
         baseline: int, *, state: str,
     ) -> list[dict]:
+        retained = entries[:MAX_DSH_HISTORY_EVENTS]
+        event_truncated = len(retained) < len(entries)
+        field_truncated = _contains_oversized_string(
+            retained, MAX_DSH_HISTORY_FIELD_CHARS)
         encoded = json.dumps(
             redact_bounded({
-                "state": state, "afterSeq": baseline, "entries": entries,
-            }),
+                "state": state,
+                "afterSeq": baseline,
+                "totalEvents": len(entries),
+                "retainedEvents": len(retained),
+                "eventTruncated": event_truncated,
+                "fieldTruncated": field_truncated,
+                "fieldCharLimit": MAX_DSH_HISTORY_FIELD_CHARS,
+                "truncated": event_truncated or field_truncated,
+                "entries": retained,
+            }, limit=MAX_DSH_HISTORY_FIELD_CHARS,
+                max_items=MAX_DSH_HISTORY_EVENTS),
             ensure_ascii=False, indent=2,
         ).encode("utf-8")
         artifacts = [save_artifact(
             task.id, "dsh-history.json", encoded, "log")]
         answer = _assistant_text(entries, baseline)
         if answer:
-            answer = str(redact_bounded(answer))
+            original_chars = len(answer)
+            answer = str(redact_bounded(
+                answer, limit=MAX_DSH_REPORT_CHARS))
+            if original_chars > MAX_DSH_REPORT_CHARS:
+                answer += (
+                    "\n\n…\n[agentHub：DSH 回复超过 1000000 字符，"
+                    "canonical artifact 已按安全上限截断]"
+                )
             artifacts.append(save_artifact(
                 task.id, "last-message.md", answer.encode("utf-8"), "report"))
         artifacts.extend(self._workspace_artifacts(task.id))

@@ -15,6 +15,7 @@ from adapters.dsh.session import (
     DshApiError,
     DshNotAvailable,
     DshWebSessionAdapter,
+    MAX_DSH_HISTORY_MESSAGES,
 )
 from adapters.session import SessionCapabilityError, SessionMessage
 
@@ -22,8 +23,11 @@ pytestmark = pytest.mark.anyio
 
 
 class DshFixture:
-    def __init__(self, *, approval: bool = False):
+    def __init__(self, *, approval: bool = False,
+                 answer: str | None = None, extra_chunks: int = 0):
         self.approval = approval
+        self.answer = answer
+        self.extra_chunks = extra_chunks
         self.session_id = "session-native-dsh-1"
         self.events: list[dict] = []
         self.methods: list[str] = []
@@ -50,11 +54,21 @@ class DshFixture:
                 "content": [{"type": "text", "text": prompt}],
                 "source": {"kind": "user"},
             }),
+        ])
+        self.events.extend(
+            self._event("assistant/chunk", {
+                "turn": turn, "step": turn,
+                "chunk": {"type": "reasoning-delta", "index": 0,
+                          "text": f"chunk-{index}"},
+            }) for index in range(self.extra_chunks)
+        )
+        self.events.extend([
             self._event("assistant/message", {
                 "turn": turn, "step": turn,
                 "message": {
                     "id": f"assistant-{turn}", "role": "assistant",
-                    "content": [{"type": "text", "text": f"done: {prompt}"}],
+                    "content": [{"type": "text", "text":
+                                 self.answer or f"done: {prompt}"}],
                     "source": {"kind": "model", "provider": "test",
                                "model": "test"},
                 },
@@ -93,6 +107,8 @@ class DshFixture:
                            / "tasks" / "T-dsh"),
             }]}
         elif method == "session.history":
+            assert body["payload"]["maxMessages"] == \
+                MAX_DSH_HISTORY_MESSAGES
             value = {"events": self.events, "hasMore": False}
         elif method == "commands/execute":
             args = body["payload"]["args"]
@@ -173,6 +189,37 @@ async def test_dsh_uses_same_native_session_for_multiple_turns(
         assert any(a["name"] == "last-message.md" for a in second.artifacts)
         assert adapter.capabilities.native_resume is True
         assert adapter.capabilities.pause is False
+    finally:
+        await client.aclose()
+
+
+async def test_dsh_preserves_long_redacted_answer_and_more_than_200_events(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path))
+    answer = "结果开始\n" + "容器信息\n" * 2500 + "token=secret-value\n结果结束"
+    fixture = DshFixture(answer=answer, extra_chunks=240)
+    adapter, client = _adapter(fixture)
+    try:
+        await adapter.start_session(_task(), session_id="S-dsh", metadata={})
+        result = await adapter.send_message(
+            "S-dsh", SessionMessage("M-long", "user", "inspect"))
+        by_name = {item["name"]: Path(item["path"])
+                   for item in result.artifacts}
+        report = by_name["last-message.md"].read_text(encoding="utf-8")
+        assert report.startswith("结果开始")
+        assert report.endswith("结果结束")
+        assert "token=[REDACTED]" in report
+        assert "secret-value" not in report
+        assert len(report) > 8192
+
+        history = json.loads(
+            by_name["dsh-history.json"].read_text(encoding="utf-8"))
+        assert history["totalEvents"] == len(fixture.events)
+        assert history["retainedEvents"] == len(fixture.events)
+        assert history["eventTruncated"] is False
+        assert history["fieldTruncated"] is False
+        assert history["truncated"] is False
+        assert len(history["entries"]) > 200
     finally:
         await client.aclose()
 

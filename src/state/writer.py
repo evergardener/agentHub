@@ -19,6 +19,17 @@ from orchestrator.nats_client import durable_consume, ensure_stream
 from state.db import init_db
 
 DURABLE = "state-writer"
+MAX_CONVERSATION_RESULT_CHARS = 200_000
+
+
+def _bounded_conversation_result(text: str) -> str:
+    if len(text) <= MAX_CONVERSATION_RESULT_CHARS:
+        return text
+    marker = (
+        "\n\n…\n[agentHub：结果事件超过 200000 字符，"
+        "State Writer 已按安全上限截断]"
+    )
+    return text[:MAX_CONVERSATION_RESULT_CHARS - len(marker)].rstrip() + marker
 
 # 事件类型 → 目标内部状态
 _EVENT_TO_STATUS = {
@@ -236,10 +247,13 @@ class StateWriter:
         task = state_store.get_task(self.conn, task_id)
         if task is None or not task["collaboration_id"]:
             return
-        text = (payload.get("summary") if event_type == "task.completed"
-                else payload.get("error"))
+        if event_type == "task.completed":
+            text = payload.get("result_text") or payload.get("summary")
+        else:
+            text = payload.get("error")
         if not isinstance(text, str) or not text.strip():
             return
+        text = _bounded_conversation_result(text)
         from orchestrator import collaboration_store
 
         collaboration = collaboration_store.get_collaboration(

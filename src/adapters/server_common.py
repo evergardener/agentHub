@@ -42,10 +42,11 @@ RunnerFn = Callable[[A2aTask], Awaitable[list[dict]]]
 CardFn = Callable[[str], dict]
 HealthFn = Callable[[], Awaitable[dict]]
 MAX_RESULT_SUMMARY_CHARS = 4000
+MAX_RESULT_MESSAGE_CHARS = 200_000
 
 
-def _result_summary(agent_id: str, artifacts: list[dict]) -> str:
-    """Return a bounded assistant result from the canonical report artifact."""
+def _canonical_result(agent_id: str, artifacts: list[dict]) -> str:
+    """Read the canonical assistant report from the configured workspace."""
     root = cfg.workspace().resolve()
     for artifact in artifacts:
         if artifact.get("name") != "last-message.md":
@@ -58,10 +59,28 @@ def _result_summary(agent_id: str, artifacts: list[dict]) -> str:
             continue
         if not text:
             continue
-        if len(text) > MAX_RESULT_SUMMARY_CHARS:
-            return text[:MAX_RESULT_SUMMARY_CHARS].rstrip() + "\n…"
         return text
     return f"{agent_id} completed (see artifacts)"
+
+
+def _result_summary(agent_id: str, artifacts: list[dict]) -> str:
+    """Return a bounded status/list summary from the canonical report."""
+    text = _canonical_result(agent_id, artifacts)
+    if len(text) > MAX_RESULT_SUMMARY_CHARS:
+        return text[:MAX_RESULT_SUMMARY_CHARS].rstrip() + "\n…"
+    return text
+
+
+def _result_text(agent_id: str, artifacts: list[dict]) -> str:
+    """Return the durable conversation result, separate from its summary."""
+    text = _canonical_result(agent_id, artifacts)
+    if len(text) > MAX_RESULT_MESSAGE_CHARS:
+        marker = (
+            "\n\n…\n[agentHub：对话结果超过 200000 字符，"
+            "完整结果见 last-message.md]"
+        )
+        return text[:MAX_RESULT_MESSAGE_CHARS - len(marker)].rstrip() + marker
+    return text
 
 
 def _card_skills(card_fn: CardFn) -> list[str]:
@@ -444,12 +463,15 @@ def build_app(
                         trace_id=trace_id,
                     )
                 if result.state == "completed":
+                    result_summary = _result_summary(
+                        agent_id, result.artifacts)
+                    result_text = _result_text(agent_id, result.artifacts)
                     await publisher.publish(
                         "task.completed", task.id,
                         {"status_from": "working", "status_to": "completed",
                          "attempt": attempt,
-                         "summary": _result_summary(
-                             agent_id, result.artifacts),
+                         "summary": result_summary,
+                         "result_text": result_text,
                          "artifacts": [a["name"] for a in result.artifacts]},
                         trace_id=trace_id,
                     )
@@ -580,13 +602,20 @@ def build_app(
                     else "task.input_required"
                     if result.state == "input-required"
                     else f"task.{result.state}")
+                completed_payload = (
+                    {
+                        "summary": _result_summary(
+                            agent_id, result.artifacts),
+                        "result_text": _result_text(
+                            agent_id, result.artifacts),
+                    }
+                    if result.state == "completed" else {}
+                )
                 await publisher.publish(
                     event_type, task.id,
                     {"interaction_id": interaction_id,
                      "status_to": result.state,
-                     **({"summary": _result_summary(
-                         agent_id, result.artifacts)}
-                        if result.state == "completed" else {}),
+                     **completed_payload,
                      "interactions": [
                          item.to_dict() for item in
                          session_adapter.list_pending_interactions(

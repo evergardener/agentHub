@@ -107,8 +107,18 @@ Session 看到后续状态、审批、Adapter run、结果、事件和 artifacts
 为 Hermes 增加 peer 或路由；Registry-only Agent 租约过期后从发现结果移除，
 避免历史测试 worker（如 `fake`）或已卸载 worker 持续暴露给 Hermes。
 完成事件的 `result_summary` 从 worker 的规范 `last-message.md` 提取，最多
-4000 字符；完整原文和其他输出仍以 artifact 为准。路径必须位于配置的
-workspace 内，否则只返回不含内容的 artifact 提示，避免越界读取。
+4000 字符，用于 Task 列表、状态查询和 A2A 简要结果；完成事件另携带最多
+200000 字符的 `result_text`，State Writer 将其作为 `agent.task.result` 写入持久
+对话，因此 WebUI 对话区不再用摘要替代 Agent 原始回复。更长输出会在对话中明确
+标记，并以 `last-message.md` 为准。路径必须位于配置的 workspace 内，否则只返回
+不含内容的 artifact 提示，避免越界读取。
+
+DSH Adapter 对 canonical `last-message.md` 保留脱敏后的完整回复，安全上限为
+1000000 字符；`dsh-history.json` 默认最多保留 5000 个原生事件，并写入
+`totalEvents`、`retainedEvents`、`eventTruncated`、`fieldTruncated` 与
+`truncated`，达到事件或字段上限时必须显式标记，禁止静默截断。原生 history
+请求最多读取 1000 条消息。以上限制用于控制 NATS payload、数据库消息和
+artifact 的资源占用，三者不得再共用 4000/8192 字符的展示摘要限制。
 
 ## Legacy
 

@@ -83,19 +83,22 @@ _FIND_FLAG_PREDICATES = frozenset({
 })
 
 
-def redact_bounded(value: Any, *, limit: int = 8192) -> Any:
+def redact_bounded(value: Any, *, limit: int = 8192,
+                   max_items: int = 200) -> Any:
     """Bound recursive DSH data and redact common credential representations."""
     if isinstance(value, str):
         return _SECRET_TEXT.sub(r"\1[REDACTED]", value[:limit])
     if isinstance(value, list):
-        return [redact_bounded(item, limit=limit) for item in value[:200]]
+        return [redact_bounded(item, limit=limit, max_items=max_items)
+                for item in value[:max_items]]
     if isinstance(value, dict):
         return {
             str(key)[:128]: (
                 "[REDACTED]" if _SENSITIVE_KEY.search(str(key))
-                else redact_bounded(item, limit=limit)
+                else redact_bounded(
+                    item, limit=limit, max_items=max_items)
             )
-            for key, item in list(value.items())[:200]
+            for key, item in list(value.items())[:max_items]
         }
     if value is None or isinstance(value, (bool, int, float)):
         return value

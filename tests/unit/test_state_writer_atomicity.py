@@ -6,7 +6,19 @@ import pytest
 
 from common.models import TaskStatus
 from orchestrator import state_store
-from state.writer import StateWriter
+from state.writer import (
+    MAX_CONVERSATION_RESULT_CHARS,
+    StateWriter,
+    _bounded_conversation_result,
+)
+
+
+def test_conversation_result_has_a_fail_closed_size_limit():
+    text = "长" * (MAX_CONVERSATION_RESULT_CHARS + 1)
+    result = _bounded_conversation_result(text)
+    assert len(result) <= MAX_CONVERSATION_RESULT_CHARS
+    assert result.startswith("长" * (MAX_CONVERSATION_RESULT_CHARS - 100))
+    assert "State Writer 已按安全上限截断" in result
 
 
 def test_worker_completed_event_enters_awaiting_acceptance(tmp_path):
@@ -30,7 +42,8 @@ def test_worker_completed_event_enters_awaiting_acceptance(tmp_path):
         "event_type": "task.completed",
         "task_id": "T-accept",
         "source": "codex",
-        "payload": {"attempt": 1, "summary": "done"},
+        "payload": {"attempt": 1, "summary": "done",
+                    "result_text": "done\n" + "完整结果" * 3000},
     }) == "applied"
     task = state_store.get_task(writer.conn, "T-accept")
     assert task["status"] == "awaiting_acceptance"
@@ -45,14 +58,17 @@ def test_worker_completed_event_enters_awaiting_acceptance(tmp_path):
     assert message["sender_type"] == "agent"
     assert message["sender_id"] == "codex"
     assert message["message_type"] == "agent.task.result"
-    assert '"text":"done"' in message["content_json"]
+    assert '"text":"done\\n完整结果完整结果' in message["content_json"]
+    assert state_store.get_task(
+        writer.conn, "T-accept")["result_summary"] == "done"
 
     assert writer.apply({
         "event_id": "E-completed-acceptance",
         "event_type": "task.completed",
         "task_id": "T-accept",
         "source": "codex",
-        "payload": {"attempt": 1, "summary": "done"},
+        "payload": {"attempt": 1, "summary": "done",
+                    "result_text": "done\n" + "完整结果" * 3000},
     }) == "duplicate"
     assert writer.conn.execute(
         "SELECT COUNT(*) FROM conversation_messages"
@@ -100,6 +116,38 @@ def test_result_message_failure_rolls_back_completed_event(
     assert writer.conn.execute(
         "SELECT COUNT(*) FROM task_runs WHERE task_id = 'T-result-atomic';"
     ).fetchone()[0] == 0
+
+
+def test_legacy_completed_event_without_result_text_uses_summary(tmp_path):
+    from orchestrator import collaboration_store
+
+    writer = StateWriter(tmp_path / "legacy-result.db")
+    conversation_id = collaboration_store.create_conversation(writer.conn)
+    collaboration_id = collaboration_store.create_collaboration(
+        writer.conn, conversation_id=conversation_id,
+        objective="legacy result",
+    )
+    state_store.create_task(
+        writer.conn, task_id="T-legacy-result", objective="legacy result",
+        created_by="hermes", assigned_to="codex",
+        collaboration_id=collaboration_id, status=TaskStatus.QUEUED)
+    state_store.transition_task(
+        writer.conn, "T-legacy-result", TaskStatus.ASSIGNED)
+    state_store.transition_task(
+        writer.conn, "T-legacy-result", TaskStatus.WORKING)
+
+    assert writer.apply({
+        "event_id": "E-legacy-result",
+        "event_type": "task.completed",
+        "task_id": "T-legacy-result",
+        "source": "codex",
+        "payload": {"attempt": 1, "summary": "legacy summary"},
+    }) == "applied"
+    message = writer.conn.execute(
+        "SELECT content_json FROM conversation_messages"
+        " WHERE task_id = 'T-legacy-result';"
+    ).fetchone()
+    assert '"text":"legacy summary"' in message["content_json"]
 
 
 def _event(event_id: str, event_type: str, task_id: str) -> dict:
