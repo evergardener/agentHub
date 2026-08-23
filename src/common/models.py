@@ -76,6 +76,7 @@ ALLOWED_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     ),
     TaskStatus.WORKING: frozenset(
         {TaskStatus.BLOCKED, TaskStatus.AWAITING_ACCEPTANCE,
+         TaskStatus.COMPLETED,  # backward-compatible historical path
          TaskStatus.FAILED, TaskStatus.CANCELLED}
     ),
     TaskStatus.BLOCKED: frozenset(

@@ -29,8 +29,7 @@ def test_dependent_task_waits_for_acceptance(tm):
     assert state_store.get_task(tm.conn, t2)["status"] == "created"
 
     # T1 accepted → T2 自动 promoted
-    state_store.transition_task(tm.conn, t1, TaskStatus.COMPLETED)
-    tm.review_result(t1, approved=True)
+    tm.accept_result(t1, decided_by="user")
     assert state_store.get_task(tm.conn, t2)["status"] == "queued"
 
 
@@ -42,11 +41,13 @@ def test_multiple_deps_all_required(tm):
         for dst in (TaskStatus.ASSIGNED, TaskStatus.WORKING, TaskStatus.COMPLETED):
             state_store.transition_task(tm.conn, t, dst)
         tm.review_result(t, approved=True)
+        tm.accept_result(t, decided_by="user")
     # 只有一个依赖 accepted，c 不动
     assert state_store.get_task(tm.conn, c)["status"] == "created"
     for dst in (TaskStatus.ASSIGNED, TaskStatus.WORKING, TaskStatus.COMPLETED):
         state_store.transition_task(tm.conn, b, dst)
     tm.review_result(b, approved=True)
+    tm.accept_result(b, decided_by="user")
     assert state_store.get_task(tm.conn, c)["status"] == "queued"
 
 

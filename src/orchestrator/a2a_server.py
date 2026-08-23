@@ -18,6 +18,8 @@
     tasks/get     params.id → A2A 状态（含 input-required 映射与产物清单）
     tasks/approve params.id → 对待批准（input-required）任务放行并委派
     tasks/reject  params.id → 对待批准任务取消
+    tasks/accept  params.id → 对待验收任务执行正式验收通过
+    tasks/request-rework params.id, feedback → 对待验收任务提报反馈返工
                   （精确动作；重复/晚到/终态返回稳定错误，不重复委派）
 
 鉴权（/health 外全路径）：
@@ -132,7 +134,8 @@ def _hub_command(text: str) -> tuple[dict | None, str | None]:
     action = value.get("action")
     if action not in {
             "agents/list", "tasks/create", "tasks/get",
-            "tasks/approve", "tasks/reject"}:
+            "tasks/approve", "tasks/reject", "tasks/accept",
+            "tasks/request-rework"}:
         return None, f"未知 agentHub action: {action}"
     return value, None
 
@@ -152,33 +155,57 @@ def _approval_pending(conn, task_id: str) -> dict | None:
     return None
 
 
+def _infer_input_required_kind(conn, row, *, pending: dict | None) -> str:
+    """从状态与上下文推断 input-required 的输入类型，便于 Hermes 分流。"""
+    status = TaskStatus(row["status"])
+    if pending is not None:
+        return "delegation"
+    if status in {TaskStatus.AWAITING_ACCEPTANCE, TaskStatus.COMPLETED}:
+        return "acceptance"
+    if status == TaskStatus.REVIEWED:
+        return "review"
+    if status == TaskStatus.REWORK_PENDING:
+        return "rework"
+    if status == TaskStatus.BLOCKED:
+        return "blocked"
+    return "input-required"
+
+
 def _to_a2a(conn, row, *, context_id: str | None = None) -> dict:
     """内部任务行 → A2A Task；created/queued + 待批准 → input-required。"""
     task_id = row["id"]
     pending = _approval_pending(conn, task_id)
+    input_required_kind = None
     if pending:
         state = "input-required"
         message = (f"task_id={task_id}; 写操作需批准"
                    f"（risk={pending.get('risk')}）："
                    f"{pending.get('reason')}。拟委派 {pending.get('agent_id')}。"
                    "以 tasks/approve 放行或 tasks/reject 取消。")
+        input_required_kind = "delegation"
     else:
         state = A2A_STATE_MAP[TaskStatus(row["status"])]
         detail = row["error_message"] or row["result_summary"] or ""
         message = f"task_id={task_id}; status={state}"
         if detail:
             message += f"; {detail}"
+        if state == "input-required":
+            input_required_kind = _infer_input_required_kind(
+                conn, row, pending=None)
     artifacts = [
         {"name": a["name"], "type": a["type"], "path": a["path"]}
         for a in state_store.list_artifacts(conn, task_id)
     ]
+    metadata = {"assigned_to": row["assigned_to"],
+                "internal_status": row["status"]}
+    if state == "input-required" and input_required_kind is not None:
+        metadata["input_required_kind"] = input_required_kind
     return {
         "id": task_id,
         "status": {"state": state, "timestamp": row["updated_at"],
                    "message": _text_message(message, context_id)},
         "artifacts": artifacts,
-        "metadata": {"assigned_to": row["assigned_to"],
-                     "internal_status": row["status"]},
+        "metadata": metadata,
         **({"contextId": context_id} if context_id else {}),
     }
 
@@ -336,6 +363,12 @@ def create_app(tm: TaskManager | None = None,
         if method == "tasks/reject":
             return await _tasks_approval(params, rpc_id, identity,
                                          approve=False)
+        if method == "tasks/accept":
+            return await _tasks_acceptance(
+                params, rpc_id, identity, approve=True)
+        if method == "tasks/request-rework":
+            return await _tasks_acceptance(
+                params, rpc_id, identity, approve=False)
         return _error(rpc_id, -32601, f"method not found: {method}")
 
     @app.api_route("/worker-proxy/{agent_id}/{path:path}",
@@ -416,6 +449,19 @@ def create_app(tm: TaskManager | None = None,
                     {"id": command.get("task_id")}, rpc_id, identity,
                     approve=action == "tasks/approve", context_id=context_id,
                     wrapped=True)
+            if action in {"tasks/accept", "tasks/request-rework"}:
+                return await _tasks_acceptance(
+                    {
+                        "id": command.get("task_id"),
+                        "feedback": command.get("feedback"),
+                        "notes": command.get("notes"),
+                    },
+                    rpc_id,
+                    identity,
+                    approve=(action == "tasks/accept"),
+                    context_id=context_id,
+                    wrapped=True,
+                )
             agent_id = str(command.get("agent") or "").strip()
             text = str(command.get("objective") or "").strip()
             if not agent_id or not text:
@@ -554,6 +600,43 @@ def create_app(tm: TaskManager | None = None,
             await tm.reject_task_request(
                 task_id, decided_by=identity["peer"], via="tasks/reject")
         row = state_store.get_task(tm.conn, task_id)
+        task = _to_a2a(tm.conn, row, context_id=context_id)
+        return _result(rpc_id, {"task": task} if wrapped else task)
+
+    async def _tasks_acceptance(params: dict, rpc_id, identity: dict,
+                               approve: bool, *, context_id: str | None = None,
+                               wrapped: bool = False) -> JSONResponse:
+        """验收/返工动作：tasks/accept + tasks/request-rework。"""
+        task_id = params.get("id")
+        if not task_id:
+            return _error(rpc_id, -32602, "params.id 必填（任务 ID）")
+        try:
+            if approve:
+                tm.accept_result(
+                    task_id,
+                    notes=(params.get("notes") or "").strip(),
+                    decided_by=identity["peer"],
+                    via="a2a",
+                )
+            else:
+                tm.reject_result(
+                    task_id,
+                    feedback=(params.get("feedback") or ""),
+                    decided_by=identity["peer"],
+                    via="a2a",
+                )
+        except ValueError as exc:
+            return _error(rpc_id, -32602, str(exc))
+        except state_store.IllegalTransition as exc:
+            return _error(rpc_id, -32602, str(exc))
+        except KeyError as exc:
+            return _error(rpc_id, -32602, str(exc))
+        except PermissionError as exc:
+            return _error(rpc_id, -32003, str(exc))
+
+        row = state_store.get_task(tm.conn, task_id)
+        if row is None:
+            return _error(rpc_id, -32602, f"task not found: {task_id}")
         task = _to_a2a(tm.conn, row, context_id=context_id)
         return _result(rpc_id, {"task": task} if wrapped else task)
 

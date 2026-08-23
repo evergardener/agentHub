@@ -166,7 +166,7 @@ def test_accept_retains_outcome(env):
     for dst in (TaskStatus.QUEUED, TaskStatus.ASSIGNED, TaskStatus.WORKING,
                 TaskStatus.COMPLETED):
         state_store.transition_task(tm.conn, t1, dst)
-    tm.review_result(t1, approved=True, notes="LGTM")
+    tm.accept_result(t1, decided_by="user", via="agentctl", notes="LGTM")
     assert len(mem.retained) == 1
     entry = mem.retained[0]
     assert entry["scope"] == "project:demo"
@@ -199,4 +199,4 @@ def test_memory_failure_does_not_block(env):
                 TaskStatus.COMPLETED):
         state_store.transition_task(tm.conn, t1, dst)
     # 记忆服务故障不影响验收
-    assert tm.review_result(t1, approved=True) == "accepted"
+    assert tm.accept_result(t1, decided_by="user", via="agentctl") == "accepted"
