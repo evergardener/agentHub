@@ -317,6 +317,19 @@ fail-closed 并要求用户决定。生产升级时必须先备份 Profile，再
 `AP-DSH-REVIEW` 做版本化更新并配置明确的 `workspace_roots`。修改
 `config/agent_templates.yaml` 只影响新 seed，不会覆盖生产数据库里的已有 Profile。
 
+Codex 使用同一个 Task `workspace` 作为 App Server thread 的 `cwd` 和唯一
+`runtimeWorkspaceRoots`。Adapter 会在 `thread/start`、`thread/resume` 及进程重连
+时核验 App Server 返回的 cwd；不一致即停止。控制文件仍写入隔离的 AgentHub task
+目录，不会向真实项目写入 `context.md`。交付物只收集本轮原生 `fileChange` 事件明确
+列出的工作区内文件，不递归复制整个真实项目。同一 native thread 不允许切换
+workspace；需要更换目录时创建替代 Session。
+
+Codex 原生审批由 State Writer 重新计算结构化语义，不信任 Adapter 提供的
+`inspectable` 标记。工作区内、包含可逆原生 patch 的新增/更新可按 Profile 路由给
+Hermes 单次批准；删除、目录移动、额外权限、未知命令、工作区外路径或缺少可验证
+回滚证据的操作继续要求用户确认。生产 Codex Profile 同样必须配置明确的
+`workspace_roots`。
+
 Kimi Adapter 使用 `kimi acp`，ACP 的 `session/request_permission` 走相同
 `blocked -> ActionIntent -> signed receipt -> native response` 链。允许仅选择
 Kimi 本次请求提供的 `allow_once`，拒绝选择 `reject_once`；prompt CLI 的

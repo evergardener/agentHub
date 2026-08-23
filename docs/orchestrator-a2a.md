@@ -70,12 +70,15 @@ Orchestrator 每次从 Registry 解析 `agent`。未知、offline 或 disabled �
 `input-required`，审批前不调用 Adapter。
 
 `workspace` 可选但必须为绝对、非根目录路径。指定后写入 Task 持久上下文并随
-Adapter 消息传递；DSH Adapter 调用原生 `workspace.create({path})` 注册或复用
+Adapter 消息传递。DSH Adapter 调用原生 `workspace.create({path})` 注册或复用
 Workspace，再通过 `session.create({workspaceId})` 建立可被 DSH 侧边栏正确分组
-的 Session。未指定时继续使用隔离的 `AgentWorkspace/tasks/<task_id>`，不会把多个
-任务混入一个共享目录。Workspace 只定义执行与路径校验边界，不等于写权限：DSH
-仍以 read-only 启动，每次修改必须产生可检查的 ActionIntent；仅当操作在 Agent
-Profile allowlist、目标位于 workspace 且有回滚计划时，Hermes 才可批准一次。
+的 Session；Codex Adapter 则把同一路径同时设置为原生 thread 的 `cwd` 和
+`runtimeWorkspaceRoots`，并在新建、恢复和进程重连时核验 App Server 回报的 cwd。
+未指定时继续使用隔离的 `AgentWorkspace/tasks/<task_id>`，不会把多个任务混入一个
+共享目录。Workspace 只定义执行与路径校验边界，不等于写权限：原生 Session 仍以
+read-only 启动，每次修改必须产生可检查的 ActionIntent；仅当操作在 Agent Profile
+allowlist、目标位于 workspace 且有可验证的回滚方案时，Hermes 才可批准一次。
+同一 native session 的 workspace 被固定；路径发生变化时必须创建替代 Session。
 
 ### 查询、批准和拒绝
 

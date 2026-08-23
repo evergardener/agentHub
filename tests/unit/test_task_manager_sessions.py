@@ -234,6 +234,41 @@ async def test_execution_workspace_must_fit_agent_profile_roots(
     assert client.sent == []
 
 
+async def test_native_session_rejects_execution_workspace_change(
+        tmp_path, monkeypatch):
+    from orchestrator import collaboration_store
+    from orchestrator.a2a_client import A2aClient
+    from orchestrator.task_manager import TaskManager
+
+    client = FakeA2aClient(native=True)
+    monkeypatch.setattr(
+        A2aClient, "for_agent", classmethod(
+            lambda cls, agent_name, direct_endpoint, timeout=30: client))
+    tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
+    conversation_id = collaboration_store.create_conversation(tm.conn)
+    collaboration_id = collaboration_store.create_collaboration(
+        tm.conn, conversation_id=conversation_id, objective="workspace pin")
+    first_workspace = tmp_path / "project-a"
+    second_workspace = tmp_path / "project-b"
+    first_workspace.mkdir()
+    second_workspace.mkdir()
+    task_id = tm.create_task(
+        "implement", collaboration_id=collaboration_id,
+        execution_workspace=str(first_workspace),
+    )
+    await (await tm.delegate_task(task_id, "http://fake", "codex"))
+    tm.conn.execute(
+        "UPDATE tasks SET plan_context_json = ? WHERE id = ?;",
+        (json.dumps({"execution_workspace": str(second_workspace)}), task_id),
+    )
+    tm.conn.commit()
+
+    with pytest.raises(RuntimeError, match="workspace changed"):
+        await tm.delegate_task(task_id, "http://fake", "codex")
+
+    assert len(client.sent) == 1
+
+
 async def test_nondurable_binding_creates_audited_replacement(
         tmp_path, monkeypatch):
     from orchestrator import collaboration_store

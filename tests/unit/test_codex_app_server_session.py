@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 
+from adapters.codex.runner import CodexFailed
 from adapters.codex.session import CodexSessionAdapter
 from adapters.common import A2aTask
 from adapters.session import SessionCapabilityError, SessionHandle
@@ -59,6 +60,34 @@ async def test_command_approval_becomes_inspectable_interaction(monkeypatch):
     assert interaction.payload["toolView"]["paths"] == [
         "/workspace/tests/unit/test_app.py"]
     assert adapter._interaction_events["S-codex"].is_set()
+
+
+async def test_file_change_approval_preserves_native_change_targets():
+    adapter = _seed_adapter()
+    adapter._items[("native-codex", "item-edit")] = {
+        "id": "item-edit", "type": "fileChange", "status": "inProgress",
+        "changes": [{
+            "path": "/workspace/src/app.py",
+            "kind": {"type": "update"},
+            "diff": "@@ -1 +1 @@\n-old\n+new",
+        }],
+    }
+
+    await adapter._handle_approval_request({
+        "jsonrpc": "2.0", "id": 51,
+        "method": "item/fileChange/requestApproval",
+        "params": {
+            "threadId": "native-codex", "turnId": "turn-1",
+            "itemId": "item-edit", "startedAtMs": 1,
+            "reason": "apply patch",
+        },
+    })
+
+    interaction = adapter.list_pending_interactions("S-codex")[0]
+    assert interaction.payload["toolView"]["paths"] == [
+        "/workspace/src/app.py"]
+    assert interaction.payload["toolView"]["changes"][0]["kind"] == {
+        "type": "update"}
 
 
 async def test_command_rejection_declines_same_native_rpc(monkeypatch):
@@ -175,7 +204,7 @@ async def test_process_restart_resumes_read_only_thread(monkeypatch, tmp_path):
 
     async def rpc(method, params):
         calls.append((method, params))
-        return {"thread": {"id": "native-codex"}}
+        return {"thread": {"id": "native-codex"}, "cwd": str(tmp_path)}
 
     monkeypatch.setattr(adapter, "_ensure_connected", connected)
     monkeypatch.setattr(adapter, "_rpc", rpc)
@@ -187,6 +216,100 @@ async def test_process_restart_resumes_read_only_thread(monkeypatch, tmp_path):
     assert calls[0][1]["sandbox"] == "read-only"
     assert calls[0][1]["approvalPolicy"] == "on-request"
     assert calls[0][1]["approvalsReviewer"] == "user"
+
+
+async def test_explicit_workspace_is_used_for_start_and_resume(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path / "agenthub"))
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    adapter = CodexSessionAdapter(timeout_seconds=1)
+    calls = []
+
+    async def connected():
+        return None
+
+    async def rpc(method, params):
+        calls.append((method, params))
+        return {
+            "thread": {"id": "native-explicit"},
+            "cwd": str(execution_workspace.resolve()),
+        }
+
+    monkeypatch.setattr(adapter, "_ensure_connected", connected)
+    monkeypatch.setattr(adapter, "_rpc", rpc)
+    task = A2aTask(
+        id="T-explicit", status_state="working", objective="edit project",
+        session_id="S-explicit", context_revision=1,
+    )
+    await adapter.start_session(
+        task, session_id="S-explicit",
+        metadata={"executionWorkspace": str(execution_workspace)},
+    )
+    adapter._loaded_threads.clear()
+    await adapter._ensure_native_loaded("S-explicit")
+
+    assert [method for method, _ in calls] == ["thread/start", "thread/resume"]
+    for _, params in calls:
+        assert params["cwd"] == str(execution_workspace.resolve())
+        assert params["runtimeWorkspaceRoots"] == [
+            str(execution_workspace.resolve())]
+        assert params["sandbox"] == "read-only"
+
+
+async def test_explicit_workspace_must_exist_and_be_a_directory(
+        monkeypatch, tmp_path):
+    adapter = CodexSessionAdapter(timeout_seconds=1)
+
+    async def connected():
+        return None
+
+    monkeypatch.setattr(adapter, "_ensure_connected", connected)
+    task = A2aTask(
+        id="T-invalid", status_state="working", objective="edit project",
+        session_id="S-invalid", context_revision=1,
+    )
+    with pytest.raises(CodexFailed, match="unavailable"):
+        await adapter.start_session(
+            task, session_id="S-invalid",
+            metadata={"executionWorkspace": str(tmp_path / "missing")},
+        )
+    with pytest.raises(CodexFailed, match="absolute"):
+        await adapter.start_session(
+            task, session_id="S-invalid",
+            metadata={"executionWorkspace": "relative/project"},
+        )
+
+
+def test_explicit_workspace_artifacts_include_only_changed_files(
+        monkeypatch, tmp_path):
+    control_workspace = tmp_path / "agenthub"
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    changed = execution_workspace / "src" / "changed.py"
+    changed.parent.mkdir()
+    changed.write_text("changed = True\n", encoding="utf-8")
+    (execution_workspace / "untouched.py").write_text(
+        "untouched = True\n", encoding="utf-8")
+    monkeypatch.setenv("LAS_WORKSPACE", str(control_workspace))
+    adapter = _seed_adapter()
+    adapter._session_workspaces["S-codex"] = execution_workspace.resolve()
+    adapter._explicit_workspace_sessions.add("S-codex")
+    adapter._updates["S-codex"] = [{
+        "method": "item/completed",
+        "item": {
+            "id": "file-1", "type": "fileChange", "status": "completed",
+            "changes": [{"path": str(changed),
+                         "kind": {"type": "update"}, "diff": "@@"}],
+        },
+    }]
+
+    artifacts = adapter._collect_turn_artifacts("S-codex")
+    names = {item["name"] for item in artifacts}
+
+    assert "workspace/src/changed.py" in names
+    assert "workspace/untouched.py" not in names
+    assert not (execution_workspace / "context.md").exists()
 
 
 async def test_unknown_thread_approval_fails_closed(monkeypatch):

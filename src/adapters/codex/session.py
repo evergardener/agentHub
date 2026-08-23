@@ -105,6 +105,8 @@ class CodexSessionAdapter(SessionAdapter):
         self._artifacts: dict[str, list[dict]] = {}
         self._stderr = bytearray()
         self._event_queues: dict[str, asyncio.Queue[SessionEvent]] = {}
+        self._session_workspaces: dict[str, Path] = {}
+        self._explicit_workspace_sessions: set[str] = set()
 
     def get_session(self, session_id: str) -> SessionHandle | None:
         return self._handles.get(session_id)
@@ -114,6 +116,35 @@ class CodexSessionAdapter(SessionAdapter):
         (ws / "input").mkdir(parents=True, exist_ok=True)
         (ws / "logs").mkdir(parents=True, exist_ok=True)
         return ws
+
+    @staticmethod
+    def _explicit_workspace(metadata: dict[str, Any]) -> Path | None:
+        value = metadata.get("executionWorkspace")
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise CodexFailed(
+                "executionWorkspace must be a non-empty absolute path")
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            raise CodexFailed("executionWorkspace must be absolute")
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as exc:
+            raise CodexFailed(
+                f"executionWorkspace is unavailable: {path}") from exc
+        if not resolved.is_dir():
+            raise CodexFailed(
+                f"executionWorkspace is not a directory: {resolved}")
+        if resolved == Path(resolved.anchor):
+            raise CodexFailed("executionWorkspace must not be a filesystem root")
+        return resolved
+
+    def _session_workspace(self, session_id: str) -> Path:
+        workspace = self._session_workspaces.get(session_id)
+        if workspace is not None:
+            return workspace
+        return self._workspace(self._handles[session_id].task_id)
 
     async def start(self) -> None:
         await self._ensure_connected()
@@ -363,6 +394,7 @@ class CodexSessionAdapter(SessionAdapter):
                     "title": f"Codex {tool_name}", "kind": tool_name,
                     "paths": paths, "cwd": params.get("cwd") or item.get("cwd"),
                     "command": command,
+                    "changes": item.get("changes"),
                     "commandActions": params.get("commandActions")
                     or item.get("commandActions"),
                     "permissions": params.get("permissions"),
@@ -470,23 +502,47 @@ class CodexSessionAdapter(SessionAdapter):
             params["model"] = model
         return params
 
+    @staticmethod
+    def _verify_thread_result(
+        result: Any, *, expected_workspace: Path,
+        expected_native_id: str | None = None,
+    ) -> str:
+        if not isinstance(result, dict):
+            raise CodexFailed("Codex App Server returned an invalid thread result")
+        thread = result.get("thread")
+        native = thread.get("id") if isinstance(thread, dict) else None
+        cwd = result.get("cwd")
+        if not isinstance(native, str) or not native:
+            raise CodexFailed("Codex App Server returned no thread id")
+        if expected_native_id is not None and native != expected_native_id:
+            raise CodexFailed("Codex App Server resumed a different thread")
+        if (not isinstance(cwd, str)
+                or Path(cwd).expanduser().resolve(strict=False)
+                != expected_workspace.resolve(strict=False)):
+            raise CodexFailed(
+                "Codex native thread workspace does not match the AgentHub task")
+        return native
+
     async def start_session(self, task: A2aTask, *, session_id: str,
                             metadata: dict[str, Any]) -> SessionHandle:
+        explicit_workspace = self._explicit_workspace(metadata)
+        control_workspace = self._workspace(task.id)
+        ws = explicit_workspace or control_workspace
         await self._ensure_connected()
         native = metadata.get("nativeSessionId") or task.native_session_id
-        ws = self._workspace(task.id)
         if native:
-            await self._rpc("thread/resume", {
+            result = await self._rpc("thread/resume", {
                 "threadId": native, **self._thread_params(ws),
             })
+            native = self._verify_thread_result(
+                result, expected_workspace=ws,
+                expected_native_id=str(native))
         else:
             result = await self._rpc("thread/start", {
                 **self._thread_params(ws), "ephemeral": False,
             })
-            thread = result.get("thread") if isinstance(result, dict) else None
-            native = thread.get("id") if isinstance(thread, dict) else None
-        if not isinstance(native, str) or not native:
-            raise CodexFailed("Codex App Server returned no thread id")
+            native = self._verify_thread_result(
+                result, expected_workspace=ws)
         self._loaded_threads.add(native)
         handle = SessionHandle(
             session_id=session_id, task_id=task.id,
@@ -494,6 +550,11 @@ class CodexSessionAdapter(SessionAdapter):
             context_revision=task.context_revision,
         )
         self._handles[session_id] = handle
+        self._session_workspaces[session_id] = ws
+        if explicit_workspace is not None:
+            self._explicit_workspace_sessions.add(session_id)
+        else:
+            self._explicit_workspace_sessions.discard(session_id)
         self._tasks[session_id] = task
         self._interactions.setdefault(session_id, {})
         self._interaction_events.setdefault(session_id, asyncio.Event())
@@ -508,11 +569,13 @@ class CodexSessionAdapter(SessionAdapter):
             raise SessionCapabilityError("native Codex thread ID is missing")
         if native in self._loaded_threads:
             return
-        task = self._tasks[session_id]
-        await self._rpc("thread/resume", {
+        result = await self._rpc("thread/resume", {
             "threadId": native,
-            **self._thread_params(self._workspace(task.id)),
+            **self._thread_params(self._session_workspace(session_id)),
         })
+        self._verify_thread_result(
+            result, expected_workspace=self._session_workspace(session_id),
+            expected_native_id=native)
         self._loaded_threads.add(native)
 
     async def send_message(self, session_id: str,
@@ -526,8 +589,8 @@ class CodexSessionAdapter(SessionAdapter):
         if session_id in self._active_turn_ids:
             raise SessionCapabilityError("session already has an active turn")
         await self._ensure_native_loaded(session_id)
-        ws = self._workspace(task.id)
-        (ws / "context.md").write_text(
+        control_workspace = self._workspace(task.id)
+        (control_workspace / "context.md").write_text(
             f"# Task {task.id}\n\n## Turn\n\n{message.content}\n",
             encoding="utf-8",
         )
@@ -597,7 +660,7 @@ class CodexSessionAdapter(SessionAdapter):
 
     def _collect_turn_artifacts(self, session_id: str) -> list[dict]:
         task = self._tasks[session_id]
-        ws = self._workspace(task.id)
+        ws = self._session_workspace(session_id)
         wire = "\n".join(
             json.dumps(item, ensure_ascii=False, separators=(",", ":"))
             for item in self._updates.get(session_id, [])
@@ -611,7 +674,41 @@ class CodexSessionAdapter(SessionAdapter):
                 .encode(), "report",
             ),
         ]
-        artifacts.extend(self._workspace_artifacts(task.id, ws))
+        if session_id in self._explicit_workspace_sessions:
+            artifacts.extend(self._changed_workspace_artifacts(
+                session_id, task.id, ws))
+        else:
+            artifacts.extend(self._workspace_artifacts(task.id, ws))
+        return artifacts
+
+    def _changed_workspace_artifacts(
+        self, session_id: str, task_id: str, ws: Path,
+    ) -> list[dict]:
+        paths: list[Path] = []
+        for update in self._updates.get(session_id, []):
+            item = update.get("item") if isinstance(update, dict) else None
+            if not isinstance(item, dict) or item.get("type") != "fileChange":
+                continue
+            for change in item.get("changes") or []:
+                if not isinstance(change, dict):
+                    continue
+                value = change.get("path")
+                if not isinstance(value, str) or not value:
+                    continue
+                path = Path(value).expanduser()
+                if not path.is_absolute():
+                    path = ws / path
+                path = path.resolve(strict=False)
+                if (path != ws and ws not in path.parents) or path in paths:
+                    continue
+                paths.append(path)
+        artifacts = []
+        for path in paths[:200]:
+            if not path.is_file():
+                continue
+            rel = path.relative_to(ws)
+            artifacts.append(save_artifact(
+                task_id, f"workspace/{rel}", path.read_bytes(), "file"))
         return artifacts
 
     def _workspace_artifacts(self, task_id: str, ws: Path) -> list[dict]:

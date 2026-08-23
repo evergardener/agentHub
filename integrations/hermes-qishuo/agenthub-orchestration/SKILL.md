@@ -1,7 +1,7 @@
 ---
 name: agenthub-orchestration
 description: Route delegated Agent work through agentHub.
-version: 1.1.0
+version: 1.2.0
 author: evergarden, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -47,10 +47,12 @@ online:
 ```
 
 When the task must inspect or modify a real project, include its absolute
-`workspace`. agentHub persists and audits the path, validates it against the
-selected Agent Profile, and makes DSH create the native Session under that
-registered Workspace. Omit `workspace` only for an isolated AgentHub task
-workspace. Never infer a different directory from a prior conversation.
+`workspace`. agentHub persists and audits the path and validates it against the
+selected Agent Profile. DSH creates the native Session under that registered
+Workspace; Codex pins the native thread `cwd` and runtime workspace roots to
+the same path. Omit `workspace` only for an isolated AgentHub task workspace.
+Never infer a different directory from a prior conversation or change the
+workspace of an existing native Session.
 
 Query a task:
 

@@ -248,6 +248,29 @@ class TaskManager:
             if binding is not None:
                 turn_sequence = binding["last_message_seq"] + 1
             if binding is not None and recovery_plan == "native_resume":
+                try:
+                    snapshot = json.loads(
+                        binding["context_snapshot_json"] or "{}")
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        "native session context snapshot is invalid") from exc
+                previous_context = snapshot.get("task_plan")
+                previous_workspace = (
+                    previous_context.get("execution_workspace")
+                    if isinstance(previous_context, dict) else None
+                )
+                if previous_workspace is not None:
+                    try:
+                        previous_workspace = normalize_execution_workspace(
+                            previous_workspace)
+                    except (TypeError, ValueError) as exc:
+                        raise RuntimeError(
+                            "native session workspace snapshot is invalid"
+                        ) from exc
+                if previous_workspace != execution_workspace:
+                    raise RuntimeError(
+                        "execution workspace changed for a native session; "
+                        "create a replacement session")
                 adapter_session_id = (
                     binding["adapter_session_id"] or adapter_session_id)
                 native_session_id = binding["native_session_id"]

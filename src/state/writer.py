@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 from common.models import TaskStatus
@@ -333,23 +334,41 @@ class StateWriter:
             self.conn, task["collaboration_id"])
         if collaboration is None:
             return
+        execution_workspace = self._task_execution_workspace(task)
         for raw_item in interactions:
             item = dict(raw_item)
             details = dict(item.get("payload") or {})
             tool_view = details.get("toolView") or {}
-            if (agent_id == "dsh" and item.get("kind") == "approval"
-                    and tool_view):
+            if (agent_id in {"codex", "dsh"}
+                    and item.get("kind") == "approval" and tool_view):
                 # Recompute before persistence so UI/TaskManager never retain
                 # adapter-authored inspectable=true for unverified input.
-                from adapters.dsh.safety import (
-                    normalize_tool_view,
-                    tool_view_is_inspectable,
-                )
+                if agent_id == "dsh":
+                    from adapters.dsh.safety import (
+                        normalize_tool_view,
+                        tool_view_is_inspectable,
+                    )
+                else:
+                    from adapters.codex.safety import (
+                        normalize_tool_view,
+                        tool_view_is_inspectable,
+                    )
 
-                tool_view = normalize_tool_view(
-                    tool_view,
-                    workspace=self._workspace_root() / "tasks" / task_id,
-                ) or {}
+                tool_view = (
+                    normalize_tool_view(
+                        tool_view, workspace=execution_workspace) or {}
+                    if execution_workspace is not None else {
+                        **tool_view,
+                        "semanticIntent": {
+                            "status": "unverified",
+                            "operation": "agent.tool.unknown",
+                            "impact": "unknown",
+                            "targets": {"paths": []},
+                            "rollbackPlan": None,
+                            "reason": "task execution workspace is invalid",
+                        },
+                    }
+                )
                 details["toolView"] = tool_view
                 details["inspectable"] = tool_view_is_inspectable(tool_view)
                 item["payload"] = details
@@ -366,7 +385,7 @@ class StateWriter:
             semantic = tool_view.get("semanticIntent") or {}
             semantic_targets = semantic.get("targets")
             verified = (
-                agent_id == "dsh"
+                agent_id in {"codex", "dsh"}
                 and semantic.get("status") == "verified"
                 and isinstance(semantic.get("operation"), str)
                 and bool(semantic.get("operation"))
@@ -415,6 +434,25 @@ class StateWriter:
         from common import config as cfg
 
         return cfg.workspace()
+
+    def _task_execution_workspace(self, task) -> Path | None:
+        try:
+            context = json.loads(task["plan_context_json"] or "null")
+        except (TypeError, ValueError):
+            return None
+        value = (
+            context.get("execution_workspace")
+            if isinstance(context, dict) else None
+        )
+        if value is None:
+            return (self._workspace_root() / "tasks" / task["id"]).resolve(
+                strict=False)
+        try:
+            from orchestrator.task_manager import normalize_execution_workspace
+
+            return Path(normalize_execution_workspace(value))
+        except (TypeError, ValueError):
+            return None
 
     def _audit(self, event: dict, reason: str) -> None:
         record = {

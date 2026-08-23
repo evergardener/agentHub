@@ -137,3 +137,104 @@ def test_state_writer_recomputes_dsh_semantics_instead_of_trusting_event(
     ).fetchone()
     assert intent["operation"] == "agent.tool.bash"
     assert intent["status"] == "awaiting_user"
+
+
+def test_state_writer_uses_explicit_workspace_for_dsh_semantics(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path / "agenthub"))
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    writer = StateWriter(tmp_path / "state.db")
+    conversation_id = collaboration_store.create_conversation(writer.conn)
+    collaboration_id = collaboration_store.create_collaboration(
+        writer.conn, conversation_id=conversation_id, objective="review")
+    state_store.create_task(
+        writer.conn, task_id="T-explicit-dsh", objective="review",
+        created_by="hermes", assigned_to="dsh",
+        collaboration_id=collaboration_id, status=TaskStatus.QUEUED,
+        plan_context={"execution_workspace": str(execution_workspace)},
+    )
+    state_store.transition_task(
+        writer.conn, "T-explicit-dsh", TaskStatus.ASSIGNED)
+    state_store.transition_task(
+        writer.conn, "T-explicit-dsh", TaskStatus.WORKING)
+    writer.apply({
+        "event_id": "E-explicit-dsh", "event_type": "task.input_required",
+        "source": "dsh", "task_id": "T-explicit-dsh",
+        "payload": {
+            "session_id": "S-explicit-dsh",
+            "native_session_id": "native-explicit-dsh",
+            "interactions": [{
+                "interactionId": "dsh:explicit", "kind": "approval",
+                "nativeRequestId": "rpc-explicit",
+                "nativeSessionId": "native-explicit-dsh",
+                "payload": {
+                    "toolName": "bash", "inspectable": True,
+                    "toolView": {
+                        "card": "terminal", "command": "touch safe.txt",
+                        "cwd": str(execution_workspace),
+                    },
+                },
+            }],
+        },
+    })
+
+    interaction = collaboration_store.list_session_interactions(
+        writer.conn, task_id="T-explicit-dsh")[0]
+    persisted = json.loads(interaction["payload_json"])
+    assert persisted["toolView"]["semanticIntent"]["targets"][
+        "workspace"] == str(execution_workspace.resolve())
+
+
+def test_state_writer_verifies_codex_file_change_for_hermes_route(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path / "agenthub"))
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    target = execution_workspace / "src" / "app.py"
+    writer = StateWriter(tmp_path / "state.db")
+    conversation_id = collaboration_store.create_conversation(writer.conn)
+    collaboration_id = collaboration_store.create_collaboration(
+        writer.conn, conversation_id=conversation_id, objective="implement")
+    state_store.create_task(
+        writer.conn, task_id="T-codex", objective="implement",
+        created_by="hermes", assigned_to="codex",
+        collaboration_id=collaboration_id, status=TaskStatus.QUEUED,
+        plan_context={"execution_workspace": str(execution_workspace)},
+    )
+    state_store.transition_task(writer.conn, "T-codex", TaskStatus.ASSIGNED)
+    state_store.transition_task(writer.conn, "T-codex", TaskStatus.WORKING)
+    writer.apply({
+        "event_id": "E-codex-edit", "event_type": "task.input_required",
+        "source": "codex", "task_id": "T-codex",
+        "payload": {
+            "session_id": "S-codex", "native_session_id": "native-codex",
+            "interactions": [{
+                "interactionId": "codex:edit", "kind": "approval",
+                "nativeRequestId": "rpc-edit",
+                "nativeSessionId": "native-codex",
+                "payload": {
+                    "toolName": "edit", "inspectable": True,
+                    "reason": "apply patch",
+                    "toolView": {
+                        "kind": "edit", "paths": [str(target)],
+                        "changes": [{
+                            "path": str(target),
+                            "kind": {"type": "update"},
+                            "diff": "@@ -1 +1 @@\n-old\n+new",
+                        }],
+                    },
+                },
+            }],
+        },
+    })
+
+    interaction = collaboration_store.list_session_interactions(
+        writer.conn, task_id="T-codex")[0]
+    intent = writer.conn.execute(
+        "SELECT * FROM action_intents WHERE id = ?;",
+        (interaction["action_intent_id"],),
+    ).fetchone()
+    assert intent["operation"] == "filesystem.write"
+    assert intent["status"] == "awaiting_hermes"
+    assert intent["policy_route"] == "hermes"
