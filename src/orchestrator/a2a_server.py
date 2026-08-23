@@ -435,7 +435,61 @@ def create_app(tm: TaskManager | None = None,
         if err:
             return _error(rpc_id, -32602, err)
 
-        tid = tm.create_task(text, project=metadata.get("project"))
+        collaboration_id = None
+        a2a_context = None
+        if identity.get("kind") == "hub":
+            from orchestrator import collaboration_store
+
+            context_id = context_id or f"ctx-agenthub-{uuid.uuid4().hex}"
+            try:
+                a2a_context = collaboration_store.ensure_a2a_collaboration(
+                    tm.conn,
+                    peer=identity["peer"],
+                    context_id=context_id,
+                    objective=text,
+                    project=metadata.get("project"),
+                )
+            except (ValueError, RuntimeError) as exc:
+                return _error(rpc_id, -32602, str(exc))
+            collaboration_id = a2a_context["collaboration_id"]
+
+        tid = tm.create_task(
+            text,
+            project=metadata.get("project"),
+            collaboration_id=collaboration_id,
+        )
+        if a2a_context is not None:
+            from orchestrator import collaboration_store
+
+            collaboration_store.append_message(
+                tm.conn,
+                conversation_id=a2a_context["conversation_id"],
+                collaboration_id=collaboration_id,
+                task_id=tid,
+                agent_id=agent_id,
+                sender_type="hermes",
+                sender_id=identity["peer"],
+                recipient_type="agent",
+                recipient_id=agent_id,
+                message_type="a2a.task.request",
+                content={
+                    "text": text,
+                    "agent": agent_id,
+                    "contextId": context_id,
+                },
+                based_on_revision=1,
+                idempotency_key=f"a2a-task-request:{tid}",
+            )
+            _record(
+                "task.a2a_context.bound",
+                tid,
+                {
+                    "peer": identity["peer"],
+                    "context_id": context_id,
+                    "conversation_id": a2a_context["conversation_id"],
+                    "collaboration_id": collaboration_id,
+                },
+            )
         decision = policy.decide(tm.conn, text)
         if decision.action == "ask":
             _record("task.approval_requested", tid,

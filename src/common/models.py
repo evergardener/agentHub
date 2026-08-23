@@ -14,7 +14,9 @@ class TaskStatus(str, enum.Enum):
     FAILED = "failed"
     RETRY_PENDING = "retry_pending"
     COMPLETED = "completed"
+    AWAITING_ACCEPTANCE = "awaiting_acceptance"
     REVIEWED = "reviewed"
+    REWORK_PENDING = "rework_pending"
     ACCEPTED = "accepted"
     CANCELLED = "cancelled"
 
@@ -28,6 +30,7 @@ class CollaborationPhase(str, enum.Enum):
     AWAITING_APPROVAL = "awaiting_approval"
     EXECUTING = "executing"
     REVIEWING = "reviewing"
+    AWAITING_ACCEPTANCE = "awaiting_acceptance"
     REWORK = "rework"
     ACCEPTED = "accepted"
     PAUSED = "paused"
@@ -72,16 +75,29 @@ ALLOWED_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
         {TaskStatus.WORKING, TaskStatus.FAILED, TaskStatus.CANCELLED}
     ),
     TaskStatus.WORKING: frozenset(
-        {TaskStatus.BLOCKED, TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+        {TaskStatus.BLOCKED, TaskStatus.AWAITING_ACCEPTANCE,
+         TaskStatus.FAILED, TaskStatus.CANCELLED}
     ),
     TaskStatus.BLOCKED: frozenset(
         {TaskStatus.WORKING, TaskStatus.FAILED, TaskStatus.CANCELLED}
     ),
     TaskStatus.FAILED: frozenset({TaskStatus.RETRY_PENDING, TaskStatus.CANCELLED}),
     TaskStatus.RETRY_PENDING: frozenset({TaskStatus.QUEUED, TaskStatus.CANCELLED}),
-    TaskStatus.COMPLETED: frozenset({TaskStatus.REVIEWED, TaskStatus.CANCELLED}),
+    # COMPLETED is retained for historical rows only.  New worker completion
+    # events enter AWAITING_ACCEPTANCE instead.
+    TaskStatus.COMPLETED: frozenset(
+        {TaskStatus.REVIEWED, TaskStatus.REWORK_PENDING,
+         TaskStatus.ACCEPTED, TaskStatus.CANCELLED}
+    ),
+    TaskStatus.AWAITING_ACCEPTANCE: frozenset(
+        {TaskStatus.REVIEWED, TaskStatus.REWORK_PENDING,
+         TaskStatus.ACCEPTED, TaskStatus.CANCELLED}
+    ),
     TaskStatus.REVIEWED: frozenset(
-        {TaskStatus.ACCEPTED, TaskStatus.WORKING, TaskStatus.CANCELLED}
+        {TaskStatus.ACCEPTED, TaskStatus.REWORK_PENDING, TaskStatus.CANCELLED}
+    ),
+    TaskStatus.REWORK_PENDING: frozenset(
+        {TaskStatus.ASSIGNED, TaskStatus.CANCELLED}
     ),
     TaskStatus.ACCEPTED: frozenset(),
     TaskStatus.CANCELLED: frozenset(),
@@ -101,8 +117,10 @@ A2A_STATE_MAP: dict[TaskStatus, str] = {
     TaskStatus.WORKING: "working",
     TaskStatus.RETRY_PENDING: "working",
     TaskStatus.BLOCKED: "input-required",
-    TaskStatus.COMPLETED: "completed",
-    TaskStatus.REVIEWED: "completed",
+    TaskStatus.COMPLETED: "input-required",
+    TaskStatus.AWAITING_ACCEPTANCE: "input-required",
+    TaskStatus.REVIEWED: "input-required",
+    TaskStatus.REWORK_PENDING: "working",
     TaskStatus.ACCEPTED: "completed",
     TaskStatus.FAILED: "failed",
     TaskStatus.CANCELLED: "canceled",

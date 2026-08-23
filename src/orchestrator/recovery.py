@@ -18,8 +18,16 @@ from orchestrator.a2a_client import A2aClient, A2aError
 from state.db import CST
 
 NON_TERMINAL = ("created", "queued", "assigned", "working", "blocked",
-                "retry_pending", "completed", "reviewed")
-_A2A_TO_INTERNAL = {v: k for k, v in A2A_STATE_MAP.items()}
+                "retry_pending", "completed", "awaiting_acceptance",
+                "reviewed", "rework_pending")
+_A2A_TO_INTERNAL = {
+    "submitted": TaskStatus.ASSIGNED,
+    "working": TaskStatus.WORKING,
+    "input-required": TaskStatus.BLOCKED,
+    "completed": TaskStatus.AWAITING_ACCEPTANCE,
+    "failed": TaskStatus.FAILED,
+    "canceled": TaskStatus.CANCELLED,
+}
 
 
 async def recover(conn: sqlite3.Connection, endpoints: dict[str, str],
@@ -35,7 +43,7 @@ async def recover(conn: sqlite3.Connection, endpoints: dict[str, str],
         task_id = row["id"]
         status = row["status"]
         if status not in ("assigned", "working"):
-            continue  # queued/retry_pending 等待调度；completed/reviewed 等 review
+            continue  # queued/rework/acceptance states wait for orchestration/user
 
         agent_id = row["assigned_to"]
         endpoint = endpoints.get(agent_id or "")

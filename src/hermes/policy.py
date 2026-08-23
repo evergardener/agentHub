@@ -46,6 +46,12 @@ _NEGATED_ENGLISH_WRITE = re.compile(
 _NEGATED_CHINESE_WRITE = (
     "不要修改", "不得修改", "禁止修改", "不写入", "不得写入", "禁止写入",
     "不删除", "不得删除", "禁止删除",
+    "不创建", "不得创建", "禁止创建",
+)
+_NEGATED_CHINESE_RISK_PHRASES = (
+    "不得修改、创建、删除", "不得修改、创建或删除",
+    "禁止修改、创建、删除", "禁止修改、创建或删除",
+    "是否发生写入", "是否有写入",
 )
 
 
@@ -72,6 +78,8 @@ class ApprovalPolicy:
         """按关键词粗分风险等级；未知操作 fail-closed。"""
         normalized = objective.casefold()
         effective = _NEGATED_ENGLISH_WRITE.sub("", normalized)
+        for phrase in _NEGATED_CHINESE_RISK_PHRASES:
+            effective = effective.replace(phrase, "")
         for phrase in _NEGATED_CHINESE_WRITE:
             effective = effective.replace(phrase, "")
         if any(str(k).casefold() in effective for k in self.never_grant):

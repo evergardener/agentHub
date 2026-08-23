@@ -93,8 +93,15 @@ Orchestrator 每次从 Registry 解析 `agent`。未知、offline 或 disabled �
 
 ## Context 与审计
 
-qishuo 对同一协作持续传递 `context_id`。agentHub 在 Task 中回显 `contextId`，
-并以 task ID 连接状态、审批、Adapter run、产物和事件。初始
+qishuo 对同一协作持续传递 `context_id`。Orchestrator 将
+`(已认证 peer, contextId)` 映射为稳定的 Conversation/Collaboration；相同 peer
+和 context 会复用同一会话，不同 peer 即使发送相同 context 也不会串话。映射使用
+哈希后的内部 ID，不把调用方字符串直接作为主键。若请求没有 `contextId`，
+agentHub 生成一个并在 Task 中回显，调用方后续必须续传该值。
+
+`tasks/create` 在创建 Task 时写入 `tasks.collaboration_id`，并保存一条未总结的
+`a2a.task.request` 消息和 `task.a2a_context.bound` 审计事件。因此 WebUI 可从
+Session 看到后续状态、审批、Adapter run、结果、事件和 artifacts。初始
 `submitted` 不代表已完成；Hermes 必须查询终态和产物后再汇报。
 未写入静态 catalog 的新 Agent 可凭有效 Registry lease 自动出现，无需
 为 Hermes 增加 peer 或路由；Registry-only Agent 租约过期后从发现结果移除，
@@ -107,7 +114,8 @@ workspace 内，否则只返回不含内容的 artifact 提示，避免越界读
 
 `message/send` + `X-Agent-Token` + `metadata.agent` 仅保留给旧本地 client。
 qishuo 生产调用不得使用 legacy 路径，也不得在 agentHub 失败时直调
-worker Adapter/CLI。
+worker Adapter/CLI。legacy 路径不自动创建 Collaboration，避免把身份不明确的
+旧调用混入 qishuo 会话。
 
 ## 验收
 

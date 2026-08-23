@@ -72,7 +72,7 @@ def test_capacity_check(registry, conn):
     assert registry.find_agent_by_skill("research", conn) != []
     # 不带 conn 时只做技能过滤
     assert len(registry.find_agent_by_skill("coding")) == 1
-    state_store.transition_task(conn, tid, TaskStatus.COMPLETED)
+    state_store.transition_task(conn, tid, TaskStatus.AWAITING_ACCEPTANCE)
     assert len(registry.find_agent_by_skill("coding", conn)) == 1
 
 
@@ -99,6 +99,7 @@ def test_janitor_timeout_sweep(conn):
     tid = _task(conn, status=TaskStatus.WORKING, assigned_to="codex")
     conn.execute(
         "UPDATE tasks SET started_at = '2000-01-01T00:00:00+08:00',"
+        " updated_at = '2000-01-01T00:00:00+08:00',"
         " timeout_seconds = 60 WHERE id = ?;", (tid,))
     conn.execute(
         "INSERT INTO agents (id, role, status, lease_expires_at, created_at, updated_at)"
@@ -110,6 +111,137 @@ def test_janitor_timeout_sweep(conn):
     assert stats["failed_timeout"] == 1
     assert state_store.get_task(conn, tid)["status"] == "failed"
     assert "timeout" in state_store.get_task(conn, tid)["error_message"]
+
+
+def test_janitor_pauses_timeout_while_blocked_and_resets_on_resume(conn):
+    tid = _task(conn, status=TaskStatus.WORKING, assigned_to="codex")
+    first_started = "2000-01-01T00:00:00+08:00"
+    conn.execute(
+        "UPDATE tasks SET started_at = ?, updated_at = ?,"
+        " timeout_seconds = 60 WHERE id = ?;",
+        (first_started, first_started, tid))
+    conn.execute(
+        "INSERT INTO agents (id, role, status, lease_expires_at, created_at,"
+        " updated_at) VALUES"
+        " ('codex','worker','online','2999-01-01T00:00:00+08:00','x','x');")
+    conn.commit()
+
+    state_store.transition_task(conn, tid, TaskStatus.BLOCKED)
+    blocked = state_store.get_task(conn, tid)
+    janitor = Janitor.__new__(Janitor)
+    janitor.conn, janitor.alerts = conn, []
+    assert janitor.sweep()["failed_timeout"] == 0
+    assert state_store.get_task(conn, tid)["status"] == "blocked"
+
+    state_store.transition_task(conn, tid, TaskStatus.WORKING)
+    resumed = state_store.get_task(conn, tid)
+    assert resumed["started_at"] == first_started
+    assert resumed["updated_at"] != blocked["updated_at"]
+    assert janitor.sweep()["failed_timeout"] == 0
+    assert state_store.get_task(conn, tid)["status"] == "working"
+
+    first_resume_version = resumed["updated_at"]
+    state_store.transition_task(conn, tid, TaskStatus.BLOCKED)
+    state_store.transition_task(conn, tid, TaskStatus.WORKING)
+    second_resume = state_store.get_task(conn, tid)
+    assert second_resume["started_at"] == first_started
+    assert second_resume["updated_at"] != first_resume_version
+    assert janitor.sweep()["failed_timeout"] == 0
+    assert state_store.get_task(conn, tid)["status"] == "working"
+    assert janitor.alerts == []
+
+
+def test_janitor_sweeps_after_resumed_working_interval_expires(conn):
+    tid = _task(conn, status=TaskStatus.WORKING, assigned_to="codex")
+    conn.execute(
+        "UPDATE tasks SET timeout_seconds = 60 WHERE id = ?;", (tid,))
+    conn.execute(
+        "INSERT INTO agents (id, role, status, lease_expires_at, created_at,"
+        " updated_at) VALUES"
+        " ('codex','worker','online','2999-01-01T00:00:00+08:00','x','x');")
+    conn.commit()
+    state_store.transition_task(conn, tid, TaskStatus.BLOCKED)
+    state_store.transition_task(conn, tid, TaskStatus.WORKING)
+    conn.execute(
+        "UPDATE tasks SET updated_at = '2000-01-01T00:00:00+08:00'"
+        " WHERE id = ?;", (tid,))
+    conn.commit()
+
+    janitor = Janitor.__new__(Janitor)
+    janitor.conn, janitor.alerts = conn, []
+    stats = janitor.sweep()
+
+    assert stats["failed_timeout"] == 1
+    assert state_store.get_task(conn, tid)["status"] == "failed"
+    assert janitor.alerts[0]["kind"] == "timeout_swept"
+
+
+def test_transition_snapshot_rejects_rapid_working_aba(conn):
+    tid = _task(conn, status=TaskStatus.WORKING)
+    original_version = state_store.get_task(conn, tid)["updated_at"]
+
+    state_store.transition_task(conn, tid, TaskStatus.BLOCKED)
+    state_store.transition_task(conn, tid, TaskStatus.WORKING)
+    resumed = state_store.get_task(conn, tid)
+    assert resumed["updated_at"] != original_version
+
+    with pytest.raises(state_store.IllegalTransition):
+        state_store.transition_task(
+            conn, tid, TaskStatus.FAILED,
+            error_message="timeout_swept",
+            expected_updated_at=original_version)
+    current = state_store.get_task(conn, tid)
+    assert current["status"] == "working"
+    assert current["error_message"] is None
+
+
+def test_janitor_stale_scan_cannot_fail_resumed_working_task(conn):
+    tid = _task(conn, status=TaskStatus.WORKING, assigned_to="codex")
+    stale_version = "2000-01-01T00:00:00+08:00"
+    conn.execute(
+        "UPDATE tasks SET started_at = ?, updated_at = ?,"
+        " timeout_seconds = 60 WHERE id = ?;",
+        (stale_version, stale_version, tid))
+    conn.execute(
+        "INSERT INTO agents (id, role, status, lease_expires_at, created_at,"
+        " updated_at) VALUES"
+        " ('codex','worker','online','2999-01-01T00:00:00+08:00','x','x');")
+    conn.commit()
+
+    class StaleRows:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            state_store.transition_task(conn, tid, TaskStatus.BLOCKED)
+            state_store.transition_task(conn, tid, TaskStatus.WORKING)
+            return self.rows
+
+    class RaceConnection:
+        backend = "sqlite"
+
+        def execute(self, sql, params=()):
+            cursor = conn.execute(sql, params)
+            if "SELECT id, updated_at, timeout_seconds FROM tasks" in sql:
+                return StaleRows(cursor.fetchall())
+            return cursor
+
+        def commit(self):
+            conn.commit()
+
+        def rollback(self):
+            conn.rollback()
+
+    janitor = Janitor.__new__(Janitor)
+    janitor.conn, janitor.alerts = RaceConnection(), []
+    stats = janitor.sweep()
+
+    current = state_store.get_task(conn, tid)
+    assert current["status"] == "working"
+    assert current["updated_at"] != stale_version
+    assert current["error_message"] is None
+    assert stats["failed_timeout"] == 0
+    assert janitor.alerts == []
 
 
 def test_janitor_cascade_cancel(conn):
@@ -193,12 +325,34 @@ def test_review_rework_cycle(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_WORKSPACE", str(tmp_path / "ws"))
     tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
     tid = tm.create_task("review me")
-    for dst in (TaskStatus.ASSIGNED, TaskStatus.WORKING, TaskStatus.COMPLETED):
+    for dst in (
+        TaskStatus.ASSIGNED,
+        TaskStatus.WORKING,
+        TaskStatus.AWAITING_ACCEPTANCE,
+    ):
         state_store.transition_task(tm.conn, tid, dst)
-    assert tm.review_result(tid, approved=False, notes="fix it") == "working"
-    # 返工完成后再审，批准
-    state_store.transition_task(tm.conn, tid, TaskStatus.COMPLETED)
-    assert tm.review_result(tid, approved=True) == "accepted"
+    assert tm.review_result(tid, approved=False, notes="建议修复") == "reviewed"
+    assert tm.reject_result(tid, feedback="fix it") == "rework_pending"
+    assert state_store.get_task(tm.conn, tid)["status"] == "rework_pending"
+
+
+def test_acceptance_requires_user_and_rework_requires_feedback(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_WORKSPACE", str(tmp_path / "ws"))
+    tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
+    tid = tm.create_task("review me")
+    for dst in (
+        TaskStatus.ASSIGNED,
+        TaskStatus.WORKING,
+        TaskStatus.AWAITING_ACCEPTANCE,
+    ):
+        state_store.transition_task(tm.conn, tid, dst)
+
+    assert tm.review_result(tid, approved=True, notes="looks good") == "reviewed"
+    assert state_store.get_task(tm.conn, tid)["status"] == "reviewed"
+    with pytest.raises(ValueError, match="feedback"):
+        tm.reject_result(tid, feedback="   ")
+    assert tm.accept_result(tid, decided_by="user", via="webui") == "accepted"
 
 
 # ---------- recovery ----------

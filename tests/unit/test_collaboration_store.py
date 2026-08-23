@@ -47,6 +47,38 @@ def test_create_conversation_collaboration_and_task_link(conn):
     assert state_store.get_task(conn, task_id)["collaboration_id"] == collaboration_id
 
 
+def test_a2a_context_mapping_is_stable_and_peer_scoped(conn):
+    first = collaboration_store.ensure_a2a_collaboration(
+        conn, peer="qishuo", context_id="ctx-shared",
+        objective="first objective", project="agentHub")
+    replay = collaboration_store.ensure_a2a_collaboration(
+        conn, peer="qishuo", context_id="ctx-shared",
+        objective="later objective", project="agentHub")
+    other_peer = collaboration_store.ensure_a2a_collaboration(
+        conn, peer="another-hermes", context_id="ctx-shared",
+        objective="other peer objective", project="agentHub")
+
+    assert replay == first
+    assert other_peer["conversation_id"] != first["conversation_id"]
+    assert other_peer["collaboration_id"] != first["collaboration_id"]
+    assert conn.execute("SELECT COUNT(*) FROM conversations;").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM collaborations;").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("peer,context_id", [
+    ("", "ctx"),
+    ("qishuo", ""),
+    ("p" * 129, "ctx"),
+    ("qishuo", "c" * 513),
+])
+def test_a2a_context_mapping_rejects_invalid_identity(conn, peer, context_id):
+    with pytest.raises(ValueError):
+        collaboration_store.ensure_a2a_collaboration(
+            conn, peer=peer, context_id=context_id, objective="x")
+    assert conn.execute("SELECT COUNT(*) FROM conversations;").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM collaborations;").fetchone()[0] == 0
+
+
 def test_messages_are_ordered_and_idempotent(conn):
     conversation_id, collaboration_id = _collaboration(conn)
     first = collaboration_store.append_message(

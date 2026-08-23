@@ -14,7 +14,7 @@ def test_happy_path():
         TaskStatus.QUEUED,
         TaskStatus.ASSIGNED,
         TaskStatus.WORKING,
-        TaskStatus.COMPLETED,
+        TaskStatus.AWAITING_ACCEPTANCE,
         TaskStatus.REVIEWED,
         TaskStatus.ACCEPTED,
     ]
@@ -33,7 +33,11 @@ def test_assigned_dispatch_failure():
 
 
 def test_rejected_rework():
-    assert is_legal_transition(TaskStatus.REVIEWED, TaskStatus.WORKING)
+    assert is_legal_transition(
+        TaskStatus.AWAITING_ACCEPTANCE, TaskStatus.REWORK_PENDING)
+    assert is_legal_transition(TaskStatus.REVIEWED, TaskStatus.REWORK_PENDING)
+    assert is_legal_transition(TaskStatus.REWORK_PENDING, TaskStatus.ASSIGNED)
+    assert not is_legal_transition(TaskStatus.REVIEWED, TaskStatus.WORKING)
 
 
 def test_cancel_from_any_non_terminal():
@@ -60,4 +64,7 @@ def test_a2a_mapping_covers_all_states():
     for status in TaskStatus:
         assert status in A2A_STATE_MAP
     assert A2A_STATE_MAP[TaskStatus.BLOCKED] == "input-required"
+    assert A2A_STATE_MAP[TaskStatus.AWAITING_ACCEPTANCE] == "input-required"
+    assert A2A_STATE_MAP[TaskStatus.REVIEWED] == "input-required"
+    assert A2A_STATE_MAP[TaskStatus.ACCEPTED] == "completed"
     assert A2A_STATE_MAP[TaskStatus.CANCELLED] == "canceled"

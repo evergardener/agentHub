@@ -1,7 +1,8 @@
 """review_task 产物核验（防谎报）单元测试 — 2026-08-17 T-20260817-0020 事故修复。
 
 规则：目标声明创建文件，但 artifacts 清单中除运行日志/汇报外没有任何
-产出文件时，approved=true 被服务端强制驳回（veto → 返工 working）。
+产出文件时，review 建议被服务端 veto；Hermes 只能记录 reviewed 建议，
+不能执行正式 accepted 或 rework。
 """
 
 from __future__ import annotations
@@ -24,7 +25,8 @@ def tools(tmp_path):
 
 def _completed_task(tm, objective: str) -> str:
     tid = tm.create_task(objective)
-    tm.conn.execute("UPDATE tasks SET status='completed' WHERE id=?;", (tid,))
+    tm.conn.execute(
+        "UPDATE tasks SET status='awaiting_acceptance' WHERE id=?;", (tid,))
     tm.conn.commit()
     return tid
 
@@ -42,9 +44,9 @@ async def test_veto_when_claimed_file_missing(tools):
 
     r = await t.dispatch("review_task",
                          {"task_id": tid, "approved": True, "notes": "ok"})
-    assert r["status"] == "working"          # 强制返工
+    assert r["status"] == "reviewed"
     assert "veto" in r and "谎报" in r["veto"]
-    assert state_store.get_task(tm.conn, tid)["status"] == "working"
+    assert state_store.get_task(tm.conn, tid)["status"] == "reviewed"
 
 
 async def test_native_transport_logs_do_not_satisfy_file_claim(tools):
@@ -58,7 +60,7 @@ async def test_native_transport_logs_do_not_satisfy_file_claim(tools):
 
     result = await t.dispatch(
         "review_task", {"task_id": tid, "approved": True})
-    assert result["status"] == "working"
+    assert result["status"] == "reviewed"
     assert "veto" in result
 
 
@@ -69,7 +71,7 @@ async def test_approve_passes_with_produced_file(tools):
     _add_artifact(tm, tid, "workspace/report.md")
 
     r = await t.dispatch("review_task", {"task_id": tid, "approved": True})
-    assert r["status"] == "accepted"
+    assert r["status"] == "reviewed"
     assert "veto" not in r
 
 
@@ -79,7 +81,7 @@ async def test_no_veto_for_non_file_objective(tools):
     _add_artifact(tm, tid, "codex.log")  # 纯分析任务只有日志也正常
 
     r = await t.dispatch("review_task", {"task_id": tid, "approved": True})
-    assert r["status"] == "accepted"
+    assert r["status"] == "reviewed"
 
 
 async def test_report_artifact_counts_as_product(tools):
@@ -89,7 +91,7 @@ async def test_report_artifact_counts_as_product(tools):
     _add_artifact(tm, tid, "analysis.md")
 
     r = await t.dispatch("review_task", {"task_id": tid, "approved": True})
-    assert r["status"] == "accepted"
+    assert r["status"] == "reviewed"
 
 
 async def test_get_task_artifacts(tools):
@@ -109,5 +111,5 @@ async def test_reject_still_works(tools):
     _add_artifact(tm, tid, "workspace/x.md")
     r = await t.dispatch("review_task",
                          {"task_id": tid, "approved": False, "notes": "不合格"})
-    assert r["status"] == "working"
+    assert r["status"] == "reviewed"
     assert "veto" not in r

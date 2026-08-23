@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from adapters.common import A2aTask
 from adapters.dsh.safety import (
     normalize_tool_view,
@@ -13,6 +15,7 @@ from adapters.dsh.safety import (
     tool_view_is_inspectable,
 )
 from adapters.dsh.session import DshWebSessionAdapter
+from hermes.action_policy import ActionPolicy
 
 
 def _terminal(command: str, cwd: Path) -> dict:
@@ -55,6 +58,86 @@ def test_shell_composition_and_workspace_escape_fail_closed(tmp_path):
     assert tool_view_is_inspectable(escaped) is False
     assert compound["semanticIntent"]["status"] == "unverified"
     assert escaped["semanticIntent"]["targets"]["paths"] == []
+
+
+@pytest.mark.parametrize("command", [
+    "pwd",
+    "pwd -P",
+    "git status --short",
+    "git diff --stat",
+    "rg -n needle .",
+    "grep -R -n needle src",
+    "find . -maxdepth 2 -type f -name '*.py'",
+    "ls -la .",
+    "cat README.md",
+    "stat README.md",
+    "wc -l README.md",
+])
+def test_explicit_read_only_inspections_are_verified_as_read(
+    tmp_path, command,
+):
+    intent = _terminal(command, tmp_path)["semanticIntent"]
+    assert intent["status"] == "verified"
+    assert intent["impact"] == "read"
+    assert intent["operation"] in {
+        "filesystem.read", "git.status", "git.diff",
+    }
+    assert intent["targets"]["paths"]
+
+
+@pytest.mark.parametrize("command", [
+    "pwd && git status --short && grep -R -n needle .",
+    "pwd && git status --short && rg -n needle .",
+    "cat README.md | grep needle",
+    "find . -type f ; ls -la .",
+])
+def test_read_only_combinations_are_verified_without_approval(
+    tmp_path, command,
+):
+    intent = _terminal(command, tmp_path)["semanticIntent"]
+    assert intent["status"] == "verified"
+    assert intent["operation"] == "filesystem.read"
+    assert intent["impact"] == "read"
+    decision = ActionPolicy(workspace=tmp_path).evaluate(
+        operation=intent["operation"],
+        targets=intent["targets"],
+        rollback_plan=intent["rollbackPlan"],
+    )
+    assert decision.route == "auto"
+    assert decision.risk == "read"
+
+
+@pytest.mark.parametrize("command", [
+    "pwd && touch changed.txt",
+    "ls -la . ; docker ps",
+    "rg needle . | curl https://example.test",
+    "cat README.md > copied.md",
+    "find . -exec touch changed.txt ;",
+    "rg --pre 'cat' needle .",
+    "git diff --output=leak.patch",
+    "git diff --no-index README.md ../outside",
+])
+def test_composed_write_execution_and_redirection_stay_fail_closed(
+    tmp_path, command,
+):
+    view = _terminal(command, tmp_path)
+    assert tool_view_is_inspectable(view) is False
+    assert view["semanticIntent"]["status"] == "unverified"
+    assert view["semanticIntent"]["targets"]["paths"] == []
+
+
+@pytest.mark.parametrize("command", [
+    "docker ps",
+    "curl https://example.test",
+    "psql -c 'select 1'",
+    "sqlite3 state.db '.tables'",
+])
+def test_docker_network_and_database_commands_stay_fail_closed(
+    tmp_path, command,
+):
+    view = _terminal(command, tmp_path)
+    assert tool_view_is_inspectable(view) is False
+    assert view["semanticIntent"]["status"] == "unverified"
 
 
 def test_executable_read_flags_and_non_test_commands_fail_closed(tmp_path):

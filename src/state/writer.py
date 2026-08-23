@@ -26,10 +26,9 @@ _EVENT_TO_STATUS = {
     "task.started": TaskStatus.WORKING,
     "task.blocked": TaskStatus.BLOCKED,
     "task.input_required": TaskStatus.BLOCKED,
-    "task.completed": TaskStatus.COMPLETED,
+    "task.completed": TaskStatus.AWAITING_ACCEPTANCE,
     "task.failed": TaskStatus.FAILED,
     "task.reviewed": TaskStatus.REVIEWED,
-    "task.accepted": TaskStatus.ACCEPTED,
     "task.cancelled": TaskStatus.CANCELLED,
 }
 
@@ -132,7 +131,9 @@ class StateWriter:
                     state_store.add_task_run(
                         self.conn, task_id=task_id, agent_id=source,
                         attempt=payload.get("attempt", 1),
-                        status=dst.value, trace_id=event.get("trace_id"),
+                        status=("completed" if event_type == "task.completed"
+                                else dst.value),
+                        trace_id=event.get("trace_id"),
                         error_message=payload.get("error"),
                         commit=False,
                     )

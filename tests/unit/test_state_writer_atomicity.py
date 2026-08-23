@@ -9,6 +9,29 @@ from orchestrator import state_store
 from state.writer import StateWriter
 
 
+def test_worker_completed_event_enters_awaiting_acceptance(tmp_path):
+    writer = StateWriter(tmp_path / "acceptance.db")
+    state_store.create_task(
+        writer.conn, task_id="T-accept", objective="implement",
+        created_by="hermes", assigned_to="codex", status=TaskStatus.QUEUED)
+    state_store.transition_task(writer.conn, "T-accept", TaskStatus.ASSIGNED)
+    state_store.transition_task(writer.conn, "T-accept", TaskStatus.WORKING)
+
+    assert writer.apply({
+        "event_id": "E-completed-acceptance",
+        "event_type": "task.completed",
+        "task_id": "T-accept",
+        "source": "codex",
+        "payload": {"attempt": 1, "summary": "done"},
+    }) == "applied"
+    task = state_store.get_task(writer.conn, "T-accept")
+    assert task["status"] == "awaiting_acceptance"
+    run = writer.conn.execute(
+        "SELECT attempt, status FROM task_runs WHERE task_id = 'T-accept'"
+        " ORDER BY started_at DESC LIMIT 1;").fetchone()
+    assert (run["attempt"], run["status"]) == (1, "completed")
+
+
 def _event(event_id: str, event_type: str, task_id: str) -> dict:
     return {
         "event_id": event_id,

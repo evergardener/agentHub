@@ -6,6 +6,7 @@ User interventions advance context_revision so stale write intents are denied.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from typing import Any
@@ -78,6 +79,82 @@ def create_collaboration(conn, *, conversation_id: str, objective: str,
     )
     conn.commit()
     return collaboration_id
+
+
+def a2a_context_ids(*, peer: str, context_id: str) -> dict[str, str]:
+    """Validate one peer context and return its deterministic internal IDs."""
+    peer = peer.strip()
+    context_id = context_id.strip()
+    if not peer or len(peer) > 128:
+        raise ValueError("A2A peer must contain 1..128 characters")
+    if not context_id or len(context_id) > 512:
+        raise ValueError("A2A contextId must contain 1..512 characters")
+    digest = hashlib.sha256(
+        f"{peer}\0{context_id}".encode("utf-8")
+    ).hexdigest()[:32]
+    conversation_id = f"C-A2A-{digest}"
+    collaboration_id = f"COL-A2A-{digest}"
+    return {
+        "conversation_id": conversation_id,
+        "collaboration_id": collaboration_id,
+        "peer": peer,
+        "context_id": context_id,
+    }
+
+
+def ensure_a2a_collaboration(
+    conn,
+    *,
+    peer: str,
+    context_id: str,
+    objective: str,
+    project: str | None = None,
+    commit: bool = True,
+) -> dict[str, str]:
+    """Atomically map one authenticated A2A peer context to a collaboration.
+
+    A2A ``contextId`` is scoped by peer identity.  Stable hashed IDs provide a
+    migration-free, race-safe mapping while avoiding raw caller-controlled
+    context values in primary keys.  A collision with unrelated pre-existing
+    rows fails closed instead of silently joining two conversations.
+    """
+    mapping = a2a_context_ids(peer=peer, context_id=context_id)
+    peer = mapping["peer"]
+    context_id = mapping["context_id"]
+    conversation_id = mapping["conversation_id"]
+    collaboration_id = mapping["collaboration_id"]
+    created_by = f"a2a:{peer}"
+    ts = now_iso()
+    title = objective[:80] or f"A2A session {context_id[:32]}"
+    try:
+        conn.execute(
+            "INSERT INTO conversations (id, title, project, status, created_by,"
+            " next_message_seq, created_at, updated_at)"
+            " VALUES (?,?,?,'active',?,0,?,?)"
+            " ON CONFLICT(id) DO NOTHING;",
+            (conversation_id, title, project, created_by, ts, ts),
+        )
+        conn.execute(
+            "INSERT INTO collaborations (id, conversation_id, objective, status,"
+            " phase, controller, context_revision, created_at, updated_at)"
+            " VALUES (?,?,?,'active',?,?,1,?,?)"
+            " ON CONFLICT(id) DO NOTHING;",
+            (collaboration_id, conversation_id, objective,
+             CollaborationPhase.PLANNING.value, "hermes", ts, ts),
+        )
+        conversation = get_conversation(conn, conversation_id)
+        collaboration = get_collaboration(conn, collaboration_id)
+        if (conversation is None
+                or conversation["created_by"] != created_by
+                or collaboration is None
+                or collaboration["conversation_id"] != conversation_id):
+            raise RuntimeError("A2A context mapping collision")
+        if commit:
+            conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return mapping
 
 
 def get_conversation(conn, conversation_id: str):
@@ -165,7 +242,8 @@ def append_message(conn, *, conversation_id: str,
                    parent_message_id: str | None = None,
                    based_on_revision: int | None = None,
                    idempotency_key: str | None = None,
-                   visibility: str = "participants"):
+                   visibility: str = "participants",
+                   commit: bool = True):
     if idempotency_key:
         existing = conn.execute(
             "SELECT * FROM conversation_messages WHERE idempotency_key = ?;",
@@ -206,7 +284,8 @@ def append_message(conn, *, conversation_id: str,
                 "based_on_revision": based_on_revision,
                 "visibility": visibility,
             })
-        conn.commit()
+        if commit:
+            conn.commit()
     except Exception:
         conn.rollback()
         if idempotency_key:
@@ -340,7 +419,8 @@ def bind_agent_session(conn, *, collaboration_id: str, task_id: str,
                        capabilities: dict | None = None,
                        recovery_state: str = "none",
                        replacement_of_id: str | None = None,
-                       context_snapshot: dict | None = None):
+                       context_snapshot: dict | None = None,
+                       commit: bool = True):
     """Create the current binding, retaining replaced bindings for audit."""
     _, context_revision = _current_revision(conn, collaboration_id)
     binding_id = _id("S")
@@ -380,7 +460,8 @@ def bind_agent_session(conn, *, collaboration_id: str, task_id: str,
                 "recovery_state": recovery_state,
                 "replacement_of_id": replacement_of_id,
             })
-        conn.commit()
+        if commit:
+            conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -447,7 +528,8 @@ def upsert_agent_session(conn, *, collaboration_id: str, task_id: str,
 
 def update_agent_session_status(conn, binding_id: str, *, status: str,
                                 recovery_state: str | None = None,
-                                error: str | None = None) -> None:
+                                error: str | None = None,
+                                commit: bool = True) -> None:
     assignments = ["status = ?", "last_error = ?", "last_active_at = ?"]
     params: list[Any] = [status, error, now_iso()]
     if recovery_state is not None:
@@ -457,9 +539,11 @@ def update_agent_session_status(conn, binding_id: str, *, status: str,
     cur = conn.execute(
         f"UPDATE agent_session_bindings SET {', '.join(assignments)}"
         " WHERE id = ?;", params)
-    conn.commit()
     if cur.rowcount != 1:
+        conn.rollback()
         raise KeyError(f"agent session binding not found: {binding_id}")
+    if commit:
+        conn.commit()
 
 
 def advance_agent_session(conn, binding_id: str, *, message_seq: int,

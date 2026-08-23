@@ -363,6 +363,10 @@ def build_app(
                     *, first: bool) -> None:
         trace_id = metadata.get("traceId") or f"trace-{uuid.uuid4()}"
         message_id = metadata.get("messageId") or f"M-{uuid.uuid4()}"
+        try:
+            attempt = max(1, int(metadata.get("attempt", 1)))
+        except (TypeError, ValueError):
+            attempt = 1
         store.append_history(task.id, {
             "messageId": message_id,
             "role": "user",
@@ -378,7 +382,8 @@ def build_app(
             store.update_state(task.id, "working")
             await publisher.publish(
                 "task.started", task.id,
-                {"status_from": "submitted", "status_to": "working", "attempt": 1},
+                {"status_from": "submitted", "status_to": "working",
+                 "attempt": attempt},
                 trace_id=trace_id,
             )
             try:
@@ -442,7 +447,7 @@ def build_app(
                     await publisher.publish(
                         "task.completed", task.id,
                         {"status_from": "working", "status_to": "completed",
-                         "attempt": 1,
+                         "attempt": attempt,
                          "summary": _result_summary(
                              agent_id, result.artifacts),
                          "artifacts": [a["name"] for a in result.artifacts]},

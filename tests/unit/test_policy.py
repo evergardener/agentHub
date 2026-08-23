@@ -37,6 +37,25 @@ def test_english_read_only_objective_is_auto_approved(policy, conn):
     assert d.action == "auto" and d.risk == "read"
 
 
+def test_chinese_read_only_command_plan_with_negated_writes_is_auto_approved(
+    policy, conn,
+):
+    objective = (
+        "只读检查任务工作区：执行 pwd；执行 git status --short；"
+        "执行 rg -n needle .。不得修改、创建、删除任何文件；"
+        "仅报告命令输出以及是否发生写入。"
+    )
+    d = policy.decide(conn, objective)
+    assert d.action == "auto" and d.risk == "read"
+
+
+def test_chinese_non_negated_write_and_critical_terms_still_require_approval(
+    policy, conn,
+):
+    assert policy.classify("创建文件并写入报告") == "write"
+    assert policy.classify("删除生产数据库") == "critical"
+
+
 def test_english_write_requires_approval(policy, conn):
     d = policy.decide(conn, "Modify the runtime")
     assert d.action == "ask" and d.risk == "write"

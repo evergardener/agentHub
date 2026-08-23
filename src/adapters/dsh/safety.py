@@ -13,9 +13,74 @@ _SENSITIVE_KEY = re.compile(
 _SECRET_TEXT = re.compile(
     r"(?i)(bearer\s+|(?:api[_-]?key|token|password|secret)\s*[=:]\s*)"
     r"([^\s,;]+)")
-_SHELL_CONTROL = re.compile(
-    r"(?:[\r\n;&|<>`]|&&|\|\||\$\(|\$\{|\$[A-Za-z_])")
 _UNRESOLVED_PATH = re.compile(r"[*?\[\]{}~]")
+_READ_ONLY_COMPOUND_OPERATIONS = frozenset({
+    "filesystem.read", "git.status", "git.diff",
+})
+_COMPOUND_OPERATORS = frozenset({"&&", ";", "|"})
+
+_SEARCH_FLAG_ONLY = {
+    "rg": frozenset({
+        "-n", "--line-number", "-i", "--ignore-case", "-s",
+        "--case-sensitive", "-S", "--smart-case", "-F",
+        "--fixed-strings", "-w", "--word-regexp", "-x",
+        "--line-regexp", "-l", "--files-with-matches",
+        "--files-without-match", "-c", "--count", "--count-matches",
+        "-o", "--only-matching", "-q", "--quiet", "--hidden",
+        "--no-hidden", "--no-ignore", "--no-ignore-vcs", "-L",
+        "--follow", "--files", "-0", "--null", "--null-data",
+        "--json", "--stats", "--trim", "-U", "--multiline",
+        "--multiline-dotall", "-a", "--text", "--crlf",
+        "--no-messages",
+    }),
+    "grep": frozenset({
+        "-n", "--line-number", "-i", "--ignore-case", "-v",
+        "--invert-match", "-w", "--word-regexp", "-x",
+        "--line-regexp", "-F", "--fixed-strings", "-E",
+        "--extended-regexp", "-G", "--basic-regexp", "-P",
+        "--perl-regexp", "-R", "--dereference-recursive", "-r",
+        "--recursive", "-l", "--files-with-matches", "-L",
+        "--files-without-match", "-c", "--count", "-o",
+        "--only-matching", "-q", "--quiet", "-s", "--no-messages",
+        "-H", "--with-filename", "-h", "--no-filename", "-a",
+        "--text", "-I", "--binary-files=without-match",
+    }),
+}
+_SEARCH_VALUE_FLAGS = {
+    "rg": frozenset({
+        "-g", "--glob", "-t", "--type", "-T", "--type-not", "-A",
+        "--after-context", "-B", "--before-context", "-C", "--context",
+        "-m", "--max-count", "--max-depth", "--max-filesize", "-e",
+        "--regexp", "--sort", "--sortr", "--threads", "--encoding",
+        "--engine", "--color", "--colors",
+    }),
+    "grep": frozenset({
+        "-A", "--after-context", "-B", "--before-context", "-C",
+        "--context", "-m", "--max-count", "-e", "--regexp",
+        "--include", "--exclude", "--exclude-dir", "--binary-files",
+        "--color",
+    }),
+}
+_SEARCH_PATH_VALUE_FLAGS = {
+    "rg": frozenset({"-f", "--file", "--ignore-file"}),
+    "grep": frozenset({"-f", "--file", "--exclude-from"}),
+}
+_SEARCH_SHORT_BUNDLE = {
+    "rg": re.compile(r"-[nHiSsFwxloqUa0cL]+"),
+    "grep": re.compile(r"-[nHhIiVvwxFEPGRrslLcoqsa]+"),
+}
+
+_FIND_VALUE_PREDICATES = frozenset({
+    "-name", "-iname", "-path", "-ipath", "-regex", "-iregex",
+    "-type", "-size", "-mtime", "-mmin", "-atime", "-amin",
+    "-ctime", "-cmin", "-user", "-group", "-uid", "-gid", "-perm",
+    "-links", "-maxdepth", "-mindepth", "-printf",
+})
+_FIND_FLAG_PREDICATES = frozenset({
+    "-print", "-print0", "-empty", "-readable", "-writable",
+    "-executable", "-true", "-false", "-ls", "-mount", "-xdev",
+    "-depth", "!", "-not", "-a", "-and", "-o", "-or", "(", ")",
+})
 
 
 def redact_bounded(value: Any, *, limit: int = 8192) -> Any:
@@ -139,31 +204,130 @@ def _unverified(reason: str) -> dict[str, Any]:
     }
 
 
-def _terminal_intent(
-    view: dict[str, Any], workspace: Path,
+def _has_unsafe_shell_syntax(command: str) -> bool:
+    """Reject expansion/redirection while allowing quoted search patterns."""
+    quote: str | None = None
+    escaped = False
+    for char in command:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            continue
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            continue
+        if char in "\r\n":
+            return True
+        if quote != "'" and char in {"$", "`"}:
+            return True
+        if quote is None and char in {"<", ">"}:
+            return True
+    return False
+
+
+def _search_paths(
+    executable: str, args: list[str], *, cwd: Path, workspace: Path,
+) -> list[str] | None:
+    positionals: list[str] = []
+    option_paths: list[str] = []
+    explicit_pattern = False
+    files_mode = False
+    index = 0
+    options_done = False
+    while index < len(args):
+        item = args[index]
+        if options_done:
+            positionals.append(item)
+            index += 1
+            continue
+        if item == "--":
+            options_done = True
+            index += 1
+            continue
+        name, equals, inline_value = item.partition("=")
+        if item in _SEARCH_FLAG_ONLY[executable]:
+            files_mode = files_mode or (executable == "rg" and item == "--files")
+            index += 1
+            continue
+        if _SEARCH_SHORT_BUNDLE[executable].fullmatch(item):
+            index += 1
+            continue
+        value_kind = None
+        if name in _SEARCH_VALUE_FLAGS[executable]:
+            value_kind = "value"
+        elif name in _SEARCH_PATH_VALUE_FLAGS[executable]:
+            value_kind = "path"
+        if value_kind:
+            if equals:
+                value = inline_value
+            elif index + 1 < len(args):
+                index += 1
+                value = args[index]
+            else:
+                return None
+            if not value:
+                return None
+            if name in {"-e", "--regexp"}:
+                explicit_pattern = True
+            if value_kind == "path":
+                option_paths.append(value)
+            index += 1
+            continue
+        if item.startswith("-"):
+            return None
+        positionals.append(item)
+        index += 1
+
+    if files_mode:
+        operands = positionals or ["."]
+    elif explicit_pattern:
+        operands = positionals or ["."]
+    else:
+        if not positionals:
+            return None
+        operands = positionals[1:] or ["."]
+    return _resolve_paths(
+        option_paths + operands, cwd=cwd, workspace=workspace)
+
+
+def _find_paths(
+    args: list[str], *, cwd: Path, workspace: Path,
+) -> list[str] | None:
+    roots: list[str] = []
+    index = 0
+    while (index < len(args)
+           and not args[index].startswith("-")
+           and args[index] not in {"!", "(", ")"}):
+        roots.append(args[index])
+        index += 1
+    roots = roots or ["."]
+    paths = _resolve_paths(roots, cwd=cwd, workspace=workspace)
+    if paths is None:
+        return None
+    while index < len(args):
+        item = args[index]
+        if item in _FIND_FLAG_PREDICATES:
+            index += 1
+            continue
+        if item not in _FIND_VALUE_PREDICATES or index + 1 >= len(args):
+            return None
+        value = args[index + 1]
+        if not value or "\x00" in value:
+            return None
+        if item in {"-maxdepth", "-mindepth"} and not value.isdigit():
+            return None
+        index += 2
+    return paths
+
+
+def _simple_terminal_intent(
+    tokens: list[str], *, cwd: Path, workspace: Path,
 ) -> dict[str, Any]:
-    command = view.get("command")
-    if not isinstance(command, str) or not command.strip():
-        return _unverified("terminal command is missing")
-    if view.get("redacted") is True:
-        return _unverified("terminal command contained redacted sensitive data")
-    if _SHELL_CONTROL.search(command):
-        return _unverified(
-            "shell composition, expansion, or redirection is unsupported")
-    try:
-        tokens = shlex.split(command, posix=True)
-    except ValueError:
-        return _unverified("terminal command could not be parsed")
-    if not tokens:
-        return _unverified("terminal command is empty")
-
-    raw_cwd = view.get("cwd")
-    if not isinstance(raw_cwd, str) or not raw_cwd:
-        return _unverified("terminal cwd is missing")
-    cwd = Path(raw_cwd).expanduser().resolve()
-    if not _inside(cwd, workspace):
-        return _unverified("terminal cwd is outside the task workspace")
-
     executable = Path(tokens[0]).name
     args = tokens[1:]
     if executable in {"sudo", "su", "env", "sh", "bash", "zsh", "fish"}:
@@ -180,6 +344,21 @@ def _terminal_intent(
         }.get(subcommand)
         if operation is None:
             return _unverified(f"unsupported git subcommand: {subcommand}")
+        unsafe_read_flags = {
+            "--no-index", "--ext-diff", "--textconv", "--output", "-o",
+        }
+        if (subcommand in {"status", "diff", "log", "show"}
+                and any(
+                    item in unsafe_read_flags
+                    or any(
+                        item.startswith(f"{flag}=")
+                        for flag in unsafe_read_flags)
+                    or item in {"-C", "--git-dir", "--work-tree",
+                                "--config-env", "--exec-path"}
+                    or item.startswith(("--git-dir=", "--work-tree=",
+                                         "--config-env=", "--exec-path="))
+                    for item in args[1:])):
+            return _unverified("git scope, execution, or output option is unsafe")
         if subcommand == "push" and any(
                 item in {"-f", "--force", "--force-with-lease"}
                 for item in args[1:]):
@@ -199,25 +378,23 @@ def _terminal_intent(
         return _verified("test.run", "read", [str(cwd)], workspace,
                          f"recognized test command: {joined[:128]}")
 
-    if executable == "pwd" and not args:
+    if executable == "pwd" and all(item in {"-L", "-P"} for item in args):
         return _verified("filesystem.read", "read", [str(cwd)], workspace,
                          f"recognized read-only command: {executable}")
 
     if executable in {"rg", "grep"}:
-        if not args or any(item.startswith("-") for item in args):
-            return _unverified(f"{executable} options are not normalized")
-        paths = _resolve_paths(args[1:] or ["."], cwd=cwd, workspace=workspace)
+        paths = _search_paths(
+            executable, args, cwd=cwd, workspace=workspace)
         if paths is None:
-            return _unverified(f"{executable} target could not be normalized")
+            return _unverified(
+                f"{executable} options or targets could not be normalized")
         return _verified("filesystem.read", "read", paths, workspace,
                          f"recognized search command: {executable}")
 
     if executable == "find":
-        if len(args) != 1 or args[0].startswith("-"):
-            return _unverified("find predicates are not normalized")
-        paths = _resolve_paths(args, cwd=cwd, workspace=workspace)
+        paths = _find_paths(args, cwd=cwd, workspace=workspace)
         if paths is None:
-            return _unverified("find target could not be normalized")
+            return _unverified("find predicates or targets are not read-only")
         return _verified("filesystem.read", "read", paths, workspace,
                          "recognized bounded find target")
 
@@ -230,9 +407,23 @@ def _terminal_intent(
                          "recognized directory listing")
 
     if executable in {"cat", "stat", "wc"}:
-        if not args or any(item.startswith("-") for item in args):
+        safe_options = {
+            "cat": {
+                "-A", "-b", "-e", "-E", "-n", "-s", "-t", "-T", "-u",
+                "-v",
+            },
+            "stat": {
+                "-L", "--dereference", "-f", "--file-system", "-t",
+                "--terse",
+            },
+            "wc": {"-c", "--bytes", "-m", "--chars", "-l", "--lines",
+                   "-L", "--max-line-length", "-w", "--words"},
+        }[executable]
+        operands = [item for item in args if not item.startswith("-")]
+        options = [item for item in args if item.startswith("-")]
+        if not operands or any(item not in safe_options for item in options):
             return _unverified(f"{executable} options are not normalized")
-        paths = _resolve_paths(args, cwd=cwd, workspace=workspace)
+        paths = _resolve_paths(operands, cwd=cwd, workspace=workspace)
         if paths is None:
             return _unverified(f"{executable} target could not be normalized")
         return _verified("filesystem.read", "read", paths, workspace,
@@ -261,6 +452,75 @@ def _terminal_intent(
                          f"recognized filesystem command: {executable}")
 
     return _unverified(f"unsupported terminal command: {executable}")
+
+
+def _terminal_intent(
+    view: dict[str, Any], workspace: Path,
+) -> dict[str, Any]:
+    command = view.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return _unverified("terminal command is missing")
+    if view.get("redacted") is True:
+        return _unverified("terminal command contained redacted sensitive data")
+    if _has_unsafe_shell_syntax(command):
+        return _unverified("shell expansion or redirection is unsupported")
+
+    try:
+        lexer = shlex.shlex(
+            command, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return _unverified("terminal command could not be parsed")
+    if not tokens:
+        return _unverified("terminal command is empty")
+
+    raw_cwd = view.get("cwd")
+    if not isinstance(raw_cwd, str) or not raw_cwd:
+        return _unverified("terminal cwd is missing")
+    cwd = Path(raw_cwd).expanduser().resolve()
+    if not _inside(cwd, workspace):
+        return _unverified("terminal cwd is outside the task workspace")
+
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token in _COMPOUND_OPERATORS:
+            if not current:
+                return _unverified("shell composition contains an empty command")
+            segments.append(current)
+            current = []
+        elif token and all(char in ";&|<>" for char in token):
+            return _unverified(f"unsupported shell operator: {token}")
+        else:
+            current.append(token)
+    if not current:
+        return _unverified("shell composition contains an empty command")
+    segments.append(current)
+
+    intents = [
+        _simple_terminal_intent(segment, cwd=cwd, workspace=workspace)
+        for segment in segments
+    ]
+    if len(intents) == 1:
+        return intents[0]
+    if any(intent.get("status") != "verified" for intent in intents):
+        return _unverified("compound command contains an unverified operation")
+    if any(
+        intent.get("impact") != "read"
+        or intent.get("operation") not in _READ_ONLY_COMPOUND_OPERATIONS
+        for intent in intents
+    ):
+        return _unverified("compound command contains a non-read-only operation")
+    paths: list[str] = []
+    for intent in intents:
+        for path in intent["targets"]["paths"]:
+            if path not in paths:
+                paths.append(path)
+    return _verified(
+        "filesystem.read", "read", paths, workspace,
+        f"recognized read-only command sequence ({len(intents)} commands)")
 
 
 def normalize_tool_view(

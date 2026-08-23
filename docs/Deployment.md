@@ -440,6 +440,71 @@ launchctl kickstart -k gui/$(id -u)/top.evergardenviolet.agenthub.codex  # worke
   迁移只增不改，旧代码读新库一般兼容
 - 修改 `LAS_ADAPTER_TOKEN` 后：`kickstart` 重启 worker 即生效（agentctl 每次运行重读 .env）；切换窗口内进行中调用会 401
 
+### 5.1 历史 A2A 孤儿任务修复
+
+旧版 Orchestrator 通过统一 `agenthub` peer 创建的 Task 可能没有
+`collaboration_id`。新版本只修复后续 `tasks/create`；历史数据必须在独立维护窗口
+按证据逐条处理，禁止将所有 `collaboration_id IS NULL` 的任务批量挂到一个 Session。
+
+先停止会产生新任务的入口并创建、验证控制面备份。由操作者结合 gateway/Hermes
+记录制作 manifest；每项必须同时匹配 task ID、已认证 peer、A2A context、目标
+Agent、数据库中的精确创建时间和完整 objective 的 SHA-256：
+
+```json
+{
+  "version": 1,
+  "entries": [
+    {
+      "task_id": "T-YYYYMMDD-NNNN",
+      "peer": "qishuo",
+      "context_id": "ctx-from-hermes-a2a",
+      "agent": "dsh",
+      "objective_sha256": "64-lowercase-hex-characters",
+      "created_at": "exact-value-from-tasks.created_at",
+      "evidence": {"gateway_request_id": "operator-reviewed-reference"}
+    }
+  ]
+}
+```
+
+默认命令仅连接现有 schema 并输出计划，不运行 migration，也不写业务表。只有所有
+条目均为历史终态且证据完全匹配时，顶层 `eligible` 才为 `true`：
+
+```bash
+.venv/bin/python scripts/backfill-a2a-collaborations.py \
+  --manifest /secure/path/a2a-backfill.json
+```
+
+确认备份、计划和数据库目标无误后，才可显式 apply；receipt 路径必须不存在：
+
+```bash
+.venv/bin/python scripts/backfill-a2a-collaborations.py \
+  --manifest /secure/path/a2a-backfill.json \
+  --apply \
+  --confirmation BACKFILL_A2A_COLLABORATIONS \
+  --receipt /secure/path/a2a-backfill-receipt.json
+```
+
+整份 manifest 在单一数据库事务中执行。它只补 Conversation/Collaboration、Task
+关联、历史 request/result 消息、可从既有事件恢复的 Session binding 和审计事件；
+不改写原 Task 状态、结果、runs、events 或 artifacts。重复 apply 返回首次审计中
+保存的原 receipt，不重复创建数据。receipt 必须和备份一起保留。
+
+若验证失败，先停止新流量，再使用首次 receipt 回滚：
+
+```bash
+.venv/bin/python scripts/backfill-a2a-collaborations.py \
+  --rollback \
+  --receipt /secure/path/a2a-backfill-receipt.json \
+  --confirmation ROLLBACK_A2A_COLLABORATIONS
+```
+
+回滚仅删除 receipt 明确列出的补写行并把这些 Task 恢复为 NULL 关联，同时保留补偿
+审计。如果 Collaboration 已出现新 Task、消息、Session binding、interaction、
+action intent 或 plan，命令会拒绝回滚；此时应从维护窗口备份恢复或制定人工迁移，
+不得强删会话数据。若 apply 后 receipt 文件写出前进程异常，可从对应
+`task.collaboration.backfilled` 事件的 `payload.receipt` 恢复首次 receipt。
+
 ## 6. 故障排查
 
 ### 6.1 state-writer / janitor 崩溃循环

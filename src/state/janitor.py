@@ -2,7 +2,7 @@
 
 独立进程 ai.janitor，每 60 秒扫描 SQLite：
 1. working 任务但 Agent 租约过期 → 按策略 requeue / fail
-2. working 任务超过 timeout_seconds 无事件 → failed(timeout_swept)
+2. working 任务的当前连续执行区间超过 timeout_seconds → failed(timeout_swept)
 3. parent 已 cancelled 但 child 非终态 → 级联取消
 4. artifacts 记录的文件缺失 → system.alert（不删记录）
 
@@ -84,17 +84,20 @@ class Janitor:
     def _sweep_timeouts(self, stats: dict) -> None:
         now = datetime.now(CST)
         rows = self.conn.execute(
-            "SELECT id, started_at, timeout_seconds FROM tasks"
-            " WHERE status = 'working' AND started_at IS NOT NULL;",
+            "SELECT id, updated_at, timeout_seconds FROM tasks"
+            " WHERE status = 'working';",
         ).fetchall()
         for r in rows:
-            started = datetime.fromisoformat(r["started_at"])
+            working_since = datetime.fromisoformat(r["updated_at"])
+            if working_since.tzinfo is None:
+                working_since = working_since.replace(tzinfo=CST)
             limit = r["timeout_seconds"] or 1800
-            if (now - started).total_seconds() > limit:
+            if (now - working_since).total_seconds() > limit:
                 try:
                     state_store.transition_task(
                         self.conn, r["id"], TaskStatus.FAILED,
-                        error_message="timeout_swept")
+                        error_message="timeout_swept",
+                        expected_updated_at=r["updated_at"])
                     stats["failed_timeout"] += 1
                     self._alert("timeout_swept", r["id"], None)
                 except state_store.IllegalTransition:

@@ -167,6 +167,11 @@ def test_alerts_can_be_acknowledged(client):
         f"/api/alerts/{alerts[0]['id']}/acknowledge", json={}).status_code == 409
 
 
+def test_approvals_exclude_blocked_tasks_without_pending_interaction(client):
+    """A historical blocked task is not an actionable approval by itself."""
+    assert client.get("/api/approvals").json()["tasks"] == []
+
+
 def test_approve_and_reject(client):
     r = client.post("/api/tasks/T-1/approve", json={"notes": "ok"}).json()
     assert r["status"] == "working"
@@ -212,6 +217,43 @@ def test_predelegation_approval_is_listed_and_can_be_approved(
         item["id"] for item in client.get("/api/approvals").json()["tasks"]}
 
 
+def test_acceptance_queue_is_separate_and_rework_requires_feedback(client):
+    from common.models import TaskStatus
+    from orchestrator import state_store
+    from state.db import connect
+
+    conn = connect()
+    for task_id in ("T-accept", "T-rework"):
+        state_store.create_task(
+            conn, task_id=task_id, objective="验收任务",
+            created_by="test", status=TaskStatus.QUEUED)
+        for status in (
+            TaskStatus.ASSIGNED,
+            TaskStatus.WORKING,
+            TaskStatus.AWAITING_ACCEPTANCE,
+        ):
+            state_store.transition_task(conn, task_id, status)
+    conn.close()
+
+    assert {row["id"] for row in client.get(
+        "/api/acceptance").json()["tasks"]} == {"T-accept", "T-rework"}
+    assert {row["id"] for row in client.get(
+        "/api/approvals").json()["tasks"]}.isdisjoint(
+            {"T-accept", "T-rework"})
+
+    accepted = client.post(
+        "/api/tasks/T-accept/accept", json={"notes": "用户确认"})
+    assert accepted.status_code == 200
+    assert accepted.json()["status"] == "accepted"
+    assert client.post(
+        "/api/tasks/T-rework/request-rework", json={}).status_code == 409
+    rework = client.post(
+        "/api/tasks/T-rework/request-rework",
+        json={"feedback": "请补充失败恢复测试"})
+    assert rework.status_code == 200
+    assert rework.json()["status"] == "rework_pending"
+
+
 def test_grants_api(client):
     r = client.post("/api/grants", json={"pattern": "重启"}).json()
     assert r["grant_id"] >= 1
@@ -228,13 +270,15 @@ def test_index_page(client):
     r = client.get("/")
     assert r.status_code == 200
     assert r.headers["cache-control"] == "no-store"
+    assert "待用户验收" in r.text
+    assert "/request-rework" in r.text
     assert "agentHub" in r.text
     assert "AGENT 交互" in r.text
-    assert "用户介入" in r.text
+    assert "任务控制" in r.text
     assert "接管子 Agent" in r.text
     assert "归还 Hermes 并重新规划" in r.text
     assert "协作会话" in r.text
-    assert "委派指令（原文）" in r.text
+    assert "任务目标" in r.text
     assert "SESSIONS" in r.text
     assert "任务导航" not in r.text
     assert "点击查看详情" not in r.text
@@ -247,7 +291,11 @@ def test_index_page(client):
     assert 'aria-label="协作会话工作区"' in r.text
     assert 'id="conversation-select"' in r.text
     assert 'id="chat-transcript"' in r.text
-    assert "只读追踪视图" in r.text
+    assert 'id="chat-composer"' in r.text
+    assert 'id="chat-recipient"' in r.text
+    assert 'id="settings-drawer"' in r.text
+    assert 'id="session-title-layer"' in r.text
+    assert "直接发送给" in r.text
 
 
 def test_index_has_bounded_alert_center_and_in_page_dialogs(client):
@@ -357,12 +405,30 @@ def test_collaboration_multi_turn_api(client):
     item = next(row for row in rows if row["id"] == collaboration["id"])
     assert item["message_count"] == 3
     assert item["task_count"] == 1
+    assert item["assigned_agents"] == []
     detail = client.get(f"/api/collaborations/{collaboration['id']}").json()
     assert [m["sequence"] for m in detail["messages"]] == [1, 2, 3]
     assert detail["messages"][2]["content_json"].endswith(
         '"content":"第二轮：继续同一上下文"}')
     assert detail["tasks"][0]["id"] == "T-2"
     assert client.get("/api/collaborations/COL-NOPE").status_code == 404
+
+    renamed = client.patch(
+        f"/api/collaborations/{collaboration['id']}",
+        json={"title": "后端调研与风险复核"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "后端调研与风险复核"
+    assert client.get(
+        f"/api/collaborations/{collaboration['id']}"
+    ).json()["collaboration"]["title"] == "后端调研与风险复核"
+    assert client.patch(
+        f"/api/collaborations/{collaboration['id']}",
+        json={"title": " "},
+    ).status_code == 400
+    assert client.patch(
+        "/api/collaborations/COL-NOPE", json={"title": "不存在"}
+    ).status_code == 404
 
 
 def test_secure_webui_login_cookie_and_csrf(secure_client):

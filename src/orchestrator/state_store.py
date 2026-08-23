@@ -11,9 +11,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from datetime import datetime, timedelta
 
 from common.models import TaskStatus, is_legal_transition
-from state.db import now_iso
+from state.db import CST, now_iso
 
 
 class IllegalTransition(RuntimeError):
@@ -24,6 +25,26 @@ class IllegalTransition(RuntimeError):
 
 class DuplicateEvent(RuntimeError):
     pass
+
+
+def _next_transition_timestamp(previous: str) -> str:
+    """Return a strictly newer task version timestamp.
+
+    ``tasks.updated_at`` is also the optimistic version used by the janitor.
+    Second-resolution timestamps can repeat across a rapid
+    working -> blocked -> working cycle, so state transitions use microseconds
+    and advance beyond the stored value even if the wall clock moved backwards.
+    """
+    current = datetime.now(CST)
+    try:
+        prior = datetime.fromisoformat(previous)
+        if prior.tzinfo is None:
+            prior = prior.replace(tzinfo=CST)
+        if current <= prior:
+            current = prior + timedelta(microseconds=1)
+    except (TypeError, ValueError):
+        pass
+    return current.isoformat(timespec="microseconds")
 
 
 # ---------- Hermes 生命周期命令（§22.3 白名单） ----------
@@ -86,17 +107,26 @@ def transition_task(conn: sqlite3.Connection, task_id: str,
                     result_summary: str | None = None,
                     error_message: str | None = None,
                     review: dict | None = None,
+                    expected_updated_at: str | None = None,
                     commit: bool = True) -> None:
-    """按 §5.3 校验并执行迁移；条件更新防止迟到事件覆盖（§22.3）。"""
+    """按 §5.3 校验并执行迁移；条件更新防止迟到事件覆盖（§22.3）。
+
+    ``expected_updated_at`` lets a caller bind the transition to the exact
+    state snapshot it inspected.  This closes the working -> blocked ->
+    working ABA race where checking only the current status is insufficient.
+    """
     row = get_task(conn, task_id)
     if row is None:
         raise KeyError(f"task not found: {task_id}")
     src = TaskStatus(row["status"])
     if src == dst:
+        if (expected_updated_at is not None
+                and row["updated_at"] != expected_updated_at):
+            raise IllegalTransition(task_id, src.value, dst.value)
         return  # 重复事件，幂等
     if not is_legal_transition(src, dst):
         raise IllegalTransition(task_id, src.value, dst.value)
-    ts = now_iso()
+    ts = _next_transition_timestamp(row["updated_at"])
     extra = ""
     params: list = [dst.value, ts]
     if dst == TaskStatus.WORKING:
@@ -116,10 +146,14 @@ def transition_task(conn: sqlite3.Connection, task_id: str,
     if review is not None:
         extra += ", review_json = ?"
         params.append(json.dumps(review, ensure_ascii=False))
+    condition = " WHERE id = ? AND status = ?"
     params += [task_id, src.value]
+    if expected_updated_at is not None:
+        condition += " AND updated_at = ?"
+        params.append(expected_updated_at)
     cur = conn.execute(
         f"UPDATE tasks SET status = ?, updated_at = ?{extra}"
-        " WHERE id = ? AND status = ?;",
+        f"{condition};",
         params,
     )
     if commit:

@@ -380,7 +380,7 @@ def create_app() -> FastAPI:
         conn = _conn()
         try:
             rows = _rows(conn.execute(
-                "SELECT t.* FROM tasks t WHERE t.status = 'blocked' OR ("
+                "SELECT t.* FROM tasks t WHERE ("
                 " t.status IN ('created','queued') AND"
                 " (SELECT e.event_type FROM events e"
                 "  WHERE e.task_id = t.id AND e.event_type IN (?,?,?)"
@@ -397,6 +397,20 @@ def create_app() -> FastAPI:
                 else:
                     row["approval_kind"] = "native"
             return {"tasks": rows}
+        finally:
+            conn.close()
+
+    @app.get("/api/acceptance")
+    def acceptance(limit: int = 200):
+        """List results that require an explicit user acceptance decision."""
+        conn = _conn()
+        try:
+            return {"tasks": _rows(conn.execute(
+                "SELECT * FROM tasks WHERE status IN (?, ?)"
+                " ORDER BY updated_at DESC LIMIT ?;",
+                ("awaiting_acceptance", "reviewed",
+                 min(max(int(limit), 1), 500)),
+            ))}
         finally:
             conn.close()
 
@@ -502,7 +516,71 @@ def create_app() -> FastAPI:
                 " ON c.id = co.conversation_id"
                 " ORDER BY c.updated_at DESC, co.updated_at DESC LIMIT ?;",
                 (limit,)))
+            for row in rows:
+                row["assigned_agents"] = [
+                    item["assigned_to"] for item in _rows(conn.execute(
+                        "SELECT DISTINCT assigned_to FROM tasks"
+                        " WHERE collaboration_id = ?"
+                        " AND assigned_to IS NOT NULL"
+                        " ORDER BY assigned_to;", (row["id"],)))
+                ]
             return {"collaborations": rows}
+        finally:
+            conn.close()
+
+    @app.patch("/api/collaborations/{collaboration_id}")
+    async def update_collaboration(collaboration_id: str, request: Request):
+        """Update user-owned presentation metadata without changing context."""
+        from orchestrator import state_store
+        from state.db import now_iso
+
+        try:
+            body = await request.json()
+        except (ValueError, json.JSONDecodeError):
+            body = {}
+        title = body.get("title") if isinstance(body, dict) else None
+        if not isinstance(title, str) or not title.strip():
+            return JSONResponse({"error": "title required"}, status_code=400)
+        title = title.strip()
+        if len(title) > 100:
+            return JSONResponse(
+                {"error": "title must contain at most 100 characters"},
+                status_code=400,
+            )
+        conn = _conn()
+        try:
+            row = conn.execute(
+                "SELECT conversation_id FROM collaborations WHERE id = ?;",
+                (collaboration_id,),
+            ).fetchone()
+            if row is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            updated_at = now_iso()
+            conn.execute(
+                "UPDATE conversations SET title = ?, updated_at = ?"
+                " WHERE id = ?;",
+                (title, updated_at, row["conversation_id"]),
+            )
+            state_store.record_event(conn, {
+                "event_id": f"conversation-title-{secrets.token_hex(12)}",
+                "event_type": "conversation.title.updated",
+                "source": f"webui:{request.state.role}",
+                "payload": {
+                    "collaboration_id": collaboration_id,
+                    "conversation_id": row["conversation_id"],
+                    "title": title,
+                },
+            }, commit=False)
+            conn.commit()
+            return {
+                "collaboration_id": collaboration_id,
+                "conversation_id": row["conversation_id"],
+                "title": title,
+                "updated_at": updated_at,
+            }
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -738,6 +816,41 @@ def create_app() -> FastAPI:
             status = await tm.reject_task_request(
                 task_id, notes=(body or {}).get("notes", "webui"),
                 decided_by="user", via="webui")
+            return {"task_id": task_id, "status": status}
+        except Exception as e:
+            return JSONResponse({"error": f"{type(e).__name__}: {e}"},
+                                status_code=409)
+        finally:
+            tm.close()
+
+    @app.post("/api/tasks/{task_id}/accept")
+    def accept_result(task_id: str, body: dict | None = None):
+        from orchestrator.task_manager import TaskManager
+
+        tm = TaskManager()
+        try:
+            status = tm.accept_result(
+                task_id, notes=(body or {}).get("notes", ""),
+                decided_by="user", via="webui")
+            return {"task_id": task_id, "status": status}
+        except Exception as e:
+            return JSONResponse({"error": f"{type(e).__name__}: {e}"},
+                                status_code=409)
+        finally:
+            tm.close()
+
+    @app.post("/api/tasks/{task_id}/request-rework")
+    def request_rework(task_id: str, body: dict | None = None):
+        from orchestrator.task_manager import TaskManager
+
+        feedback = (body or {}).get("feedback", "")
+        if not isinstance(feedback, str) or not feedback.strip():
+            return JSONResponse(
+                {"error": "feedback required"}, status_code=409)
+        tm = TaskManager()
+        try:
+            status = tm.reject_result(
+                task_id, feedback=feedback, decided_by="user", via="webui")
             return {"task_id": task_id, "status": status}
         except Exception as e:
             return JSONResponse({"error": f"{type(e).__name__}: {e}"},

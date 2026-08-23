@@ -100,6 +100,46 @@ async def test_native_binding_is_persisted_and_resumed(tmp_path, monkeypatch):
     assert second["last_message_seq"] == 2
 
 
+async def test_rework_continuation_reuses_native_session_and_new_attempt(
+        tmp_path, monkeypatch):
+    from common.models import TaskStatus
+    from orchestrator import collaboration_store, state_store
+    from orchestrator.a2a_client import A2aClient
+    from orchestrator.task_manager import TaskManager
+
+    client = FakeA2aClient(native=True)
+    monkeypatch.setattr(
+        A2aClient, "for_agent", classmethod(
+            lambda cls, agent_name, direct_endpoint, timeout=30: client))
+    tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
+    task_id, _ = _task_with_collaboration(tm)
+
+    first_call = await tm.delegate_task(task_id, "http://fake", "codex")
+    await first_call
+    first = collaboration_store.get_current_agent_session(
+        tm.conn, task_id, "codex")
+    state_store.transition_task(tm.conn, task_id, TaskStatus.WORKING)
+    state_store.transition_task(
+        tm.conn, task_id, TaskStatus.AWAITING_ACCEPTANCE)
+    tm.reject_result(task_id, feedback="please fix tests")
+
+    second_call = await tm.delegate_task(task_id, "http://fake", "codex")
+    await second_call
+    second = collaboration_store.get_current_agent_session(
+        tm.conn, task_id, "codex")
+
+    assert state_store.get_task(tm.conn, task_id)["status"] == "assigned"
+    assert second["id"] == first["id"]
+    assert client.sent[1]["native_session_id"] == "native-session-1"
+    assert client.sent[1]["metadata"]["attempt"] == 2
+    event = tm.conn.execute(
+        "SELECT payload_json FROM events WHERE task_id = ?"
+        " AND event_type = 'task.rework.dispatched' ORDER BY seq DESC LIMIT 1;",
+        (task_id,),
+    ).fetchone()
+    assert json.loads(event["payload_json"])["attempt"] == 2
+
+
 async def test_structured_plan_contract_is_sent_and_persisted(
         tmp_path, monkeypatch):
     from orchestrator import collaboration_store

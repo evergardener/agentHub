@@ -120,6 +120,10 @@ class TaskManager:
             raise KeyError(f"task not found: {task_id}")
         if row["status"] == TaskStatus.QUEUED.value:
             needs_assignment = True
+            is_rework = False
+        elif row["status"] == TaskStatus.REWORK_PENDING.value:
+            needs_assignment = True
+            is_rework = True
         elif row["status"] not in {
             TaskStatus.ASSIGNED.value,
             TaskStatus.WORKING.value,
@@ -129,6 +133,19 @@ class TaskManager:
                 task_id, row["status"], TaskStatus.ASSIGNED.value)
         else:
             needs_assignment = False
+            is_rework = False
+
+        if is_rework:
+            requested = self.conn.execute(
+                "SELECT payload_json FROM events WHERE task_id = ?"
+                " AND event_type = 'task.rework.requested'"
+                " ORDER BY seq DESC LIMIT 1;", (task_id,),
+            ).fetchone()
+            request_payload = json.loads(
+                requested["payload_json"] or "{}") if requested else {}
+            attempt = int(request_payload.get("next_attempt") or attempt or 2)
+        else:
+            request_payload = {}
 
         from common import tracing
 
@@ -232,6 +249,12 @@ class TaskManager:
                     turn_sequence if collaboration_id else attempt)
                 plan_context = json.loads(row["plan_context_json"] or "null")
                 instruction = row["objective"]
+                if is_rework:
+                    instruction += (
+                        "\n\n[User rework feedback]\n"
+                        + request_payload["feedback"]
+                        + "\nContinue in the same native session."
+                    )
                 if plan_context:
                     instruction += (
                         "\n\n[AgentHub structured Task Plan contract]\n"
@@ -251,9 +274,24 @@ class TaskManager:
                     context_revision=context_revision,
                     replace_session=binding is not None,
                     metadata={"recoveryMode": recovery_plan,
-                              "taskPlan": plan_context},
+                              "taskPlan": plan_context,
+                              "attempt": attempt},
                 )
                 dispatched = True
+                if is_rework:
+                    state_store.record_event(self.conn, {
+                        "event_id": f"rework-dispatched-{task_id}-"
+                                    f"{uuid.uuid4().hex[:8]}",
+                        "event_type": "task.rework.dispatched",
+                        "task_id": task_id,
+                        "source": "hermes",
+                        "payload": {
+                            "attempt": attempt,
+                            "continuation": turn_sequence,
+                            "agent_id": agent_id,
+                            "native_session_id": native_session_id,
+                        },
+                    })
                 saved_binding = _save_binding(
                     response,
                     recovery_state=(
@@ -646,7 +684,8 @@ class TaskManager:
     async def wait_task(self, task_id: str, timeout: float = 600.0,
                         nats_url: str | None = None) -> str:
         """等待任务到达 completed/failed/cancelled。返回最终状态。"""
-        terminal = {"completed", "failed", "cancelled", "accepted"}
+        terminal = {"completed", "awaiting_acceptance", "reviewed",
+                    "failed", "cancelled", "accepted"}
 
         async def _db_status() -> str | None:
             row = state_store.get_task(self.conn, task_id)
@@ -704,7 +743,7 @@ class TaskManager:
 
     def review_result(self, task_id: str, *, approved: bool,
                       notes: str = "", reviewer: str = "hermes") -> str:
-        """completed → reviewed → accepted / working(返工)。返回新状态。"""
+        """Record a reviewer recommendation without exercising user authority."""
         row0 = state_store.get_task(self.conn, task_id)
         root_id = row0["root_id"] if row0 else task_id
         from common import tracing
@@ -716,7 +755,8 @@ class TaskManager:
                 attributes={"task.id": task_id, "review.approved": approved,
                             "review.reviewer": reviewer}):
             review = {"reviewer": reviewer,
-                      "verdict": "approved" if approved else "rejected",
+                      "verdict": ("recommend_accept" if approved
+                                  else "recommend_rework"),
                       "notes": notes}
             state_store.transition_task(self.conn, task_id, TaskStatus.REVIEWED,
                                         review=review)
@@ -727,14 +767,76 @@ class TaskManager:
                 "event_type": "task.reviewed", "task_id": task_id,
                 "payload": review,
             })
-            if approved:
-                state_store.transition_task(self.conn, task_id,
-                                            TaskStatus.ACCEPTED)
-                self.promote_dependents(task_id)  # 解锁依赖本任务的后续任务
-                self._retain_outcome(task_id, notes)
-                return "accepted"
-            state_store.transition_task(self.conn, task_id, TaskStatus.WORKING)
-            return "working"  # 返工：调用方应重新 delegate（attempt+1）
+            if row0 and row0["collaboration_id"]:
+                from orchestrator import collaboration_store
+
+                collaboration_store.set_phase(
+                    self.conn, row0["collaboration_id"],
+                    CollaborationPhase.AWAITING_ACCEPTANCE)
+            return TaskStatus.REVIEWED.value
+
+    def accept_result(self, task_id: str, *, notes: str = "",
+                      decided_by: str = "user", via: str = "webui") -> str:
+        """Apply an explicit user acceptance decision."""
+        if decided_by.strip().casefold() in {"hermes", "llm", "system"}:
+            raise PermissionError("formal acceptance requires explicit user authority")
+        row = state_store.get_task(self.conn, task_id)
+        if row is None:
+            raise KeyError(f"task not found: {task_id}")
+        state_store.transition_task(self.conn, task_id, TaskStatus.ACCEPTED,
+                                    review={"reviewer": decided_by,
+                                            "verdict": "accepted",
+                                            "notes": notes, "via": via})
+        state_store.record_event(self.conn, {
+            "event_id": f"acceptance-{task_id}-{uuid.uuid4().hex[:8]}",
+            "event_type": "task.accepted", "task_id": task_id,
+            "source": decided_by,
+            "payload": {"by": decided_by, "via": via, "notes": notes},
+        })
+        if row["collaboration_id"]:
+            from orchestrator import collaboration_store
+
+            collaboration_store.set_phase(
+                self.conn, row["collaboration_id"],
+                CollaborationPhase.ACCEPTED, controller="user")
+        self.promote_dependents(task_id)
+        self._retain_outcome(task_id, notes)
+        return TaskStatus.ACCEPTED.value
+
+    def reject_result(self, task_id: str, *, feedback: str,
+                      decided_by: str = "user", via: str = "webui") -> str:
+        """Request auditable rework; non-empty user feedback is mandatory."""
+        if decided_by.strip().casefold() in {"hermes", "llm", "system"}:
+            raise PermissionError("formal rework requires explicit user authority")
+        feedback = feedback.strip()
+        if not feedback:
+            raise ValueError("rework feedback must be non-empty")
+        row = state_store.get_task(self.conn, task_id)
+        if row is None:
+            raise KeyError(f"task not found: {task_id}")
+        current_attempt = self.conn.execute(
+            "SELECT COALESCE(MAX(attempt), 0) FROM task_runs WHERE task_id = ?;",
+            (task_id,),
+        ).fetchone()[0]
+        next_attempt = max(int(current_attempt), 1) + 1
+        review = {"reviewer": decided_by, "verdict": "rejected",
+                  "feedback": feedback, "via": via}
+        state_store.transition_task(
+            self.conn, task_id, TaskStatus.REWORK_PENDING, review=review)
+        state_store.record_event(self.conn, {
+            "event_id": f"rework-{task_id}-{uuid.uuid4().hex[:8]}",
+            "event_type": "task.rework.requested", "task_id": task_id,
+            "source": decided_by,
+            "payload": {"by": decided_by, "via": via,
+                        "feedback": feedback, "next_attempt": next_attempt},
+        })
+        if row["collaboration_id"]:
+            from orchestrator import collaboration_store
+
+            collaboration_store.set_phase(
+                self.conn, row["collaboration_id"],
+                CollaborationPhase.REWORK, controller="user")
+        return TaskStatus.REWORK_PENDING.value
 
     # ---------- 审批（§5.4 input-required 闭环） ----------
 
