@@ -296,6 +296,12 @@ def test_index_page(client):
     assert 'id="settings-drawer"' in r.text
     assert 'id="session-title-layer"' in r.text
     assert "直接发送给" in r.text
+    assert 'data-task-detail-tab="goals"' in r.text
+    assert 'data-task-detail-tab="execution"' in r.text
+    assert "目标与交付" in r.text
+    assert "执行记录" in r.text
+    assert ".workspace-card > .chat-transcript" in r.text
+    assert ".task-detail-pane .d-body" in r.text
 
 
 def test_index_has_bounded_alert_center_and_in_page_dialogs(client):

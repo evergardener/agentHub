@@ -618,11 +618,29 @@
                   border-left: 3px solid transparent; }
   .conversation:hover { background: rgba(255,255,255,.34); }
   .conversation.active { background: rgba(220,243,240,.68); border-left-color: var(--acc); }
-  .workspace-card { background: rgba(255,255,255,.48); height: 100%; min-height: 0; }
+  .workspace-card {
+    height: 100%; min-height: 0; gap: 12px; overflow: visible;
+    background: transparent; border: 0; border-radius: 0;
+    box-shadow: none; backdrop-filter: none;
+  }
+  .workspace-card > .chat-head,
+  .workspace-card > .chat-transcript,
+  .workspace-card > .chat-composer {
+    background: rgba(255,255,255,.48); border: 1px solid rgba(255,255,255,.76);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+    backdrop-filter: blur(24px) saturate(132%);
+  }
+  .workspace-card > .chat-head { flex: none; }
+  .workspace-card > .chat-transcript { flex: 1; min-height: 0; }
+  .workspace-card > .chat-composer { flex: none; }
   .chat-head, .chat-context, .chat-foot {
     background: rgba(255,255,255,.30); border-color: var(--line-soft);
     backdrop-filter: blur(16px);
   }
+  .workspace-card > .chat-head,
+  .workspace-card > .chat-composer { border-color: rgba(255,255,255,.76); }
+  .workspace-card > .chat-head { border-bottom: 1px solid rgba(255,255,255,.76); }
+  .workspace-card > .chat-composer { border-top: 1px solid rgba(255,255,255,.76); }
   .chat-transcript { padding: 20px clamp(16px, 3vw, 40px); }
   .chat-transcript .message { display: grid; grid-template-columns: 32px minmax(0,1fr);
                               gap: 9px; padding: 0; background: none; border: 0; }
@@ -645,12 +663,15 @@
   .chat-transcript .message.user { margin-left: 0; }
   .task-detail-pane {
     min-width: 0; min-height: 0; height: 100%; display: flex;
-    flex-direction: column; overflow: hidden; border-radius: var(--radius);
+    flex-direction: column; gap: 12px; overflow: visible; border: 0;
+    border-radius: 0; background: transparent; box-shadow: none;
+    backdrop-filter: none;
   }
   .task-detail-pane .d-head {
-    padding: 14px 16px; border-bottom: 1px solid var(--line-soft);
+    padding: 14px 16px; border: 1px solid rgba(255,255,255,.76);
+    border-radius: var(--radius); box-shadow: var(--shadow);
     display: flex; align-items: center; gap: 10px;
-    background: rgba(255,255,255,.32); backdrop-filter: blur(16px);
+    background: rgba(255,255,255,.48); backdrop-filter: blur(24px) saturate(132%);
   }
   .task-detail-pane .d-head > div { min-width: 0; flex: 1; }
   .task-detail-pane .d-head .tid { display: block; overflow: hidden;
@@ -661,7 +682,12 @@
     border: 0; background: rgba(255,255,255,.36); color: var(--mut);
     width: 28px; height: 28px; border-radius: 8px; cursor: pointer;
   }
-  .task-detail-pane .d-body { padding: 16px; overflow-y: auto; flex: 1; }
+  .task-detail-pane .d-body {
+    padding: 0; overflow: hidden; flex: 1; min-height: 0;
+    border: 1px solid rgba(255,255,255,.76); border-radius: var(--radius);
+    background: rgba(255,255,255,.48); box-shadow: var(--shadow);
+    backdrop-filter: blur(24px) saturate(132%);
+  }
   .task-pane-empty { color: var(--faint); text-align: center; padding: 54px 18px; }
   .instruction, .mono, .message, .tk-result pre, .tk-msg {
     background: rgba(255,255,255,.38); border-color: rgba(255,255,255,.64);
@@ -800,7 +826,9 @@
   /* 右栏任务：目标、交付和执行分区 */
   .task-switcher {
     display: flex; gap: 6px; padding: 8px 10px; overflow-x: auto;
-    border-bottom: 1px solid var(--line-soft); background: rgba(255,255,255,.20);
+    flex: none; border: 1px solid rgba(255,255,255,.76);
+    border-radius: var(--radius); background: rgba(255,255,255,.44);
+    box-shadow: var(--shadow); backdrop-filter: blur(24px) saturate(132%);
   }
   .task-switcher:empty { display: none; }
   .task-switch {
@@ -809,10 +837,25 @@
     cursor: pointer; font: inherit; font-size: 10.5px;
   }
   .task-switch.active { background: var(--acc); border-color: var(--acc); color: #fff; }
-  .task-overview { display: grid; gap: 12px; }
-  .task-objective-card, .task-section-card {
-    border: 1px solid rgba(255,255,255,.72); border-radius: 13px;
-    background: rgba(255,255,255,.34); padding: 12px;
+  .task-overview { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+  .task-detail-tabs {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 5px; padding: 8px;
+    flex: none; border-bottom: 1px solid var(--line-soft);
+    background: rgba(255,255,255,.18);
+  }
+  .task-detail-tab {
+    border: 0; border-radius: 10px; padding: 8px 10px;
+    background: transparent; color: var(--mut); cursor: pointer;
+    font: inherit; font-size: 12px;
+  }
+  .task-detail-tab.active {
+    background: rgba(222,243,241,.76); color: var(--acc); font-weight: 700;
+    box-shadow: inset 0 0 0 1px rgba(78,120,131,.10);
+  }
+  .task-detail-panel { flex: 1; min-height: 0; overflow-y: auto; padding: 14px; }
+  .task-detail-panel[hidden] { display: none; }
+  .task-detail-block + .task-detail-block {
+    margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line-soft);
   }
   .task-section-label { color: var(--faint); font-size: 10px; font-weight: 700;
                         letter-spacing: .11em; text-transform: uppercase; }
@@ -832,11 +875,6 @@
   .artifact-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
   .acceptance-list { margin: 8px 0 0; padding-left: 18px; color: var(--mut); font-size: 11.5px; }
   .acceptance-list li + li { margin-top: 4px; }
-  .activity-tabs { display: flex; gap: 4px; margin-bottom: 9px; }
-  .activity-tab { border: 0; border-radius: 8px; background: transparent; color: var(--mut);
-                  padding: 5px 8px; cursor: pointer; font: inherit; font-size: 11px; }
-  .activity-tab.active { background: var(--acc-soft); color: var(--acc); }
-  .activity-panel[hidden] { display: none; }
   .timeline { position: relative; display: grid; gap: 9px; padding-left: 15px; }
   .timeline::before { content: ""; position: absolute; left: 4px; top: 5px; bottom: 5px;
                       width: 1px; background: rgba(91,122,126,.22); }
@@ -1984,10 +2022,10 @@ async function openDetail(id, {syncConversation = true} = {}) {
     try {
       const review = JSON.parse(t.review_json);
       const ok = review.verdict === "approved";
-      reviewHtml = `<div class="task-section-card"><div class="task-section-label">最近复审</div>` +
+      reviewHtml = `<section class="task-detail-block"><div class="task-section-label">最近复审</div>` +
         `<div class="task-result"><strong class="${ok ? "verdict-ok" : "verdict-no"}">` +
         `${ok ? "✓ 验收通过" : "✗ 需要返工"}</strong> · ${esc(review.reviewer || "Hermes")}<br>` +
-        `${esc(review.notes || "无补充说明")}</div></div>`;
+        `${esc(review.notes || "无补充说明")}</div></section>`;
     } catch (_) { /* 非结构化旧记录不展示 */ }
   }
 
@@ -1995,13 +2033,13 @@ async function openDetail(id, {syncConversation = true} = {}) {
   const canControl = S.role !== "viewer" && S.currentSession && !terminal;
   const needsAcceptance = ["awaiting_acceptance", "reviewed"].includes(t.status);
   const acceptanceControls = needsAcceptance && S.role !== "viewer" ?
-    `<div class="task-section-card"><div class="task-section-label">用户验收</div>` +
+    `<section class="task-detail-block"><div class="task-section-label">用户验收</div>` +
     `<div class="task-result">确认交付物和验收条件后接受；需要返工时必须写明原因。</div>` +
     `<textarea id="acceptance-feedback" rows="2" style="width:100%;box-sizing:border-box;margin-top:8px" ` +
     `placeholder="验收备注，或需要返工的具体原因"></textarea>` +
     `<div class="artifact-actions"><button class="btn ok" data-accept-task="${esc(t.id)}">接受结果</button>` +
-    `<button class="btn no" data-rework-task="${esc(t.id)}">要求返工</button></div></div>` : "";
-  const controls = canControl ? `<div class="task-section-card"><div class="task-section-label">任务控制</div>` +
+    `<button class="btn no" data-rework-task="${esc(t.id)}">要求返工</button></div></section>` : "";
+  const controls = canControl ? `<section class="task-detail-block"><div class="task-section-label">任务控制</div>` +
     `<textarea id="d-intervention-text" rows="2" style="width:100%;box-sizing:border-box;margin-top:8px" ` +
     `placeholder="补充给 Hermes 或纠正当前 Agent"></textarea>` +
     `<div class="artifact-actions"><button class="btn" data-intervene="comment">备注给 Hermes</button>` +
@@ -2010,7 +2048,7 @@ async function openDetail(id, {syncConversation = true} = {}) {
     (collaboration.controller === "user" ? `<button class="btn" data-intervene="return_to_hermes">归还 Hermes</button>` : "") +
     (sessionCaps.interrupt ? `<button class="btn no" data-intervene="interrupt">中断 turn</button>` : "") +
     (sessionCaps.cancel ? `<button class="btn no" data-intervene="cancel">取消任务</button>` : "") +
-    `</div></div>` : "";
+    `</div></section>` : "";
 
   const timeline = (d.events || []).length ? `<div class="timeline" data-live-events>` +
     (d.events || []).map(event => `<div class="timeline-item"><strong>${esc(eventDetail(event))}</strong>` +
@@ -2029,34 +2067,41 @@ async function openDetail(id, {syncConversation = true} = {}) {
     `<div class="empty">暂无 Agent 原生交互</div>`;
 
   $("#d-body").innerHTML = `<div class="task-overview">
-    <section class="task-objective-card"><div class="task-section-label">任务目标</div>
-      <div class="task-objective-text">${esc(t.objective || "（空）")}</div>
-      <div class="task-source">${esc(sourceNotes[d.instruction_source] || "数据库中的任务目标原文")}</div>
-    </section>
-    <section class="task-meta-grid">${meta}</section>
-    <section class="task-section-card"><div class="task-section-label">交付物</div>
-      <div class="delivery-list">${deliverables}</div><div class="artifact-actions">${artifactButtons}</div>
-      ${criteria.length ? `<div class="task-section-label" style="margin-top:12px">验收条件</div><ul class="acceptance-list">` +
-        criteria.map(item => `<li>${esc(item)}</li>`).join("") + `</ul>` : ""}
-    </section>
-    ${plan ? `<section class="task-section-card"><div class="task-section-label">Task Plan · revision ${esc(plan.plan_revision)}</div>` +
-      `<div class="task-result">${esc(plan.plan_objective)}</div><div class="delivery-list">${planChain}</div>` +
-      (operations.length ? `<div class="task-source">预期操作：${esc(operations.join(" · "))}</div>` : "") + `</section>` : ""}
-    ${t.result_summary ? `<section class="task-section-card"><div class="task-section-label">结果摘要</div><div class="task-result">${esc(t.result_summary)}</div></section>` : ""}
-    ${t.error_message ? `<section class="task-section-card"><div class="task-section-label">错误</div><div class="task-result verdict-no">${esc(t.error_message)}</div></section>` : ""}
-    ${reviewHtml}${acceptanceControls}${controls}
-    <section class="task-section-card"><div class="activity-tabs">
-      <button class="activity-tab active" type="button" data-activity-tab="timeline">时间线</button>
-      <button class="activity-tab" type="button" data-activity-tab="runs">Runs</button>
-      <button class="activity-tab" type="button" data-activity-tab="interactions">Agent 交互</button>
-    </div><div class="activity-panel" data-activity-panel="timeline">${timeline}</div>
-      <div class="activity-panel" data-activity-panel="runs" hidden>${runs}</div>
-      <div class="activity-panel" data-activity-panel="interactions" hidden>${interactions}</div>
-    </section>
-    <section class="task-section-card" id="d-viewer-sec" style="display:none">
-      <div class="task-section-label">产物内容</div><div class="viewer-bar"><span class="fname" id="d-viewer-title"></span></div>
-      <div id="d-viewer"></div>
-    </section>
+    <div class="task-detail-tabs" role="tablist">
+      <button class="task-detail-tab active" type="button" role="tab" aria-selected="true" data-task-detail-tab="goals">目标与交付</button>
+      <button class="task-detail-tab" type="button" role="tab" aria-selected="false" data-task-detail-tab="execution">执行记录</button>
+    </div>
+    <div class="task-detail-panel" role="tabpanel" data-task-detail-panel="goals">
+      <section class="task-detail-block"><div class="task-section-label">任务目标</div>
+        <div class="task-objective-text">${esc(t.objective || "（空）")}</div>
+        <div class="task-source">${esc(sourceNotes[d.instruction_source] || "数据库中的任务目标原文")}</div>
+      </section>
+      <section class="task-detail-block"><div class="task-section-label">交付物</div>
+        <div class="delivery-list">${deliverables}</div><div class="artifact-actions">${artifactButtons}</div>
+        ${criteria.length ? `<div class="task-section-label" style="margin-top:12px">验收条件</div><ul class="acceptance-list">` +
+          criteria.map(item => `<li>${esc(item)}</li>`).join("") + `</ul>` : ""}
+      </section>
+      ${t.result_summary ? `<section class="task-detail-block"><div class="task-section-label">结果摘要</div><div class="task-result">${esc(t.result_summary)}</div></section>` : ""}
+      ${reviewHtml}
+      ${t.error_message ? `<section class="task-detail-block"><div class="task-section-label">错误</div><div class="task-result verdict-no">${esc(t.error_message)}</div></section>` : ""}
+      ${acceptanceControls}
+      ${plan ? `<section class="task-detail-block"><div class="task-section-label">Task Plan · revision ${esc(plan.plan_revision)}</div>` +
+        `<div class="task-result">${esc(plan.plan_objective)}</div><div class="delivery-list">${planChain}</div>` +
+        (operations.length ? `<div class="task-source">预期操作：${esc(operations.join(" · "))}</div>` : "") + `</section>` : ""}
+      ${controls}
+      <section class="task-detail-block"><div class="task-section-label">任务信息</div>
+        <div class="task-meta-grid">${meta}</div>
+      </section>
+      <section class="task-detail-block" id="d-viewer-sec" style="display:none">
+        <div class="task-section-label">产物内容</div><div class="viewer-bar"><span class="fname" id="d-viewer-title"></span></div>
+        <div id="d-viewer"></div>
+      </section>
+    </div>
+    <div class="task-detail-panel" role="tabpanel" data-task-detail-panel="execution" hidden>
+      <section class="task-detail-block"><div class="task-section-label">时间线</div>${timeline}</section>
+      <section class="task-detail-block"><div class="task-section-label">Agent 交互</div>${interactions}</section>
+      <section class="task-detail-block"><div class="task-section-label">Runs</div>${runs}</section>
+    </div>
   </div>`;
 
   document.querySelectorAll("[data-art]").forEach(button =>
@@ -2067,10 +2112,14 @@ async function openDetail(id, {syncConversation = true} = {}) {
     button.onclick = () => decideAcceptance(button.dataset.acceptTask, "accept", button));
   document.querySelectorAll("[data-rework-task]").forEach(button =>
     button.onclick = () => decideAcceptance(button.dataset.reworkTask, "request-rework", button));
-  document.querySelectorAll("[data-activity-tab]").forEach(button =>
+  document.querySelectorAll("[data-task-detail-tab]").forEach(button =>
     button.onclick = () => {
-      document.querySelectorAll("[data-activity-tab]").forEach(item => item.classList.toggle("active", item === button));
-      document.querySelectorAll("[data-activity-panel]").forEach(panel => panel.hidden = panel.dataset.activityPanel !== button.dataset.activityTab);
+      document.querySelectorAll("[data-task-detail-tab]").forEach(item => {
+        item.classList.toggle("active", item === button);
+        item.setAttribute("aria-selected", item === button ? "true" : "false");
+      });
+      document.querySelectorAll("[data-task-detail-panel]").forEach(panel =>
+        panel.hidden = panel.dataset.taskDetailPanel !== button.dataset.taskDetailTab);
     });
   updateComposer();
   $("#d-body").scrollTop = 0;

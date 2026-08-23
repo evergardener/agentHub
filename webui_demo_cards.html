@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>agentHub 当前版 · 卡片边界与磨砂 Demo</title>
+<style>
+:root {
+  --fg:#304348; --mut:#6d8083; --faint:#8da0a2; --acc:#4e7883;
+  --ok:#397b63; --warn:#a96f41; --bad:#a95d61;
+  --glass:rgba(255,255,255,.48); --glass-strong:rgba(255,255,255,.60);
+  --line:rgba(255,255,255,.82); --line-soft:rgba(63,88,91,.12);
+  --shadow:0 12px 28px rgba(65,94,98,.12); --radius:16px;
+}
+*{box-sizing:border-box} html,body{height:100%}
+body{
+  margin:0; overflow:hidden; color:var(--fg);
+  font:13px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif;
+  background:radial-gradient(circle at 74% 5%,rgba(255,236,194,.84),transparent 30%),radial-gradient(circle at 88% 88%,rgba(187,223,201,.82),transparent 34%),radial-gradient(circle at 13% 76%,rgba(183,220,232,.84),transparent 32%),linear-gradient(135deg,#d5e9ef,#eff3d8 52%,#e6ddec);
+}
+body:before{content:"";position:fixed;inset:-40px;pointer-events:none;background:radial-gradient(ellipse at 48% 22%,rgba(255,255,255,.58),transparent 38%),repeating-linear-gradient(108deg,rgba(255,255,255,.13) 0 2px,transparent 2px 16px);filter:blur(10px);z-index:-1}
+header{
+  height:58px;padding:0 14px;display:flex;align-items:center;gap:10px;
+  background:rgba(255,255,255,.55);border-bottom:1px solid rgba(255,255,255,.78);
+  backdrop-filter:blur(26px) saturate(135%);box-shadow:0 4px 18px rgba(68,98,103,.10)
+}
+.logo{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:650}.mark{width:23px;height:23px;border-radius:50%;display:grid;place-items:center;background:rgba(78,120,131,.88);color:#fff;font-size:11px;font-weight:700}.spacer{flex:1}
+.top-action{min-height:32px;padding:4px 7px 4px 11px;border-radius:999px;border:1px solid var(--line);background:rgba(255,255,255,.42);color:var(--mut);display:inline-flex;align-items:center;gap:7px}.count{min-width:22px;height:22px;padding:0 6px;border-radius:999px;display:grid;place-items:center;background:rgba(222,243,241,.70);color:var(--acc);font-size:11px;font-weight:700}.count.alert{background:rgba(250,225,226,.74);color:var(--bad)}.conn{display:flex;align-items:center;gap:6px;color:var(--mut);font-size:12px}.conn:before{content:"";width:7px;height:7px;border-radius:50%;background:var(--ok)}time{font-size:12px;color:var(--faint)}
+.layout{height:calc(100vh - 58px);padding:12px;display:grid;grid-template-columns:280px minmax(460px,1fr) minmax(330px,390px);gap:12px}.col{min-width:0;min-height:0;display:flex;flex-direction:column;gap:12px}
+/* 仅做边界分离：所有现有内容区共用同一磨砂卡片表面。 */
+.card{min-width:0;background:var(--glass);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);backdrop-filter:blur(24px) saturate(132%);overflow:hidden}
+.section-head{height:46px;padding:0 15px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--line-soft);color:var(--mut);font-size:12px;font-weight:700;letter-spacing:.06em}.section-head select{margin-left:auto;max-width:92px;padding:4px 8px;border:1px solid var(--line);border-radius:9px;background:rgba(255,255,255,.42);color:var(--fg);font:inherit;font-size:11px}
+
+/* 左栏：仍然只有当前版的 Session 导航。 */
+.sessions{height:100%;display:flex;flex-direction:column}.session-list{flex:1;min-height:0;overflow:auto;padding:8px;display:grid;align-content:start;gap:7px}.session{position:relative;padding:12px;border:1px solid transparent;border-radius:13px;background:rgba(255,255,255,.24)}.session.active{background:rgba(220,243,240,.74);border-color:rgba(103,151,151,.32);box-shadow:0 7px 18px rgba(65,94,98,.10)}.session-top{display:flex;align-items:center;gap:7px}.session-title{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:700}.edit{color:var(--faint)}.state{display:inline-flex;align-items:center;gap:5px;margin-top:8px;color:var(--acc);font-size:10.5px}.state:before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}.state.completed{color:var(--ok)}.agent{margin-left:8px;color:var(--mut)}.agent-dot{width:17px;height:17px;border-radius:50%;display:inline-grid;place-items:center;margin-right:3px;background:#7b789b;color:#fff;font-size:9px;font-weight:700}.stats{margin-top:7px;color:var(--faint);font-size:10.5px}
+
+/* 中栏：标题、对话、输入区内容不变，仅各自成为独立卡片。 */
+.chat-head{padding:13px 18px;display:flex;align-items:center;gap:10px}.chat-titles{min-width:0;flex:1}.chat-title{font-size:15px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.chat-sub{margin-top:2px;color:var(--faint);font-size:11px;display:flex;gap:12px;flex-wrap:wrap}.badge{display:inline-flex;align-items:center;gap:5px;padding:1px 9px;border-radius:999px;background:rgba(242,243,246,.68);color:var(--mut);font-size:11px;white-space:nowrap}.badge:before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}.badge.working{color:#54768f;background:rgba(221,235,247,.74)}.badge.completed{color:var(--ok);background:rgba(220,244,232,.72)}
+.transcript{flex:1;min-height:0;overflow:auto;padding:20px clamp(16px,3vw,40px)}.message-list{display:grid;gap:14px}.message{width:min(88%,780px);display:grid;grid-template-columns:32px minmax(0,1fr);gap:9px}.message.outbound{grid-template-columns:minmax(0,1fr) 32px;margin-left:auto}.message.outbound .avatar{grid-column:2}.message.outbound .shell{grid-column:1;grid-row:1;border-radius:14px 4px 14px 14px}.avatar{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:#768e96;color:#fff;font-weight:700;box-shadow:0 4px 10px rgba(66,91,95,.15)}.message.hermes .avatar{background:#7b789b}.message.user .avatar{background:#7088a2}.shell{min-width:0;padding:10px 12px;border-radius:4px 14px 14px 14px;background:rgba(255,255,255,.48);border:1px solid rgba(255,255,255,.72);box-shadow:0 6px 16px rgba(69,98,102,.09)}.message.outbound .shell{background:rgba(227,242,236,.62)}.mh{display:flex;gap:6px 10px;flex-wrap:wrap;color:var(--faint);font-size:10.5px;margin-bottom:4px}.mh strong{color:var(--fg);font-size:11.5px}.mc{font-size:13px;line-height:1.72;white-space:pre-wrap}.tool-card{margin-top:8px;border:1px solid rgba(167,127,83,.22);border-radius:10px;background:rgba(255,248,236,.54);overflow:hidden}.tool-card summary{display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:pointer;color:var(--fg);font-size:12px}.tool-card summary:before{content:"⌁";color:var(--warn);font-weight:700}.tool-card small{margin-left:auto;color:var(--faint)}.tool-fields{display:grid;gap:5px;padding:0 10px 10px}.tool-field{display:grid;grid-template-columns:78px minmax(0,1fr);gap:7px;color:var(--mut);font-size:11px}.tool-field code{white-space:pre-wrap;word-break:break-word;color:var(--fg);font:11px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}
+.composer{padding:9px 14px 11px}.composer-row{display:flex;align-items:center;gap:8px;color:var(--faint);font-size:10.5px}.composer-row select{max-width:180px;padding:5px 8px;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.48);color:var(--fg)}.input-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-top:7px}.input-row textarea{width:100%;resize:none;border:1px solid var(--line);border-radius:12px;padding:9px 11px;color:var(--fg);background:rgba(255,255,255,.48);font:inherit}.send{min-width:64px;border:0;border-radius:11px;background:var(--acc);color:#fff;padding:0 14px}.composer-note{margin-top:5px;color:var(--faint);font-size:10px}
+
+/* 右栏：保留原有两类标签，减少卡片数量。 */
+.task-head{padding:14px 16px;display:flex;align-items:center;gap:10px}.eyebrow{color:var(--faint);font-size:10px;font-weight:700;letter-spacing:.12em}.tid{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--mut)}.close{width:28px;height:28px;border:0;border-radius:8px;background:rgba(255,255,255,.36);color:var(--mut)}.switcher{padding:8px 10px;display:flex;gap:6px;overflow:auto}.task-switch{flex:none;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.34);color:var(--mut);padding:4px 9px;font-size:10.5px}.task-switch.active{background:var(--acc);border-color:var(--acc);color:#fff}.task-scroll{flex:1;min-height:0;overflow:auto;display:grid;align-content:start;gap:12px;padding-right:2px}.task-section{padding:12px}.label{color:var(--faint);font-size:10px;font-weight:700;letter-spacing:.11em;text-transform:uppercase}.objective{margin-top:5px;font-size:13px;line-height:1.68;white-space:pre-wrap}.source{margin-top:7px;color:var(--faint);font-size:10.5px}.meta-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:10px}.meta-item{padding:8px 9px;border-radius:10px;background:rgba(255,255,255,.30)}.meta-item span{display:block;color:var(--faint);font-size:9.5px}.meta-item strong{display:block;margin-top:2px;font-size:11.5px;font-weight:600;word-break:break-word}.delivery-list,.run-list{display:grid;gap:7px;margin-top:9px}.delivery{display:flex;gap:7px;color:var(--mut);font-size:11.5px}.delivery:before{content:"✓";color:var(--ok)}.artifact{display:inline-flex;margin:9px 5px 0 0;padding:3px 9px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.34);color:var(--acc);font:10.5px ui-monospace,SFMono-Regular,Menlo,monospace}.tabs{display:flex;gap:4px;margin-bottom:9px}.tab{padding:5px 8px;border-radius:8px;color:var(--mut);font-size:11px}.tab.active{background:rgba(222,243,241,.70);color:var(--acc)}.timeline{position:relative;display:grid;gap:9px;padding-left:15px}.timeline:before{content:"";position:absolute;left:4px;top:5px;bottom:5px;width:1px;background:rgba(91,122,126,.22)}.event{position:relative}.event:before{content:"";position:absolute;left:-14px;top:6px;width:7px;height:7px;border-radius:50%;background:var(--acc)}.event strong{display:block;font-size:11.5px}.event span{color:var(--faint);font-size:10px}.run{padding:8px 9px;border-radius:10px;background:rgba(255,255,255,.30)}.run-head{display:flex;gap:7px;align-items:center}.run-head small{margin-left:auto;color:var(--faint)}.run p{margin:4px 0 0;color:var(--mut);font-size:10.5px}
+.task-content{flex:1;min-height:0;display:flex;flex-direction:column}.detail-tabs{display:grid;grid-template-columns:1fr 1fr;gap:5px;padding:8px;border-bottom:1px solid var(--line-soft);background:rgba(255,255,255,.18)}.detail-tab{border:0;border-radius:10px;padding:8px 10px;background:transparent;color:var(--mut);font:inherit;font-size:12px;cursor:pointer}.detail-tab.active{background:rgba(222,243,241,.76);color:var(--acc);font-weight:700;box-shadow:inset 0 0 0 1px rgba(78,120,131,.10)}.detail-panel{flex:1;min-height:0;overflow:auto;padding:14px}.detail-panel[hidden]{display:none}.detail-block+.detail-block{margin-top:16px;padding-top:16px;border-top:1px solid var(--line-soft)}.acceptance{margin:8px 0 0;padding-left:18px;color:var(--mut);font-size:11.5px}.acceptance li+li{margin-top:4px}.result{margin-top:8px;padding:9px 10px;border-radius:10px;background:rgba(255,255,255,.30);color:var(--mut);font-size:11.5px;white-space:pre-wrap}.interaction{margin-top:8px;padding:8px 9px;border-radius:10px;background:rgba(255,248,236,.42)}.interaction-head{display:flex;gap:7px;align-items:center}.interaction-head small{margin-left:auto;color:var(--warn)}.interaction p{margin:4px 0 0;color:var(--mut);font-size:10.5px}
+@media(max-width:980px){body{overflow:auto}.layout{grid-template-columns:250px minmax(420px,1fr);height:auto}.right{grid-column:1/-1;display:grid;grid-template-columns:repeat(2,1fr)}.task-scroll{display:contents}}
+</style>
+</head>
+<body>
+<header><div class="logo"><span class="mark">aH</span>agentHub 控制台</div><div class="spacer"></div><span class="top-action">操作中心 <b class="count">0</b></span><span class="top-action">告警 <b class="count alert">1</b></span><span class="top-action">设置　⚙</span><span class="conn">已连接</span><time>2026/8/23 15:12:41</time></header>
+<div class="layout">
+  <aside class="col">
+    <section class="card sessions"><div class="section-head">SESSIONS<select><option>全部</option><option>进行中</option><option>待处理</option><option>已结束</option></select></div><div class="session-list">
+      <article class="session active"><div class="session-top"><div class="session-title">显式用户验收生命周期改造</div><span class="edit">✎</span></div><div><span class="state">进行中</span><span class="agent"><i class="agent-dot">C</i>codex</span></div><div class="stats">2 条消息 · 2 个任务</div></article>
+      <article class="session"><div class="session-top"><div class="session-title">只读检查任务工作区</div><span class="edit">✎</span></div><div><span class="state">进行中</span><span class="agent"><i class="agent-dot">D</i>dsh</span></div><div class="stats">4 条消息 · 1 个任务</div></article>
+      <article class="session"><div class="session-top"><div class="session-title">DSH 安全策略分类验证</div><span class="edit">✎</span></div><div><span class="state completed">已完成</span><span class="agent"><i class="agent-dot">D</i>dsh</span></div><div class="stats">7 条消息 · 1 个任务</div></article>
+      <article class="session"><div class="session-top"><div class="session-title">WebUI 多轮上下文演示</div><span class="edit">✎</span></div><div><span class="state completed">纯对话</span><span class="agent"><i class="agent-dot">H</i>Hermes</span></div><div class="stats">4 条消息 · 未创建任务</div></article>
+    </div></section>
+  </aside>
+
+  <main class="col">
+    <section class="card chat-head"><div class="chat-titles"><div class="chat-title">显式用户验收生命周期改造　✎</div><div class="chat-sub"><span>Hermes 多轮上下文追踪</span><span>控制权 Hermes</span><span>2 条消息 · 2 个任务</span></div></div><span class="badge working">进行中</span></section>
+    <section class="card transcript"><div class="message-list">
+      <article class="message outbound hermes"><span class="avatar">H</span><div class="shell"><div class="mh"><strong>Hermes → codex</strong><span>11:01:35</span></div><div class="mc">请分析 agentHub task 的显式用户验收生命周期，先确认状态转换、兼容风险和测试范围。</div></div></article>
+      <article class="message"><span class="avatar">C</span><div class="shell"><div class="mh"><strong>codex</strong><span>11:08:22</span></div><div class="mc">已确认最小改造边界。worker 原生 turn 成功后进入 awaiting_acceptance；用户接受后才成为 accepted，驳回则进入 rework_pending。</div><details class="tool-card" open><summary>工具调用 · repository.inspect <small>完成</small></summary><div class="tool-fields"><div class="tool-field"><b>范围</b><code>src/common/models.py, src/orchestrator/task_manager.py</code></div><div class="tool-field"><b>结果</b><code>状态转换与现有 A2A 映射存在兼容路径</code></div></div></details></div></article>
+      <article class="message outbound hermes"><span class="avatar">H</span><div class="shell"><div class="mh"><strong>Hermes → codex</strong><span>11:18:55</span></div><div class="mc">技术细节确认。按已批准边界实施，并保持原生 session 可继续；不得修改部署和网络配置。</div></div></article>
+      <article class="message"><span class="avatar">C</span><div class="shell"><div class="mh"><strong>codex</strong><span>11:31:07</span></div><div class="mc">收到，正在执行单元测试并核对回滚边界。完成后返回测试证据和文件清单。</div><details class="tool-card"><summary>工具调用 · pytest <small>展开详情</small></summary></details></div></article>
+    </div></section>
+    <section class="card composer"><div class="composer-row"><select><option>发送给 Hermes</option><option>直接发送给 codex</option></select><span>向当前 Session 补充要求或纠正方向</span><span class="spacer"></span><span>已同步 15:12:39</span></div><div class="input-row"><textarea rows="2" placeholder="直接补充要求、纠正方向或向 Agent 发送指令…"></textarea><button class="send">发送</button></div><div class="composer-note">发送给 Hermes 会写入持久上下文；直接发送给 Agent 使用当前原生 Session 的实时纠正能力。</div></section>
+  </main>
+
+  <aside class="col right">
+    <section class="card task-head"><div><div class="eyebrow">关联任务</div><div class="tid">T-20260823-0001</div></div><div class="spacer"></div><span class="badge completed">completed</span><button class="close">×</button></section>
+    <section class="card switcher"><button class="task-switch active">T-0001 · completed</button><button class="task-switch">T-0002 · failed</button></section>
+    <section class="card task-content">
+      <div class="detail-tabs" role="tablist"><button class="detail-tab active" type="button" role="tab" aria-selected="true" data-panel="goal-panel">目标与交付</button><button class="detail-tab" type="button" role="tab" aria-selected="false" data-panel="execution-panel">执行记录</button></div>
+      <div class="detail-panel" id="goal-panel" role="tabpanel">
+        <section class="detail-block"><div class="label">任务目标</div><div class="objective">将 agentHub task 生命周期改为显式用户验收：worker 原生 turn 成功后进入待验收状态，只有用户明确接受才正式完成。</div><div class="source">来自 Hermes 委派时保存的任务目标原文</div></section>
+        <section class="detail-block"><div class="label">交付物</div><div class="delivery-list"><div class="delivery">状态转换与兼容逻辑</div><div class="delivery">A2A 接受与返工接口</div><div class="delivery">单元测试与回滚说明</div></div><span class="artifact">implementation.md</span><span class="artifact">test-report.txt</span></section>
+        <section class="detail-block"><div class="label">验收条件</div><ul class="acceptance"><li>worker 成功后进入 awaiting_acceptance</li><li>接受和返工操作均记录到持久上下文</li><li>完整单元测试通过且可按文件回滚</li></ul></section>
+        <section class="detail-block"><div class="label">结果摘要</div><div class="result">实现与测试已完成，当前等待用户核对交付物并进行显式验收。</div></section>
+        <section class="detail-block"><div class="label">任务信息</div><div class="meta-grid"><div class="meta-item"><span>执行体</span><strong>codex</strong></div><div class="meta-item"><span>控制权</span><strong>hermes</strong></div><div class="meta-item"><span>状态</span><strong>awaiting_acceptance</strong></div><div class="meta-item"><span>上下文</span><strong>revision 1</strong></div></div></section>
+      </div>
+      <div class="detail-panel" id="execution-panel" role="tabpanel" hidden>
+        <section class="detail-block"><div class="label">时间线</div><div class="timeline"><div class="event"><strong>任务已创建</strong><span>11:01:35 · Hermes → codex</span></div><div class="event"><strong>Agent 开始执行</strong><span>11:02:01 · 原生 Session 已绑定</span></div><div class="event"><strong>等待用户验收</strong><span>11:31:07 · 交付物已生成</span></div></div></section>
+        <section class="detail-block"><div class="label">Agent 交互</div><div class="interaction"><div class="interaction-head"><strong>codex 请求确认验收边界</strong><small>已由 Hermes 确认</small></div><p>保持同一原生 Session，禁止部署和网络配置变更。</p></div></section>
+        <section class="detail-block"><div class="label">RUNS</div><div class="run-list"><div class="run"><div class="run-head"><strong>Run #1 · codex</strong><small>已完成</small></div><p>状态机与 A2A 接口改造，保留同一原生 Session。</p></div><div class="run"><div class="run-head"><strong>Run #2 · tests</strong><small>已完成</small></div><p>相关测试及完整 unit suite 均通过。</p></div></div></section>
+      </div>
+    </section>
+  </aside>
+</div>
+<script>
+document.querySelectorAll('.detail-tab').forEach((tab)=>tab.addEventListener('click',()=>{
+  document.querySelectorAll('.detail-tab').forEach((item)=>{item.classList.toggle('active',item===tab);item.setAttribute('aria-selected',item===tab?'true':'false')});
+  document.querySelectorAll('.detail-panel').forEach((panel)=>{panel.hidden=panel.id!==tab.dataset.panel});
+}));
+</script>
+</body>
+</html>
