@@ -1788,7 +1788,7 @@ agentgateway     127.0.0.1:8300
 # 25. 推荐仓库结构
 
 ```text
-local-agent-system/
+agentHub/
 ├── README.md
 ├── pyproject.toml
 ├── config/

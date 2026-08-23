@@ -1,8 +1,8 @@
-# Hermes ↔ local-agent-system 直接 A2A 接入开发交接文档
+# Hermes ↔ agentHub 直接 A2A 接入开发交接文档
 
 - 状态：**proposed — 开发前需先完成 Phase 0 安全修复**
 - 日期：2026-08-18
-- 适用对象：qishuo Hermes 作为顶层规划/审查者，local-agent-system（agentHub）作为本机任务执行平面
+- 适用对象：qishuo Hermes 作为顶层规划/审查者，agentHub 作为本机任务执行平面
 - 依据：[`orchestrator-a2a.md`](orchestrator-a2a.md)、[`Deployment.md`](Deployment.md)、[`adr/0001-hermes-integration-language.md`](adr/0001-hermes-integration-language.md)、`src/orchestrator/a2a_server.py`
 
 ## 1. 目标与非目标
@@ -81,6 +81,8 @@ A2A 是本次 Hermes ↔ agentHub 的**唯一业务集成协议**。Hermes 通�
 ### qishuo 私有配置
 
 建议使用以下专属配置文件：
+
+以下文件名为现有安装兼容标识，不随仓库目录改名：
 
 ```text
 /Users/evergarden/.hermes/profiles/qishuo/secrets/local-agent-system.env

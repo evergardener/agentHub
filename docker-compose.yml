@@ -12,6 +12,10 @@
 #   docker compose up -d                 # 控制面
 #   docker compose run --rm agentctl chat   # 与 hermes 对话（交互 CLI）
 
+# 兼容身份：即使仓库目录改名为 agentHub，仍复用现有容器、卷和网络。
+# 基础设施资源改名必须作为独立的备份/迁移操作，不得随目录改名隐式发生。
+name: local-agent-system
+
 x-agenthub: &agenthub
   image: agenthub:latest
   build: .

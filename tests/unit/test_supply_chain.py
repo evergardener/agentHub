@@ -14,6 +14,15 @@ SHA256 = r"sha256:[0-9a-f]{64}"
 ACTION_SHA = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 
 
+def test_project_branding_and_compose_identity_are_explicit():
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+
+    assert project["project"]["name"] == "agenthub"
+    # Directory branding may change without silently creating fresh volumes.
+    assert compose["name"] == "local-agent-system"
+
+
 def test_all_external_runtime_images_are_digest_pinned():
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
     external = ("nats", "postgres", "jaeger")
@@ -83,7 +92,7 @@ def test_container_dependencies_are_exactly_locked_and_cached_before_source():
         for requirement in project["project"]["dependencies"]
     }
     assert direct <= locked
-    assert "local-agent-system" not in locked
+    assert project["project"]["name"] not in locked
 
     dockerfile = (ROOT / "Dockerfile").read_text()
     assert "-r requirements.lock" in dockerfile

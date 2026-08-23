@@ -16,12 +16,12 @@
 
 ```toml
 [mcp_servers.agent-filesystem]
-command = "/Users/evergarden/Data/current-documents/Projects/local-agent-system/.venv/bin/python"
+command = "/Users/evergarden/Data/current-documents/Projects/agentHub/.venv/bin/python"
 args = ["-m", "tools.filesystem_server"]
-cwd = "/Users/evergarden/Data/current-documents/Projects/local-agent-system"
+cwd = "/Users/evergarden/Data/current-documents/Projects/agentHub"
 
 [mcp_servers.agent-filesystem.env]
-PYTHONPATH = "/Users/evergarden/Data/current-documents/Projects/local-agent-system/src"
+PYTHONPATH = "/Users/evergarden/Data/current-documents/Projects/agentHub/src"
 AGENT_WORKSPACE = "/Users/evergarden/AgentWorkspace"
 ```
 

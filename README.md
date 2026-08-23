@@ -1,4 +1,4 @@
-# local-agent-system
+# agentHub
 
 Hermes 主控的本地多 Agent 协作系统。现行产品与开发基线：
 
@@ -48,6 +48,10 @@ python3 scripts/production-preflight.py .env
 docker compose up -d     # 另含 notifier / orchestrator / webui / jaeger
 docker compose run --rm agentctl chat   # 与 hermes 对话
 ```
+
+仓库/目录名称使用 `agentHub`，但 Compose 项目身份暂时固定为
+`local-agent-system`，用于在目录改名后继续复用既有容器、网络和持久卷。不要把
+基础设施资源改名与仓库目录改名一起执行；资源改名必须另行备份、迁移和验证。
 
 - Web UI（看板 / 告警 / 任务详情 / 事件流 / 审批中心）：http://127.0.0.1:18070
 - Jaeger（OTel trace 查询）：http://127.0.0.1:16686

@@ -5,7 +5,7 @@
 
 - 状态：proposed
 - 日期：2026-08-18
-- 目标：不用 MCP。通过 Hermes 已实现的原生 A2A client tools 接入 local-agent-system（agentHub）。
+- 目标：不用 MCP。通过 Hermes 已实现的原生 A2A client tools 接入 agentHub。
 
 ## 1. 结论
 

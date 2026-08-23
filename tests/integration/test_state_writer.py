@@ -115,7 +115,7 @@ async def test_state_plane_end_to_end(tmp_path, monkeypatch):
         task_id = next_task_id(conn)
         state_store.create_task(
             conn, task_id=task_id, objective="phase3 acceptance task",
-            created_by="hermes", project="local-agent-system",
+            created_by="hermes", project="agentHub",
             idempotency_key=f"{task_id}:1",
         )
         state_store.transition_task(conn, task_id, TaskStatus.ASSIGNED)

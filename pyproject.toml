@@ -1,5 +1,5 @@
 [project]
-name = "local-agent-system"
+name = "agenthub"
 version = "0.1.0"
 description = "Hermes-orchestrated local multi-agent collaboration system"
 requires-python = ">=3.12"
