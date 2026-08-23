@@ -2037,9 +2037,9 @@ async function openDetail(id, {syncConversation = true} = {}) {
   S.currentSessionCaps = sessionCaps;
 
   const sourceNotes = {
+    a2a_task_request: "来自该任务的 Hermes/A2A 实际下发指令",
     task_plan_step: "来自 Hermes 结构化 Task Plan",
-    hermes_collaboration: "来自 Hermes 委派时保存的任务目标",
-    legacy_task_record: "历史独立任务，仅保留任务记录中的原始目标",
+    task_record: "旧任务无独立下发记录，回退到任务记录中的原始目标",
   };
   const meta = [
     ["执行 Agent", t.assigned_to || "未分配"],
@@ -2125,7 +2125,7 @@ async function openDetail(id, {syncConversation = true} = {}) {
     </div>
     <div class="task-detail-panel" role="tabpanel" data-task-detail-panel="goals">
       <section class="task-detail-block"><div class="task-section-label">任务目标</div>
-        <div class="task-objective-text">${esc(t.objective || "（空）")}</div>
+        <div class="task-objective-text">${esc(d.dispatched_objective || "（空）")}</div>
         <div class="task-source">${esc(sourceNotes[d.instruction_source] || "数据库中的任务目标原文")}</div>
       </section>
       <section class="task-detail-block"><div class="task-section-label">交付物</div>
@@ -2141,7 +2141,7 @@ async function openDetail(id, {syncConversation = true} = {}) {
       ${t.error_message ? `<section class="task-detail-block"><div class="task-section-label">错误</div><div class="task-result verdict-no">${esc(t.error_message)}</div></section>` : ""}
       ${acceptanceControls}
       ${plan ? `<section class="task-detail-block"><div class="task-section-label">Task Plan · revision ${esc(plan.plan_revision)}</div>` +
-        `<div class="task-result">${esc(plan.plan_objective)}</div><div class="delivery-list">${planChain}</div>` +
+        `<div class="delivery-list">${planChain}</div>` +
         (operations.length ? `<div class="task-source">预期操作：${esc(operations.join(" · "))}</div>` : "") + `</section>` : ""}
       ${controls}
       <section class="task-detail-block"><div class="task-section-label">任务信息</div>

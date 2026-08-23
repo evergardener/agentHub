@@ -565,17 +565,34 @@ def create_app() -> FastAPI:
             collaboration = ({key: collaboration_row[key]
                               for key in collaboration_row.keys()}
                              if collaboration_row else None)
-            instruction_source = (
-                "task_plan_step" if plan_step else
-                "hermes_collaboration" if row["collaboration_id"] else
-                "legacy_task_record"
-            )
+            dispatch_row = conn.execute(
+                "SELECT content_json, message_type"
+                " FROM conversation_messages WHERE task_id = ?"
+                " AND message_type IN (?, ?) ORDER BY sequence LIMIT 1;",
+                (task_id, "a2a.task.request",
+                 "a2a.task.request.historical"),
+            ).fetchone()
+            dispatch_objective = (
+                _message_text({key: dispatch_row[key]
+                               for key in dispatch_row.keys()})
+                if dispatch_row else ""
+            ).strip()
+            if dispatch_objective:
+                objective = dispatch_objective
+                instruction_source = "a2a_task_request"
+            elif plan_step and str(plan_step.get("objective") or "").strip():
+                objective = str(plan_step["objective"]).strip()
+                instruction_source = "task_plan_step"
+            else:
+                objective = row["objective"]
+                instruction_source = "task_record"
             return {"task": {k: row[k] for k in keys}, "runs": runs,
                     "artifacts": artifacts, "events": events,
                     "interactions": interactions, "sessions": sessions,
                     "messages": messages, "plan_step": plan_step,
                     "plan_steps": plan_steps,
                     "collaboration": collaboration,
+                    "dispatched_objective": objective,
                     "instruction_source": instruction_source}
         finally:
             conn.close()

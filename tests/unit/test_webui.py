@@ -308,6 +308,61 @@ def test_index_page(client):
     assert "/messages`" in r.text
     assert "产物已显示在右侧" in r.text
     assert '<div class="task-section-label">结果摘要</div>' not in r.text
+    assert 'esc(d.dispatched_objective || "（空）")' in r.text
+    assert 'esc(t.objective || "（空）")' not in r.text
+    assert "esc(plan.plan_objective)" not in r.text
+
+
+def test_task_detail_uses_task_scoped_dispatch_objective(client):
+    from orchestrator import collaboration_store
+    from state.db import connect
+
+    conn = connect()
+    task = conn.execute(
+        "SELECT id, collaboration_id FROM tasks WHERE id = 'T-2';"
+    ).fetchone()
+    collaboration = collaboration_store.get_collaboration(
+        conn, task["collaboration_id"])
+    collaboration_store.append_message(
+        conn,
+        conversation_id=collaboration["conversation_id"],
+        collaboration_id=task["collaboration_id"],
+        sender_type="user",
+        sender_id="user",
+        message_type="llm.user",
+        content={"text": "这是 Session 第一句对话，不是任务目标"},
+        based_on_revision=collaboration["context_revision"],
+    )
+    collaboration_store.append_message(
+        conn,
+        conversation_id=collaboration["conversation_id"],
+        collaboration_id=task["collaboration_id"],
+        task_id=task["id"],
+        agent_id="codex",
+        sender_type="hermes",
+        sender_id="qishuo",
+        recipient_type="agent",
+        recipient_id="codex",
+        message_type="a2a.task.request",
+        content={"text": "实际下发给 Codex 的完整实施目标"},
+        based_on_revision=collaboration["context_revision"],
+    )
+    conn.close()
+
+    detail = client.get(f"/api/tasks/{task['id']}").json()
+    assert detail["task"]["objective"] == "调研 X"
+    assert detail["dispatched_objective"] == "实际下发给 Codex 的完整实施目标"
+    assert detail["instruction_source"] == "a2a_task_request"
+
+
+def test_task_detail_falls_back_to_plan_step_then_task_record(client):
+    planned = client.get("/api/tasks/T-2").json()
+    assert planned["dispatched_objective"] == "调研 X"
+    assert planned["instruction_source"] == "task_plan_step"
+
+    legacy = client.get("/api/tasks/T-1").json()
+    assert legacy["dispatched_objective"] == "重启 nginx"
+    assert legacy["instruction_source"] == "task_record"
 
 
 def test_collaboration_detail_renders_safe_markdown(client):
