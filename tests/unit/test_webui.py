@@ -303,6 +303,9 @@ def test_index_page(client):
     assert ".workspace-card > .chat-transcript" in r.text
     assert "overscroll-behavior: contain" in r.text
     assert 'class="markdown-body"' in r.text
+    assert "align-items: start" in r.text
+    assert "grid-column: 1; grid-row: 1; align-self: start" in r.text
+    assert r.text.count("${avatarHtml}") == 1
     assert ".task-detail-pane .d-body" in r.text
     assert "canWriteHermes" in r.text
     assert "/messages`" in r.text

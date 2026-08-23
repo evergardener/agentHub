@@ -648,12 +648,15 @@
   .workspace-card > .chat-head { border-bottom: 1px solid rgba(255,255,255,.76); }
   .workspace-card > .chat-composer { border-top: 1px solid rgba(255,255,255,.76); }
   .chat-transcript { padding: 20px clamp(16px, 3vw, 40px); }
-  .chat-transcript .message { display: grid; grid-template-columns: 32px minmax(0,1fr);
-                              gap: 9px; padding: 0; background: none; border: 0; }
+  .chat-transcript .message {
+    display: grid; grid-template-columns: 32px minmax(0,1fr);
+    align-items: start; gap: 9px; padding: 0; background: none; border: 0;
+  }
   .message-avatar {
     width: 32px; height: 32px; border-radius: 50%; display: grid;
     place-items: center; background: #768e96; color: #fff; font-weight: 700;
     box-shadow: 0 4px 10px rgba(66,91,95,.15);
+    grid-column: 1; grid-row: 1; align-self: start;
   }
   .message.user .message-avatar { background: #7088a2; }
   .message.hermes .message-avatar { background: #7b789b; }
@@ -662,6 +665,7 @@
     min-width: 0; padding: 10px 12px; border-radius: 4px 14px 14px 14px;
     background: rgba(255,255,255,.48); border: 1px solid rgba(255,255,255,.66);
     box-shadow: 0 6px 16px rgba(69,98,102,.09);
+    grid-column: 2; grid-row: 1; align-self: start;
   }
   .message.user .message-shell { background: rgba(224,238,247,.60); }
   .message.hermes .message-shell { background: rgba(227,242,236,.62); }
@@ -778,7 +782,7 @@
   .chat-transcript .message.outbound {
     grid-template-columns: minmax(0,1fr) 32px; margin-left: auto; margin-right: 0;
   }
-  .chat-transcript .message.outbound .message-avatar { grid-column: 2; }
+  .chat-transcript .message.outbound .message-avatar { grid-column: 2; grid-row: 1; }
   .chat-transcript .message.outbound .message-shell { grid-column: 1; grid-row: 1;
                                                        border-radius: 14px 4px 14px 14px; }
   .message-agent-label { color: var(--mut); }
@@ -1970,14 +1974,13 @@ function renderMessageList(messages) {
     const avatarHtml = `<span class="message-avatar" aria-hidden="true">${esc(avatar)}</span>`;
     const value = messageValue(m);
     return `<article class="message ${css}">
-      ${outbound ? "" : avatarHtml}
+      ${avatarHtml}
       <div class="message-shell">
         <div class="mh"><strong>${esc(speaker)}${esc(route)}</strong>
           <span>#${esc(m.sequence)}</span><span>${esc(m.message_type)}</span><span>revision ${esc(m.based_on_revision ?? "-")}</span>
           <span>${esc(formatTime(m.created_at))}</span></div>
         <div class="mc">${renderMessageBody(m, value)}</div>
       </div>
-      ${outbound ? avatarHtml : ""}
     </article>`;
   }).join("") + `</div>`;
 }
