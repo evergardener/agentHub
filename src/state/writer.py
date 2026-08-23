@@ -137,6 +137,14 @@ class StateWriter:
                         error_message=payload.get("error"),
                         commit=False,
                     )
+                    self._persist_task_outcome(
+                        task_id=task_id,
+                        agent_id=source,
+                        event_id=event.get("event_id", ""),
+                        event_type=event_type,
+                        payload=payload,
+                        status=dst,
+                    )
                 if event_type == "task.failed":
                     failed = state_store.get_task(self.conn, task_id)
                     if (failed is not None
@@ -213,6 +221,60 @@ class StateWriter:
             raise
         self.conn.commit()
         return "applied"
+
+    def _persist_task_outcome(
+        self,
+        *,
+        task_id: str,
+        agent_id: str,
+        event_id: str,
+        event_type: str,
+        payload: dict,
+        status: TaskStatus,
+    ) -> None:
+        """Write the worker's final output into its durable conversation."""
+        task = state_store.get_task(self.conn, task_id)
+        if task is None or not task["collaboration_id"]:
+            return
+        text = (payload.get("summary") if event_type == "task.completed"
+                else payload.get("error"))
+        if not isinstance(text, str) or not text.strip():
+            return
+        from orchestrator import collaboration_store
+
+        collaboration = collaboration_store.get_collaboration(
+            self.conn, task["collaboration_id"])
+        if collaboration is None:
+            raise KeyError(
+                f"collaboration not found: {task['collaboration_id']}")
+        resolved_agent = task["assigned_to"] or agent_id
+        collaboration_store.append_message(
+            self.conn,
+            conversation_id=collaboration["conversation_id"],
+            collaboration_id=task["collaboration_id"],
+            task_id=task_id,
+            agent_id=resolved_agent,
+            sender_type="agent",
+            sender_id=resolved_agent,
+            recipient_type="hermes",
+            recipient_id="hermes",
+            message_type=(
+                "agent.task.result" if event_type == "task.completed"
+                else "agent.task.error"
+            ),
+            content={
+                "text": text.strip(),
+                "status": status.value,
+                "attempt": payload.get("attempt", 1),
+            },
+            based_on_revision=collaboration["context_revision"],
+            idempotency_key=(
+                f"task-outcome:{event_id}" if event_id
+                else f"task-outcome:{task_id}:{event_type}:"
+                     f"{payload.get('attempt', 1)}"
+            ),
+            commit=False,
+        )
 
     def _persist_interactions(
         self, task_id: str, agent_id: str, payload: dict

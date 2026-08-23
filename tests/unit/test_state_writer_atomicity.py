@@ -10,10 +10,18 @@ from state.writer import StateWriter
 
 
 def test_worker_completed_event_enters_awaiting_acceptance(tmp_path):
+    from orchestrator import collaboration_store
+
     writer = StateWriter(tmp_path / "acceptance.db")
+    conversation_id = collaboration_store.create_conversation(writer.conn)
+    collaboration_id = collaboration_store.create_collaboration(
+        writer.conn, conversation_id=conversation_id,
+        objective="implement",
+    )
     state_store.create_task(
         writer.conn, task_id="T-accept", objective="implement",
-        created_by="hermes", assigned_to="codex", status=TaskStatus.QUEUED)
+        created_by="hermes", assigned_to="codex",
+        collaboration_id=collaboration_id, status=TaskStatus.QUEUED)
     state_store.transition_task(writer.conn, "T-accept", TaskStatus.ASSIGNED)
     state_store.transition_task(writer.conn, "T-accept", TaskStatus.WORKING)
 
@@ -30,6 +38,68 @@ def test_worker_completed_event_enters_awaiting_acceptance(tmp_path):
         "SELECT attempt, status FROM task_runs WHERE task_id = 'T-accept'"
         " ORDER BY started_at DESC LIMIT 1;").fetchone()
     assert (run["attempt"], run["status"]) == (1, "completed")
+    message = writer.conn.execute(
+        "SELECT sender_type, sender_id, message_type, content_json"
+        " FROM conversation_messages WHERE task_id = 'T-accept';"
+    ).fetchone()
+    assert message["sender_type"] == "agent"
+    assert message["sender_id"] == "codex"
+    assert message["message_type"] == "agent.task.result"
+    assert '"text":"done"' in message["content_json"]
+
+    assert writer.apply({
+        "event_id": "E-completed-acceptance",
+        "event_type": "task.completed",
+        "task_id": "T-accept",
+        "source": "codex",
+        "payload": {"attempt": 1, "summary": "done"},
+    }) == "duplicate"
+    assert writer.conn.execute(
+        "SELECT COUNT(*) FROM conversation_messages"
+        " WHERE task_id = 'T-accept';"
+    ).fetchone()[0] == 1
+
+
+def test_result_message_failure_rolls_back_completed_event(
+        tmp_path, monkeypatch):
+    from orchestrator import collaboration_store
+
+    writer = StateWriter(tmp_path / "result-atomicity.db")
+    conversation_id = collaboration_store.create_conversation(writer.conn)
+    collaboration_id = collaboration_store.create_collaboration(
+        writer.conn, conversation_id=conversation_id,
+        objective="atomic result",
+    )
+    state_store.create_task(
+        writer.conn, task_id="T-result-atomic", objective="atomic result",
+        created_by="hermes", assigned_to="codex",
+        collaboration_id=collaboration_id, status=TaskStatus.QUEUED)
+    state_store.transition_task(
+        writer.conn, "T-result-atomic", TaskStatus.ASSIGNED)
+    state_store.transition_task(
+        writer.conn, "T-result-atomic", TaskStatus.WORKING)
+
+    def fail(*args, **kwargs):
+        raise OSError("injected result message failure")
+
+    monkeypatch.setattr(collaboration_store, "append_message", fail)
+    event = {
+        "event_id": "E-result-atomic",
+        "event_type": "task.completed",
+        "task_id": "T-result-atomic",
+        "source": "codex",
+        "payload": {"attempt": 1, "summary": "done atomically"},
+    }
+    with pytest.raises(OSError, match="result message failure"):
+        writer.apply(event)
+    assert state_store.get_task(
+        writer.conn, "T-result-atomic")["status"] == "working"
+    assert writer.conn.execute(
+        "SELECT COUNT(*) FROM events WHERE id = 'E-result-atomic';"
+    ).fetchone()[0] == 0
+    assert writer.conn.execute(
+        "SELECT COUNT(*) FROM task_runs WHERE task_id = 'T-result-atomic';"
+    ).fetchone()[0] == 0
 
 
 def _event(event_id: str, event_type: str, task_id: str) -> dict:

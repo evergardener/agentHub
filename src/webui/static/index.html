@@ -1009,7 +1009,7 @@
           <select id="chat-recipient" aria-label="消息接收方" disabled>
             <option value="hermes">发送给 Hermes</option>
           </select>
-          <span class="composer-hint" id="composer-hint">选择包含活跃任务的 Session 后可发送消息</span>
+          <span class="composer-hint" id="composer-hint">选择 Session 后可发送给 Hermes</span>
           <span class="spacer"></span>
           <span id="chat-refresh-state">等待数据</span>
         </div>
@@ -1957,6 +1957,16 @@ function renderTaskSwitcher() {
     button.onclick = () => openDetail(button.dataset.taskSwitch, {syncConversation: false}));
 }
 
+function selectTaskDetailTab(name) {
+  document.querySelectorAll("[data-task-detail-tab]").forEach(item => {
+    const active = item.dataset.taskDetailTab === name;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  document.querySelectorAll("[data-task-detail-panel]").forEach(panel =>
+    panel.hidden = panel.dataset.taskDetailPanel !== name);
+}
+
 async function openDetail(id, {syncConversation = true} = {}) {
   S.detailId = id;
   const d = await fetchJson("/api/tasks/" + encodeURIComponent(id));
@@ -2081,7 +2091,10 @@ async function openDetail(id, {syncConversation = true} = {}) {
         ${criteria.length ? `<div class="task-section-label" style="margin-top:12px">验收条件</div><ul class="acceptance-list">` +
           criteria.map(item => `<li>${esc(item)}</li>`).join("") + `</ul>` : ""}
       </section>
-      ${t.result_summary ? `<section class="task-detail-block"><div class="task-section-label">结果摘要</div><div class="task-result">${esc(t.result_summary)}</div></section>` : ""}
+      <section class="task-detail-block" id="d-viewer-sec" style="display:none">
+        <div class="task-section-label">产物内容</div><div class="viewer-bar"><span class="fname" id="d-viewer-title"></span></div>
+        <div id="d-viewer"></div>
+      </section>
       ${reviewHtml}
       ${t.error_message ? `<section class="task-detail-block"><div class="task-section-label">错误</div><div class="task-result verdict-no">${esc(t.error_message)}</div></section>` : ""}
       ${acceptanceControls}
@@ -2091,10 +2104,6 @@ async function openDetail(id, {syncConversation = true} = {}) {
       ${controls}
       <section class="task-detail-block"><div class="task-section-label">任务信息</div>
         <div class="task-meta-grid">${meta}</div>
-      </section>
-      <section class="task-detail-block" id="d-viewer-sec" style="display:none">
-        <div class="task-section-label">产物内容</div><div class="viewer-bar"><span class="fname" id="d-viewer-title"></span></div>
-        <div id="d-viewer"></div>
       </section>
     </div>
     <div class="task-detail-panel" role="tabpanel" data-task-detail-panel="execution" hidden>
@@ -2113,14 +2122,7 @@ async function openDetail(id, {syncConversation = true} = {}) {
   document.querySelectorAll("[data-rework-task]").forEach(button =>
     button.onclick = () => decideAcceptance(button.dataset.reworkTask, "request-rework", button));
   document.querySelectorAll("[data-task-detail-tab]").forEach(button =>
-    button.onclick = () => {
-      document.querySelectorAll("[data-task-detail-tab]").forEach(item => {
-        item.classList.toggle("active", item === button);
-        item.setAttribute("aria-selected", item === button ? "true" : "false");
-      });
-      document.querySelectorAll("[data-task-detail-panel]").forEach(panel =>
-        panel.hidden = panel.dataset.taskDetailPanel !== button.dataset.taskDetailTab);
-    });
+    button.onclick = () => selectTaskDetailTab(button.dataset.taskDetailTab));
   updateComposer();
   $("#d-body").scrollTop = 0;
 }
@@ -2205,19 +2207,22 @@ function updateComposer() {
   const detail = S.currentTaskDetail;
   const task = detail?.task;
   const terminal = !task || ["completed", "reviewed", "accepted", "failed", "cancelled"].includes(task.status);
-  const allowed = S.role !== "viewer" && S.currentSession && !terminal;
+  const canWriteHermes = S.role !== "viewer" && !!S.collaborationId;
+  const canWriteAgent = canWriteHermes && S.currentSession && !terminal &&
+    S.currentSessionCaps?.steer;
   const previous = recipient.value;
   recipient.innerHTML = `<option value="hermes">发送给 Hermes</option>` +
-    (allowed && S.currentSessionCaps?.steer
+    (canWriteAgent
       ? `<option value="agent">直接发送给 ${esc(task.assigned_to || S.currentSession.agent_id)}</option>` : "");
   if ([...recipient.options].some(option => option.value === previous)) recipient.value = previous;
-  recipient.disabled = !allowed;
-  input.disabled = !allowed;
-  send.disabled = !allowed;
+  recipient.disabled = !canWriteHermes;
+  input.disabled = !canWriteHermes;
+  send.disabled = !canWriteHermes;
   if (S.role === "viewer") hint.textContent = "当前账号为只读角色";
-  else if (!task) hint.textContent = "当前 Session 尚未创建任务，暂不可投递";
-  else if (!S.currentSession) hint.textContent = "当前任务没有可恢复的 Agent Session";
-  else if (terminal) hint.textContent = "任务已结束；如需继续，请由 Hermes 创建后续任务";
+  else if (!S.collaborationId) hint.textContent = "选择 Session 后可发送消息";
+  else if (!task) hint.textContent = "可继续发送给 Hermes；当前 Session 尚未创建任务";
+  else if (!S.currentSession) hint.textContent = "可发送给 Hermes；当前任务没有可恢复的 Agent Session";
+  else if (terminal) hint.textContent = "任务已结束，仍可继续发送给 Hermes";
   else if (!S.currentSessionCaps?.steer) hint.textContent = "当前 Agent 不支持实时纠正，可将补充要求写入 Hermes 上下文";
   else hint.textContent = "可发送给 Hermes，或直接纠正当前 Agent Session";
 }
@@ -2225,19 +2230,27 @@ function updateComposer() {
 async function sendChatMessage() {
   const text = $("#chat-message").value.trim();
   const task = S.currentTaskDetail?.task;
-  if (!text || !task || !S.currentSession) return;
+  if (!text || !S.collaborationId) return;
   const direct = $("#chat-recipient").value === "agent";
+  if (direct && (!task || !S.currentSession)) return;
   const button = $("#chat-send");
   button.disabled = true;
   button.textContent = "发送中";
-  const result = await fetchJson(`/api/tasks/${encodeURIComponent(task.id)}/interventions`, {
+  const endpoint = direct
+    ? `/api/tasks/${encodeURIComponent(task.id)}/interventions`
+    : `/api/collaborations/${encodeURIComponent(S.collaborationId)}/messages`;
+  const body = direct ? {
+    mode: "steer",
+    agent_id: S.currentSession.agent_id,
+    content: {text},
+    idempotency_key: `webui-chat-${task.id}-${Date.now()}`,
+  } : {
+    text,
+    idempotency_key: `message-${Date.now()}`,
+  };
+  const result = await fetchJson(endpoint, {
     method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({
-      mode: direct ? "steer" : "comment",
-      agent_id: S.currentSession.agent_id,
-      content: {text},
-      idempotency_key: `webui-chat-${task.id}-${Date.now()}`,
-    }),
+    body: JSON.stringify(body),
   });
   button.textContent = "发送";
   if (result.error) {
@@ -2277,10 +2290,14 @@ document.addEventListener("keydown", (e) => {
 async function viewArtifact(taskId, name) {
   document.querySelectorAll("[data-art]").forEach(button =>
     button.classList.toggle("active", button.dataset.art === name));
-  $("#d-viewer-sec").style.display = "";
+  selectTaskDetailTab("goals");
+  const viewerSection = $("#d-viewer-sec");
+  viewerSection.style.display = "";
   $("#d-viewer-title").textContent = name;
   $("#d-viewer").innerHTML = `<div class="empty">加载中…</div>`;
-  $("#d-viewer-sec").scrollIntoView({behavior: "auto", block: "nearest"});
+  requestAnimationFrame(() => viewerSection.scrollIntoView({
+    behavior: "smooth", block: "nearest",
+  }));
   const r = await fetchJson(
     `/api/tasks/${encodeURIComponent(taskId)}/artifact-content?name=` +
     encodeURIComponent(name));
@@ -2295,7 +2312,10 @@ async function viewArtifact(taskId, name) {
   if (r.truncated)
     html += `<div class="empty">（内容过大，仅显示前 256KB）</div>`;
   $("#d-viewer").innerHTML = html;
-  showToast(`已打开产物：${name}`, "ok");
+  requestAnimationFrame(() => viewerSection.scrollIntoView({
+    behavior: "smooth", block: "nearest",
+  }));
+  showToast(`产物已显示在右侧：${name}`, "ok");
 }
 
 /* stream-json → 可读过程：assistant 文本 / 工具调用 / 可折叠工具结果 */

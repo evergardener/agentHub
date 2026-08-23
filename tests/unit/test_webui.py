@@ -302,6 +302,10 @@ def test_index_page(client):
     assert "执行记录" in r.text
     assert ".workspace-card > .chat-transcript" in r.text
     assert ".task-detail-pane .d-body" in r.text
+    assert "canWriteHermes" in r.text
+    assert "/messages`" in r.text
+    assert "产物已显示在右侧" in r.text
+    assert '<div class="task-section-label">结果摘要</div>' not in r.text
 
 
 def test_index_has_bounded_alert_center_and_in_page_dialogs(client):
@@ -437,6 +441,98 @@ def test_collaboration_multi_turn_api(client):
     ).status_code == 404
 
 
+def test_collaboration_message_does_not_require_active_task(client):
+    from state.db import connect
+
+    conn = connect()
+    collaboration_id = conn.execute(
+        "SELECT id FROM collaborations ORDER BY created_at LIMIT 1;"
+    ).fetchone()["id"]
+    conn.execute(
+        "UPDATE tasks SET status = 'completed' WHERE collaboration_id = ?;",
+        (collaboration_id,),
+    )
+    conn.commit()
+    conn.close()
+
+    response = client.post(
+        f"/api/collaborations/{collaboration_id}/messages",
+        json={"text": "任务结束后继续询问", "idempotency_key": "continue-1"},
+    )
+    assert response.status_code == 200
+    assert response.json()["context_revision"] == 2
+    replay = client.post(
+        f"/api/collaborations/{collaboration_id}/messages",
+        json={"text": "任务结束后继续询问", "idempotency_key": "continue-1"},
+    )
+    assert replay.status_code == 200
+    assert replay.json()["message_id"] == response.json()["message_id"]
+    detail = client.get(
+        f"/api/collaborations/{collaboration_id}"
+    ).json()
+    assert detail["messages"][-1]["message_type"] == "user.comment"
+    assert "任务结束后继续询问" in detail["messages"][-1]["content_json"]
+    assert client.post(
+        f"/api/collaborations/{collaboration_id}/messages",
+        json={"text": " "},
+    ).status_code == 400
+    assert client.post(
+        "/api/collaborations/COL-NOPE/messages",
+        json={"text": "hello"},
+    ).status_code == 404
+
+
+def test_collaboration_detail_synthesizes_legacy_agent_result(client):
+    from orchestrator import collaboration_store
+    from state.db import connect
+
+    conn = connect()
+    row = conn.execute(
+        "SELECT id, collaboration_id FROM tasks WHERE id = 'T-2';"
+    ).fetchone()
+    conn.execute(
+        "UPDATE tasks SET status = 'completed', result_summary = ?,"
+        " assigned_to = 'codex' WHERE id = 'T-2';",
+        ("Agent 的历史最终输出",),
+    )
+    conn.commit()
+    conn.close()
+
+    detail = client.get(
+        f"/api/collaborations/{row['collaboration_id']}"
+    ).json()
+    result = next(message for message in detail["messages"]
+                  if message["task_id"] == row["id"])
+    assert result["sender_type"] == "agent"
+    assert result["sender_id"] == "codex"
+    assert result["message_type"] == "agent.task.result.legacy"
+    assert "Agent 的历史最终输出" in result["content_json"]
+
+    conn = connect()
+    collaboration = collaboration_store.get_collaboration(
+        conn, row["collaboration_id"])
+    collaboration_store.append_message(
+        conn,
+        conversation_id=collaboration["conversation_id"],
+        collaboration_id=row["collaboration_id"],
+        task_id=row["id"],
+        agent_id="codex",
+        sender_type="agent",
+        sender_id="codex",
+        message_type="agent.task.result",
+        content={"text": "Agent 的历史最终输出"},
+        based_on_revision=collaboration["context_revision"],
+    )
+    conn.close()
+    messages = client.get(
+        f"/api/collaborations/{row['collaboration_id']}"
+    ).json()["messages"]
+    results = [message for message in messages
+               if message["task_id"] == row["id"]]
+    assert len(results) == 1
+    assert results[0]["message_type"] == "agent.task.result"
+
+
 def test_secure_webui_login_cookie_and_csrf(secure_client):
     assert secure_client.get("/").status_code == 200
     assert secure_client.get("/health").status_code == 200
@@ -479,6 +575,13 @@ def test_secure_webui_role_boundaries(secure_client, monkeypatch):
     assert secure_client.post(
         f"/api/alerts/{alert_id}/acknowledge", json={},
         headers={"X-CSRF-Token": viewer_csrf}).status_code == 403
+    collaboration_id = secure_client.get(
+        "/api/collaborations"
+    ).json()["collaborations"][0]["id"]
+    assert secure_client.post(
+        f"/api/collaborations/{collaboration_id}/messages",
+        json={"text": "viewer cannot write"},
+        headers={"X-CSRF-Token": viewer_csrf}).status_code == 403
 
     operator, operator_csrf = _login(
         secure_client, "operator-token-012345")
@@ -488,6 +591,11 @@ def test_secure_webui_role_boundaries(secure_client, monkeypatch):
         json={"mode": "comment", "content": {"text": "note"}},
         headers={"X-CSRF-Token": operator_csrf})
     assert intervention.status_code == 200
+    message = secure_client.post(
+        f"/api/collaborations/{collaboration_id}/messages",
+        json={"text": "operator follow-up"},
+        headers={"X-CSRF-Token": operator_csrf})
+    assert message.status_code == 200
     assert secure_client.post(
         "/api/grants", json={"pattern": "restart"},
         headers={"X-CSRF-Token": operator_csrf}).status_code == 403

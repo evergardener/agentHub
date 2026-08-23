@@ -145,6 +145,58 @@ def _artifact_availability(artifact: dict, roots: list[Path]) -> dict:
     }
 
 
+def _with_legacy_task_results(messages: list[dict],
+                              tasks: list[dict]) -> list[dict]:
+    """Expose pre-fix task results in chat without mutating production data."""
+    represented = {
+        message.get("task_id") for message in messages
+        if ("task.result" in str(message.get("message_type", ""))
+            or "task.error" in str(message.get("message_type", "")))
+    }
+    sequence = max(
+        (int(message.get("sequence") or 0) for message in messages),
+        default=0,
+    )
+    merged = list(messages)
+    for task in tasks:
+        task_id = task.get("id")
+        if not task_id or task_id in represented:
+            continue
+        summary = task.get("result_summary")
+        error = task.get("error_message")
+        text = summary or error
+        if not isinstance(text, str) or not text.strip():
+            continue
+        sequence += 1
+        is_error = not bool(summary)
+        agent_id = task.get("assigned_to") or "agent"
+        merged.append({
+            "id": f"legacy-task-result:{task_id}",
+            "conversation_id": None,
+            "collaboration_id": task.get("collaboration_id"),
+            "task_id": task_id,
+            "agent_id": agent_id,
+            "sender_type": "agent",
+            "sender_id": agent_id,
+            "recipient_type": "hermes",
+            "recipient_id": "hermes",
+            "message_type": (
+                "agent.task.error.legacy" if is_error
+                else "agent.task.result.legacy"
+            ),
+            "content_json": json.dumps(
+                {"text": text, "status": task.get("status"),
+                 "legacy": True},
+                ensure_ascii=False, separators=(",", ":"),
+            ),
+            "sequence": sequence,
+            "based_on_revision": None,
+            "delivery_status": "persisted",
+            "created_at": task.get("updated_at") or task.get("created_at"),
+        })
+    return merged
+
+
 def create_app() -> FastAPI:
     from common import config as cfg
 
@@ -606,8 +658,9 @@ def create_app() -> FastAPI:
                 " FROM conversation_messages WHERE collaboration_id = ?"
                 " ORDER BY sequence;", (collaboration_id,)))
             tasks = _rows(conn.execute(
-                "SELECT id, objective, status, assigned_to, created_at,"
-                " updated_at FROM tasks WHERE collaboration_id = ?"
+                "SELECT id, objective, status, assigned_to, collaboration_id,"
+                " result_summary, error_message, created_at, updated_at"
+                " FROM tasks WHERE collaboration_id = ?"
                 " ORDER BY created_at;", (collaboration_id,)))
             sessions = _rows(conn.execute(
                 "SELECT id, task_id, agent_id, native_session_id, status,"
@@ -615,8 +668,52 @@ def create_app() -> FastAPI:
                 " created_at, last_active_at FROM agent_session_bindings"
                 " WHERE collaboration_id = ? ORDER BY created_at;",
                 (collaboration_id,)))
-            return {"collaboration": collaboration, "messages": messages,
+            return {"collaboration": collaboration,
+                    "messages": _with_legacy_task_results(messages, tasks),
                     "tasks": tasks, "sessions": sessions}
+        finally:
+            conn.close()
+
+    @app.post("/api/collaborations/{collaboration_id}/messages")
+    async def add_collaboration_message(collaboration_id: str, body: dict):
+        """Persist a WebUI user message to Hermes without requiring a task."""
+        from orchestrator import collaboration_store
+
+        text = (body or {}).get("text")
+        if not isinstance(text, str) or not text.strip():
+            return JSONResponse({"error": "text required"}, status_code=400)
+        text = text.strip()
+        if len(text) > 20000:
+            return JSONResponse(
+                {"error": "text must contain at most 20000 characters"},
+                status_code=400,
+            )
+        raw_key = (body or {}).get("idempotency_key")
+        idempotency_key = (
+            f"webui-collaboration:{collaboration_id}:{raw_key}"
+            if isinstance(raw_key, str) and raw_key else None
+        )
+        conn = _conn()
+        try:
+            if collaboration_store.get_collaboration(
+                    conn, collaboration_id) is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            message = collaboration_store.record_user_intervention(
+                conn,
+                collaboration_id=collaboration_id,
+                user_id="user",
+                mode="comment",
+                content={"text": text},
+                idempotency_key=idempotency_key,
+            )
+            return {
+                "collaboration_id": collaboration_id,
+                "message_id": message["id"],
+                "sequence": message["sequence"],
+                "context_revision": message["based_on_revision"],
+            }
+        except (KeyError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
         finally:
             conn.close()
 
