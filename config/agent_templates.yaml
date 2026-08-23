@@ -34,8 +34,8 @@ templates:
       streaming: true
       interrupt: true
       cancel: true
-      native_permission_enforcement: false
-      modifying_operations: false
+      native_permission_enforcement: true
+      modifying_operations: true
     default_config:
       web_url_env: LAS_DSH_WEB_URL
       agent_preset_env: LAS_DSH_AGENT_PRESET
@@ -83,20 +83,24 @@ profiles:
     name: DSH Independent Reviewer
     role_prompt: >-
       Independently review requirements, architecture, implementation and test
-      evidence. Report defects and risks before proposing modifications.
+      evidence. Report defects and risks before proposing modifications. Apply
+      workspace-scoped fixes only after an AgentHub ActionIntent is approved.
     responsibilities:
       - architecture review
       - backend and frontend code review
       - test and production-readiness review
       - risk identification
-    execution_mode: read_only
+      - approved workspace remediation
+    execution_mode: execute
     allowed_operations:
-      [filesystem.read, artifact.read, git.diff, git.status, test.run]
+      [filesystem.read, artifact.read, git.diff, git.status, test.run,
+       filesystem.create, filesystem.write]
     denied_operations:
-      [filesystem.create, filesystem.write, filesystem.delete, git.commit,
-       git.push, git.force_push, deployment.apply, database.write]
-    allowed_tools: [filesystem.read, filesystem.search, test.run]
-    task_types: [analysis, review, testing]
+      [filesystem.delete, git.commit, git.push, git.force_push,
+       deployment.apply, database.write]
+    allowed_tools: [filesystem.read, filesystem.search, filesystem.write,
+                    test.run]
+    task_types: [analysis, review, testing, remediation]
     approval_level: hermes
     timeout_seconds: 3600
     max_concurrent_tasks: 1

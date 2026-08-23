@@ -1,7 +1,7 @@
 ---
 name: agenthub-orchestration
 description: Route delegated Agent work through agentHub.
-version: 1.0.0
+version: 1.1.0
 author: evergarden, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -43,8 +43,14 @@ Create a task only after discovery confirms the requested Agent is enabled and
 online:
 
 ```json
-{"agenthub":"v1","action":"tasks/create","agent":"codex","objective":"full unsummarized instruction","project":"optional project"}
+{"agenthub":"v1","action":"tasks/create","agent":"codex","objective":"full unsummarized instruction","project":"optional project","workspace":"/absolute/project/path"}
 ```
+
+When the task must inspect or modify a real project, include its absolute
+`workspace`. agentHub persists and audits the path, validates it against the
+selected Agent Profile, and makes DSH create the native Session under that
+registered Workspace. Omit `workspace` only for an isolated AgentHub task
+workspace. Never infer a different directory from a prior conversation.
 
 Query a task:
 
@@ -88,6 +94,10 @@ Do not replace it with a one-line summary.
 - Preserve the task ID and context ID in the conversation.
 - Review reported artifacts and the agentHub task record before telling the
   user that work completed.
+- A workspace does not grant write authority. DSH starts read-only. Each write
+  must produce an inspectable ActionIntent; approve it only when its exact path
+  stays inside the task workspace, the Agent Profile permits the operation,
+  and a rollback plan exists. Otherwise escalate to the user.
 
 ## Failure handling
 

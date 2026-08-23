@@ -269,6 +269,33 @@ def test_action_intent_authority_and_revision(conn, tmp_path):
     assert rejected["status"] == "rejected"
 
 
+def test_action_intent_uses_task_execution_workspace(conn, tmp_path,
+                                                     monkeypatch):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path / "agenthub"))
+    _, collaboration_id = _collaboration(conn)
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    task_id = next_task_id(conn)
+    state_store.create_task(
+        conn, task_id=task_id, objective="修改项目", created_by="hermes",
+        collaboration_id=collaboration_id, status=TaskStatus.QUEUED,
+        plan_context={"execution_workspace": str(execution_workspace)},
+    )
+    intent = collaboration_store.create_action_intent(
+        conn, collaboration_id=collaboration_id, task_id=task_id,
+        requested_by_agent_id="dsh", operation="filesystem.write",
+        targets=[str(execution_workspace / "src" / "app.py")],
+        purpose="修复缺陷", expected_effects=["修改源文件"],
+        rollback_plan="git restore src/app.py", risk="write",
+        based_on_revision=1,
+    )
+
+    routed = collaboration_store.route_action_intent(conn, intent["id"])
+
+    assert routed["status"] == "awaiting_hermes"
+    assert routed["policy_route"] == "hermes"
+
+
 def test_action_intent_routes_and_audits(conn, tmp_path):
     _, collaboration_id = _collaboration(conn)
     task_id = _task(conn, collaboration_id)

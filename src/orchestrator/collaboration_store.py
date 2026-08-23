@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from pathlib import Path
 from typing import Any
 
 from common.models import CollaborationPhase, InterventionMode
@@ -774,7 +775,22 @@ def route_action_intent(conn, intent_id: str, *, policy=None):
         raise KeyError(f"action intent not found: {intent_id}")
     if row["status"] != "pending":
         raise ValueError(f"action intent already routed: {row['status']}")
-    policy = policy or ActionPolicy(workspace=cfg.workspace())
+    if policy is None:
+        task = conn.execute(
+            "SELECT plan_context_json FROM tasks WHERE id = ?;",
+            (row["task_id"],),
+        ).fetchone()
+        execution_workspace = None
+        if task is not None:
+            try:
+                context = json.loads(task["plan_context_json"] or "null")
+            except (TypeError, ValueError):
+                context = None
+            if isinstance(context, dict):
+                execution_workspace = context.get("execution_workspace")
+        policy = ActionPolicy(
+            workspace=Path(execution_workspace).expanduser().resolve()
+            if execution_workspace else cfg.workspace())
     agent = conn.execute(
         "SELECT profile_id FROM agents WHERE id = ?;",
         (row["requested_by_agent_id"],),

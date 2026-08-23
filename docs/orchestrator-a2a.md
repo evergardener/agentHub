@@ -62,12 +62,20 @@ Hermes v0.20.4 的 `a2a_call` 不允许添加自定义 `metadata.agent`，因此
 ### 创建任务
 
 ```json
-{"agenthub":"v1","action":"tasks/create","agent":"dsh","objective":"完整未总结指令","project":"optional"}
+{"agenthub":"v1","action":"tasks/create","agent":"dsh","objective":"完整未总结指令","project":"optional","workspace":"/absolute/project/path"}
 ```
 
 Orchestrator 每次从 Registry 解析 `agent`。未知、offline 或 disabled 都稳定失败，
 不回退到其他 Agent。读操作通常返回 `submitted`；需审批的操作返回
 `input-required`，审批前不调用 Adapter。
+
+`workspace` 可选但必须为绝对、非根目录路径。指定后写入 Task 持久上下文并随
+Adapter 消息传递；DSH Adapter 调用原生 `workspace.create({path})` 注册或复用
+Workspace，再通过 `session.create({workspaceId})` 建立可被 DSH 侧边栏正确分组
+的 Session。未指定时继续使用隔离的 `AgentWorkspace/tasks/<task_id>`，不会把多个
+任务混入一个共享目录。Workspace 只定义执行与路径校验边界，不等于写权限：DSH
+仍以 read-only 启动，每次修改必须产生可检查的 ActionIntent；仅当操作在 Agent
+Profile allowlist、目标位于 workspace 且有回滚计划时，Hermes 才可批准一次。
 
 ### 查询、批准和拒绝
 

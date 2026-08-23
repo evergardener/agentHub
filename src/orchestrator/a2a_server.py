@@ -51,7 +51,7 @@ from common import config as cfg
 from common.models import A2A_STATE_MAP, TaskStatus
 from hermes.policy import ApprovalPolicy
 from orchestrator import state_store
-from orchestrator.task_manager import TaskManager
+from orchestrator.task_manager import TaskManager, normalize_execution_workspace
 
 # legacy 自然语言审批（deprecated）：整句精确匹配，不做子串匹配——
 # 避免「不批准」因子串含「批准」被误放行。compatibility（SendMessage）
@@ -198,6 +198,14 @@ def _to_a2a(conn, row, *, context_id: str | None = None) -> dict:
     ]
     metadata = {"assigned_to": row["assigned_to"],
                 "internal_status": row["status"]}
+    try:
+        plan_context = json.loads(row["plan_context_json"] or "null")
+    except (TypeError, ValueError):
+        plan_context = None
+    if isinstance(plan_context, dict) and plan_context.get(
+            "execution_workspace"):
+        metadata["execution_workspace"] = plan_context[
+            "execution_workspace"]
     if state == "input-required" and input_required_kind is not None:
         metadata["input_required_kind"] = input_required_kind
     return {
@@ -469,7 +477,10 @@ def create_app(tm: TaskManager | None = None,
                     rpc_id, -32602,
                     "tasks/create 需要非空 agent 和 objective；"
                     "先用 agents/list 发现")
-            metadata = {"project": command.get("project")}
+            metadata = {
+                "project": command.get("project"),
+                "workspace": command.get("workspace"),
+            }
         else:
             claimed = (metadata.get("agent") or "").strip()
             if not claimed:
@@ -480,6 +491,13 @@ def create_app(tm: TaskManager | None = None,
         agent, err = _resolve_agent(tm.conn, agent_id)
         if err:
             return _error(rpc_id, -32602, err)
+        try:
+            execution_workspace = (
+                normalize_execution_workspace(metadata["workspace"])
+                if metadata.get("workspace") is not None else None
+            )
+        except (TypeError, ValueError) as exc:
+            return _error(rpc_id, -32602, str(exc))
 
         collaboration_id = None
         a2a_context = None
@@ -503,6 +521,7 @@ def create_app(tm: TaskManager | None = None,
             text,
             project=metadata.get("project"),
             collaboration_id=collaboration_id,
+            execution_workspace=execution_workspace,
         )
         if a2a_context is not None:
             from orchestrator import collaboration_store
@@ -522,6 +541,8 @@ def create_app(tm: TaskManager | None = None,
                     "text": text,
                     "agent": agent_id,
                     "contextId": context_id,
+                    **({"workspace": execution_workspace}
+                       if execution_workspace else {}),
                 },
                 based_on_revision=1,
                 idempotency_key=f"a2a-task-request:{tid}",

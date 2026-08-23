@@ -22,6 +22,24 @@ from orchestrator.a2a_client import A2aClient
 from state.db import init_db, next_task_id
 
 
+def normalize_execution_workspace(value: str | Path) -> str:
+    """Return one canonical absolute execution workspace path.
+
+    The Orchestrator may run in a container while the native Adapter runs on
+    the host, so existence is verified by the Adapter.  The control plane still
+    rejects relative paths and filesystem root before persisting the request.
+    """
+    if not isinstance(value, (str, Path)) or not str(value).strip():
+        raise ValueError("workspace must be a non-empty absolute path")
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise ValueError("workspace must be an absolute path")
+    resolved = path.resolve(strict=False)
+    if resolved == Path(resolved.anchor):
+        raise ValueError("workspace must not be a filesystem root")
+    return str(resolved)
+
+
 class TaskManager:
     def __init__(self, db_path: str | Path | None = None,
                  workspace: Path | None = None,
@@ -41,7 +59,20 @@ class TaskManager:
                     priority: str = "normal",
                     timeout_seconds: int = 1800,
                     max_retries: int = 2,
-                    context: dict | str | None = None) -> str:
+                    context: dict | str | None = None,
+                    execution_workspace: str | Path | None = None) -> str:
+        plan_context = dict(context) if isinstance(context, dict) else None
+        if execution_workspace is not None:
+            normalized_workspace = normalize_execution_workspace(
+                execution_workspace)
+            plan_context = plan_context or {}
+            existing = plan_context.get("execution_workspace")
+            if (existing is not None
+                    and normalize_execution_workspace(existing)
+                    != normalized_workspace):
+                raise ValueError(
+                    "context.execution_workspace conflicts with workspace")
+            plan_context["execution_workspace"] = normalized_workspace
         task_id = next_task_id(self.conn)
         root_id = parent_id or task_id
         if parent_id:
@@ -61,7 +92,7 @@ class TaskManager:
                 created_by="hermes", project=project, parent_id=parent_id,
                 root_id=root_id, collaboration_id=collaboration_id,
                 priority=priority, depends_on=depends_on,
-                plan_context=context if isinstance(context, dict) else None,
+                plan_context=plan_context,
                 timeout_seconds=timeout_seconds, max_retries=max_retries,
                 idempotency_key=make_idem_key(task_id, 1),
                 status=TaskStatus.CREATED,
@@ -77,8 +108,8 @@ class TaskManager:
             encoding="utf-8",
         )
         context_text = (
-            json.dumps(context, ensure_ascii=False, indent=2)
-            if isinstance(context, dict) else context
+            json.dumps(plan_context, ensure_ascii=False, indent=2)
+            if plan_context is not None else context
         )
         (tdir / "context.md").write_text(
             context_text or f"# Task {task_id}\n\n{objective}\n",
@@ -89,6 +120,39 @@ class TaskManager:
         else:
             state_store.transition_task(self.conn, task_id, TaskStatus.QUEUED)
         return task_id
+
+    def _execution_workspace_for_agent(
+        self, row, agent_id: str,
+    ) -> str | None:
+        try:
+            plan_context = json.loads(row["plan_context_json"] or "null")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("task plan_context_json is invalid") from exc
+        if not isinstance(plan_context, dict):
+            return None
+        value = plan_context.get("execution_workspace")
+        if value is None:
+            return None
+        workspace = normalize_execution_workspace(value)
+        agent = self.conn.execute(
+            "SELECT profile_id FROM agents WHERE id = ?;", (agent_id,)
+        ).fetchone()
+        profile_id = agent["profile_id"] if agent is not None else None
+        if not profile_id:
+            return workspace
+        from orchestrator import agent_profile_store
+
+        profile = agent_profile_store.profile_policy(self.conn, profile_id)
+        roots = profile.get("workspace_roots") or []
+        if roots:
+            candidate = Path(workspace)
+            allowed = [Path(normalize_execution_workspace(root))
+                       for root in roots]
+            if not any(candidate == root or root in candidate.parents
+                       for root in allowed):
+                raise PermissionError(
+                    f"workspace exceeds Agent Profile roots: {workspace}")
+        return workspace
 
     def _deps_satisfied(self, depends_on: list[str]) -> bool:
         for dep in depends_on:
@@ -118,6 +182,8 @@ class TaskManager:
         row = state_store.get_task(self.conn, task_id)
         if row is None:
             raise KeyError(f"task not found: {task_id}")
+        execution_workspace = self._execution_workspace_for_agent(
+            row, agent_id)
         if row["status"] == TaskStatus.QUEUED.value:
             needs_assignment = True
             is_rework = False
@@ -273,9 +339,13 @@ class TaskManager:
                     native_session_id=native_session_id,
                     context_revision=context_revision,
                     replace_session=binding is not None,
-                    metadata={"recoveryMode": recovery_plan,
-                              "taskPlan": plan_context,
-                              "attempt": attempt},
+                    metadata={
+                        "recoveryMode": recovery_plan,
+                        "taskPlan": plan_context,
+                        "attempt": attempt,
+                        **({"executionWorkspace": execution_workspace}
+                           if execution_workspace else {}),
+                    },
                 )
                 dispatched = True
                 if is_rework:

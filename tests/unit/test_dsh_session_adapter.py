@@ -34,6 +34,11 @@ class DshFixture:
         self.prompts: list[str] = []
         self.next_seq = 0
         self.responses: list[dict] = []
+        self.workspace_id = "workspace-native-dsh-1"
+        self.workspace_path: str | None = None
+        self.workspace_sessions: list[str] = []
+        self.session_create_payloads: list[dict] = []
+        self.workspace_create_payloads: list[dict] = []
 
     def _event(self, event_type: str, data: dict) -> dict:
         seq = self.next_seq
@@ -98,14 +103,39 @@ class DshFixture:
         value: dict = {}
         if method == "session.create":
             assert body["payload"]["agentPreset"] == "standard"
+            self.session_create_payloads.append(dict(body["payload"]))
+            if body["payload"].get("workspaceId") == self.workspace_id:
+                self.workspace_sessions = [self.session_id]
             value = {"sessionId": self.session_id}
         elif method == "session.list":
+            cwd = self.workspace_path or str(
+                Path(os.environ.get("LAS_WORKSPACE", "/tmp"))
+                / "tasks" / "T-dsh")
             value = {"items": [{
                 "sessionId": self.session_id,
                 "agentPreset": "standard",
-                "cwd": str(Path(os.environ.get("LAS_WORKSPACE", "/tmp"))
-                           / "tasks" / "T-dsh"),
+                "cwd": cwd,
             }]}
+        elif method == "workspace.create":
+            self.workspace_create_payloads.append(dict(body["payload"]))
+            self.workspace_path = body["payload"]["path"]
+            value = {"workspace": {
+                "workspaceId": self.workspace_id,
+                "path": self.workspace_path,
+                "title": Path(self.workspace_path).name,
+                "sessionIds": list(self.workspace_sessions),
+                "createdAt": "2026-08-23T00:00:00Z",
+                "updatedAt": "2026-08-23T00:00:00Z",
+            }, "created": True}
+        elif method == "workspace.list":
+            value = {"items": ([{
+                "workspaceId": self.workspace_id,
+                "path": self.workspace_path,
+                "title": Path(self.workspace_path).name,
+                "sessionIds": list(self.workspace_sessions),
+                "createdAt": "2026-08-23T00:00:00Z",
+                "updatedAt": "2026-08-23T00:00:00Z",
+            }] if self.workspace_path else []), "archivedSessionIds": []}
         elif method == "session.history":
             assert body["payload"]["maxMessages"] == \
                 MAX_DSH_HISTORY_MESSAGES
@@ -189,6 +219,71 @@ async def test_dsh_uses_same_native_session_for_multiple_turns(
         assert any(a["name"] == "last-message.md" for a in second.artifacts)
         assert adapter.capabilities.native_resume is True
         assert adapter.capabilities.pause is False
+    finally:
+        await client.aclose()
+
+
+async def test_dsh_registers_explicit_workspace_and_accounts_session(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path / "agenthub"))
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    fixture = DshFixture()
+    adapter, client = _adapter(fixture)
+    try:
+        handle = await adapter.start_session(
+            _task(), session_id="S-dsh",
+            metadata={"executionWorkspace": str(execution_workspace)})
+        assert handle.native_session_id == fixture.session_id
+        assert fixture.workspace_create_payloads == [
+            {"path": str(execution_workspace.resolve())}]
+        assert fixture.session_create_payloads == [{
+            "workspaceId": fixture.workspace_id,
+            "agentPreset": "standard",
+        }]
+        assert fixture.session_id in fixture.workspace_sessions
+        assert "workspace.create" in fixture.methods
+        assert "workspace.list" in fixture.methods
+    finally:
+        await client.aclose()
+
+
+async def test_dsh_approval_is_scoped_to_explicit_workspace(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path / "agenthub"))
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    fixture = DshFixture()
+    adapter, client = _adapter(fixture)
+    try:
+        await adapter.start_session(
+            _task(), session_id="S-dsh",
+            metadata={"executionWorkspace": str(execution_workspace)})
+        await adapter.ingest_server_request({
+            "type": "server-request", "rpcId": "rpc-tool-workspace",
+            "method": "session/event", "payload": {
+                "type": "session/event", "sessionId": fixture.session_id,
+                "event": {"type": "tool/call", "data": {
+                    "callId": "call-workspace", "name": "bash"}},
+                "view": {"for": "call", "view": {
+                    "card": "terminal", "title": "touch safe.txt",
+                    "cwd": str(execution_workspace)}},
+            },
+        })
+        await adapter.ingest_server_request({
+            "type": "server-request", "rpcId": "rpc-approval-workspace",
+            "method": "approval/requested", "payload": {
+                "type": "approval/requested",
+                "sessionId": fixture.session_id,
+                "approvalId": "approval-workspace",
+                "toolName": "bash", "callId": "call-workspace",
+            },
+        })
+
+        pending = adapter.list_pending_interactions("S-dsh")[0]
+        assert pending.payload["inspectable"] is True
+        assert pending.payload["toolView"]["semanticIntent"]["targets"][
+            "workspace"] == str(execution_workspace.resolve())
     finally:
         await client.aclose()
 

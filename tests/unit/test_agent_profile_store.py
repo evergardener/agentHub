@@ -134,8 +134,9 @@ def test_dsh_catalog_seed_is_idempotent_and_assigns_only_when_empty(conn):
     }
     assert second == {"templates": [], "profiles": []}
     profile = agent_profile_store.profile_policy(conn, "AP-DSH-REVIEW")
-    assert profile["execution_mode"] == "read_only"
-    assert "filesystem.write" in profile["denied_operations"]
+    assert profile["execution_mode"] == "execute"
+    assert "filesystem.write" in profile["allowed_operations"]
+    assert "filesystem.delete" in profile["denied_operations"]
 
     state_store.update_heartbeat(
         conn, "dsh", endpoint="http://dsh:8203", skills=["code_review"])

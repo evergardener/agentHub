@@ -153,6 +153,43 @@ def test_task_response_is_native_hermes_readable(env):
     assert json.loads(bound["payload_json"])["context_id"] == "ctx-live"
 
 
+def test_tasks_create_persists_explicit_execution_workspace(env, tmp_path):
+    tm, client, delegated = env
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    response = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="codex", objective="查询项目状态",
+            workspace=str(execution_workspace)),
+        headers=_bearer()).json()
+
+    task = response["result"]["task"]
+    row = state_store.get_task(tm.conn, task["id"])
+    context = json.loads(row["plan_context_json"])
+    assert context["execution_workspace"] == str(execution_workspace.resolve())
+    assert task["metadata"]["execution_workspace"] == \
+        str(execution_workspace.resolve())
+    messages = collaboration_store.list_collaboration_messages(
+        tm.conn, row["collaboration_id"])
+    assert json.loads(messages[0]["content_json"])["workspace"] == \
+        str(execution_workspace.resolve())
+    assert delegated == [(task["id"], "codex")]
+
+
+def test_tasks_create_rejects_relative_execution_workspace(env):
+    tm, client, delegated = env
+    response = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="codex", objective="查询项目状态",
+            workspace="relative/project"),
+        headers=_bearer()).json()
+
+    assert response["error"]["code"] == -32602
+    assert "absolute" in response["error"]["message"]
+    assert delegated == []
+    assert tm.conn.execute("SELECT COUNT(*) FROM tasks;").fetchone()[0] == 0
+
+
 def test_same_peer_context_reuses_collaboration_for_multiple_tasks(env):
     tm, client, delegated = env
     first = client.post(

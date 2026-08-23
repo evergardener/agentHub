@@ -173,6 +173,67 @@ async def test_structured_plan_contract_is_sent_and_persisted(
     assert snapshot["task_plan"] == contract
 
 
+async def test_execution_workspace_is_sent_to_native_adapter(
+        tmp_path, monkeypatch):
+    from orchestrator.a2a_client import A2aClient
+    from orchestrator.task_manager import TaskManager
+
+    client = FakeA2aClient(native=True)
+    monkeypatch.setattr(
+        A2aClient, "for_agent", classmethod(
+            lambda cls, agent_name, direct_endpoint, timeout=30: client))
+    tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    task_id = tm.create_task(
+        "review and update project",
+        execution_workspace=str(execution_workspace),
+    )
+
+    await (await tm.delegate_task(task_id, "http://fake", "dsh"))
+
+    row = tm.conn.execute(
+        "SELECT plan_context_json FROM tasks WHERE id = ?;", (task_id,)
+    ).fetchone()
+    assert json.loads(row["plan_context_json"])["execution_workspace"] == \
+        str(execution_workspace.resolve())
+    assert client.sent[0]["metadata"]["executionWorkspace"] == \
+        str(execution_workspace.resolve())
+
+
+async def test_execution_workspace_must_fit_agent_profile_roots(
+        tmp_path, monkeypatch):
+    from orchestrator import agent_profile_store, state_store
+    from orchestrator.a2a_client import A2aClient
+    from orchestrator.task_manager import TaskManager
+
+    client = FakeA2aClient(native=True)
+    monkeypatch.setattr(
+        A2aClient, "for_agent", classmethod(
+            lambda cls, agent_name, direct_endpoint, timeout=30: client))
+    tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
+    agent_profile_store.seed_catalog(tm.conn)
+    state_store.update_heartbeat(
+        tm.conn, "dsh", endpoint="http://fake", skills=["review"])
+    agent_profile_store.assign_seed_profile(tm.conn, "dsh")
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    tm.conn.execute(
+        "UPDATE agent_profiles SET workspace_roots_json = ? WHERE id = ?;",
+        (json.dumps([str(allowed)]), "AP-DSH-REVIEW"),
+    )
+    tm.conn.commit()
+    task_id = tm.create_task(
+        "review outside", execution_workspace=str(outside))
+
+    with pytest.raises(PermissionError, match="Profile roots"):
+        await tm.delegate_task(task_id, "http://fake", "dsh")
+
+    assert client.sent == []
+
+
 async def test_nondurable_binding_creates_audited_replacement(
         tmp_path, monkeypatch):
     from orchestrator import collaboration_store

@@ -41,6 +41,9 @@ TOOL_SCHEMAS: list[dict] = [
                           "key": {"type": "string"},
                           "objective": {"type": "string"},
                           "agent_id": {"type": "string"},
+                          "workspace": {"type": "string",
+                                        "description": "Agent 执行的绝对工作区路径；"
+                                                       "写操作仍需 ActionIntent 审批"},
                           "depends_on": {"type": "array",
                                          "items": {"type": "string"}},
                           "expected_operations": {"type": "array",
@@ -63,6 +66,8 @@ TOOL_SCHEMAS: list[dict] = [
         "parameters": {"type": "object", "properties": {
             "objective": {"type": "string", "description": "任务目标"},
             "project": {"type": "string"},
+            "workspace": {"type": "string",
+                          "description": "Agent 执行的绝对工作区路径"},
             "depends_on": {"type": "array", "items": {"type": "string"},
                            "description": "依赖的 task_id 列表"},
         }, "required": ["objective"]}}},
@@ -293,6 +298,8 @@ class HermesTools:
                 "expected_operations": step["expected_operations"],
                 "expected_artifacts": step.get("expected_artifacts") or [],
                 "acceptance_criteria": step["acceptance_criteria"],
+                **({"execution_workspace": step["workspace"]}
+                   if step.get("workspace") else {}),
             }
             task_id = self.tm.create_task(
                 step["objective"], project=project,
@@ -300,6 +307,7 @@ class HermesTools:
                 depends_on=dependency_ids,
                 timeout_seconds=step["timeout_seconds"],
                 context=context,
+                execution_workspace=step.get("workspace"),
             )
             task_ids[step["key"]] = task_id
             resolved.append({
@@ -322,10 +330,12 @@ class HermesTools:
 
     async def _tool_create_task(self, objective: str,
                                 project: str | None = None,
-                                depends_on: list[str] | None = None) -> dict:
+                                depends_on: list[str] | None = None,
+                                workspace: str | None = None) -> dict:
         task_id = self.tm.create_task(objective, project=project,
                                       collaboration_id=self.collaboration_id,
-                                      depends_on=depends_on)
+                                      depends_on=depends_on,
+                                      execution_workspace=workspace)
         return {"task_id": task_id, "status": "created",
                 "risk": self.policy.classify(objective)}
 

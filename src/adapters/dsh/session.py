@@ -232,6 +232,7 @@ class DshWebSessionAdapter(SessionAdapter):
             str, dict[str, PendingInteraction]
         ] = {}
         self._native_to_session: dict[str, str] = {}
+        self._session_workspaces: dict[str, Path] = {}
         self._turn_baselines: dict[str, int] = {}
         self._permission_verified: set[str] = set()
         self._tool_call_views: dict[tuple[str, str], dict[str, Any]] = {}
@@ -352,7 +353,7 @@ class DshWebSessionAdapter(SessionAdapter):
                 if kind == "approval":
                     tool_view = normalize_tool_view(
                         tool_view,
-                        workspace=self._workspace(handle.task_id),
+                        workspace=self._session_workspace(session_id),
                     )
                     interaction_payload["inspectable"] = \
                         tool_view_is_inspectable(tool_view)
@@ -382,8 +383,7 @@ class DshWebSessionAdapter(SessionAdapter):
                 call_id = data.get("callId")
                 safe_view = normalize_tool_view(
                     safe_tool_view(payload.get("view")),
-                    workspace=self._workspace(
-                        self._handles[session_id].task_id),
+                    workspace=self._session_workspace(session_id),
                 )
                 if call_id and safe_view is not None:
                     self._tool_call_views[(str(native), str(call_id))] = safe_view
@@ -450,6 +450,51 @@ class DshWebSessionAdapter(SessionAdapter):
         (path / "logs").mkdir(parents=True, exist_ok=True)
         return path
 
+    def _session_workspace(self, session_id: str) -> Path:
+        path = self._session_workspaces.get(session_id)
+        if path is not None:
+            return path
+        return self._workspace(self._handles[session_id].task_id)
+
+    @staticmethod
+    def _explicit_workspace(metadata: dict[str, Any]) -> Path | None:
+        value = metadata.get("executionWorkspace")
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise DshApiError(
+                "executionWorkspace must be a non-empty absolute path")
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            raise DshApiError("executionWorkspace must be absolute")
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as exc:
+            raise DshApiError(
+                f"executionWorkspace is unavailable: {path}") from exc
+        if not resolved.is_dir():
+            raise DshApiError(
+                f"executionWorkspace is not a directory: {resolved}")
+        if resolved == Path(resolved.anchor):
+            raise DshApiError("executionWorkspace must not be a filesystem root")
+        return resolved
+
+    async def _register_workspace(self, path: Path) -> str:
+        value = await self._request(
+            "workspace.create", {"path": str(path)})
+        workspace = value.get("workspace")
+        if not isinstance(workspace, dict):
+            raise DshApiError("DSH workspace.create returned no workspace")
+        workspace_id = workspace.get("workspaceId")
+        returned_path = workspace.get("path")
+        if not isinstance(workspace_id, str) or not workspace_id:
+            raise DshApiError("DSH workspace.create returned no workspaceId")
+        if (not isinstance(returned_path, str)
+                or Path(returned_path).resolve() != path):
+            raise DshApiError(
+                "DSH workspace.create returned a mismatched workspace path")
+        return workspace_id
+
     async def _request(self, method: str, payload: dict[str, Any]) -> dict:
         rpc_id = f"agenthub-{uuid.uuid4()}"
         body = {
@@ -504,6 +549,7 @@ class DshWebSessionAdapter(SessionAdapter):
 
     async def _verify_native_session(
         self, native_session_id: str, expected_workspace: Path,
+        expected_workspace_id: str | None = None,
     ) -> None:
         value = await self._request("session.list", {})
         items = value.get("items")
@@ -528,6 +574,24 @@ class DshWebSessionAdapter(SessionAdapter):
             raise DshApiError(
                 "DSH native session workspace does not match the AgentHub "
                 "task workspace")
+        if expected_workspace_id is not None:
+            workspace_value = await self._request("workspace.list", {})
+            workspaces = workspace_value.get("items")
+            if not isinstance(workspaces, list):
+                raise DshApiError("DSH workspace.list returned invalid items")
+            registered = next((
+                item for item in workspaces
+                if isinstance(item, dict)
+                and item.get("workspaceId") == expected_workspace_id
+            ), None)
+            if (registered is None
+                    or Path(str(registered.get("path"))).resolve()
+                    != expected_workspace.resolve()
+                    or native_session_id not in (
+                        registered.get("sessionIds") or [])):
+                raise DshApiError(
+                    "DSH native session is not accounted to the requested "
+                    "workspace")
 
     @staticmethod
     def _permission_state(entries: list[dict[str, Any]]) -> dict[str, str]:
@@ -577,11 +641,21 @@ class DshWebSessionAdapter(SessionAdapter):
     async def start_session(
         self, task: A2aTask, *, session_id: str, metadata: dict[str, Any]
     ) -> SessionHandle:
+        explicit_workspace = self._explicit_workspace(metadata)
+        execution_workspace = explicit_workspace or self._workspace(task.id)
+        workspace_id = (
+            await self._register_workspace(execution_workspace)
+            if explicit_workspace is not None else None
+        )
         native = metadata.get("nativeSessionId") or task.native_session_id
         if native:
             await self._history(str(native))
         else:
-            payload: dict[str, Any] = {"cwd": str(self._workspace(task.id))}
+            payload: dict[str, Any] = (
+                {"workspaceId": workspace_id}
+                if workspace_id is not None
+                else {"cwd": str(execution_workspace)}
+            )
             preset = metadata.get("dshAgentPreset") or os.environ.get(
                 "LAS_DSH_AGENT_PRESET", REQUIRED_AGENT_PRESET)
             if preset != REQUIRED_AGENT_PRESET:
@@ -594,7 +668,7 @@ class DshWebSessionAdapter(SessionAdapter):
             if not isinstance(native, str) or not native:
                 raise DshApiError("DSH session.create returned no sessionId")
         await self._verify_native_session(
-            str(native), self._workspace(task.id))
+            str(native), execution_workspace, workspace_id)
         permission = metadata.get(
             "dshPermissionPreset", self.permission_preset)
         if permission not in SAFE_PERMISSION_PRESETS:
@@ -610,6 +684,7 @@ class DshWebSessionAdapter(SessionAdapter):
             context_revision=task.context_revision,
         )
         self._handles[session_id] = handle
+        self._session_workspaces[session_id] = execution_workspace
         self._tasks[session_id] = task
         self._event_queues.setdefault(session_id, asyncio.Queue())
         self._pending_interactions.setdefault(session_id, {})

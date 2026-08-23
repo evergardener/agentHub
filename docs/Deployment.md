@@ -301,6 +301,22 @@ ActionIntent，再把不可伪造的 receipt 送到 DSH `/api/respond`。问题�
 `rpcId`。真实拒绝已验证文件不落盘；真实 signed ActionIntent `allowed-once` 已
 验证只在批准后创建临时文件。生产 catalog/peer 尚待下一批统一切换。
 
+创建需要检查或修改真实项目的任务时，Hermes 必须在 agentHub
+`tasks/create` 命令中显式传入绝对、非根目录的 `workspace`。控制面将其持久化到
+Task 上并按 Agent Profile 的 `workspace_roots` 校验；DSH Adapter 随后调用原生
+`workspace.create({path})` 注册或复用工作区，再以
+`session.create({workspaceId})` 创建会话，因此该会话会归入 DSH 对应工作区，而
+不是「未分组」。未传 `workspace` 的任务继续使用隔离的 AgentHub task workspace，
+不会自动猜测或沿用历史目录。
+
+`workspace` 只定义执行和目标路径边界，不授予写权限。DSH 仍以
+`read-only / ask` 启动；每次写入仍须生成可检查的 ActionIntent。只有操作位于
+Profile allowlist、目标在当前 task workspace 内且提供回滚方案时，Hermes 才能
+签发本次 `allowed-once`；删除、Git 提交/推送、部署、数据库写入及未知操作继续
+fail-closed 并要求用户决定。生产升级时必须先备份 Profile，再对现有
+`AP-DSH-REVIEW` 做版本化更新并配置明确的 `workspace_roots`。修改
+`config/agent_templates.yaml` 只影响新 seed，不会覆盖生产数据库里的已有 Profile。
+
 Kimi Adapter 使用 `kimi acp`，ACP 的 `session/request_permission` 走相同
 `blocked -> ActionIntent -> signed receipt -> native response` 链。允许仅选择
 Kimi 本次请求提供的 `allow_once`，拒绝选择 `reject_once`；prompt CLI 的
