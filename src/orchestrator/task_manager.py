@@ -448,6 +448,12 @@ class TaskManager:
                         "context_revision": existing["based_on_revision"],
                         "duplicate": True,
                     }
+        if mode == "steer":
+            from orchestrator import agent_control_store
+
+            if not agent_control_store.desired_enabled(
+                    self.conn, agent_id, True):
+                raise PermissionError(f"agent is disabled: {agent_id}")
         collaboration = collaboration_store.get_collaboration(
             self.conn, task["collaboration_id"])
         if collaboration is None:

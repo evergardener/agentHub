@@ -292,10 +292,17 @@ def test_index_page(client):
     assert 'id="conversation-select"' in r.text
     assert 'id="chat-transcript"' in r.text
     assert 'id="chat-composer"' in r.text
-    assert 'id="chat-recipient"' in r.text
+    assert 'id="chat-target"' in r.text
+    assert 'id="chat-mention-menu"' in r.text
+    assert 'role="listbox"' in r.text
+    assert 'id="chat-recipient"' not in r.text
     assert 'id="settings-drawer"' in r.text
     assert 'id="session-title-layer"' in r.text
-    assert "直接发送给" in r.text
+    assert "输入 @ 选择 Hermes 或当前 Agent" in r.text
+    assert "function composerRecipients" in r.text
+    assert "function parseComposerTarget" in r.text
+    assert "多个 @ 接收者" in r.text
+    assert 'agent_id: target.id' in r.text
     assert 'data-task-detail-tab="goals"' in r.text
     assert 'data-task-detail-tab="execution"' in r.text
     assert "目标与交付" in r.text
@@ -555,13 +562,16 @@ def test_collaboration_message_does_not_require_active_task(client):
 
     response = client.post(
         f"/api/collaborations/{collaboration_id}/messages",
-        json={"text": "任务结束后继续询问", "idempotency_key": "continue-1"},
+        json={"text": "@hermes 任务结束后继续询问",
+              "recipient_id": "hermes", "idempotency_key": "continue-1"},
     )
     assert response.status_code == 200
     assert response.json()["context_revision"] == 2
+    assert response.json()["recipient_id"] == "hermes"
     replay = client.post(
         f"/api/collaborations/{collaboration_id}/messages",
-        json={"text": "任务结束后继续询问", "idempotency_key": "continue-1"},
+        json={"text": "@hermes 任务结束后继续询问",
+              "recipient_id": "hermes", "idempotency_key": "continue-1"},
     )
     assert replay.status_code == 200
     assert replay.json()["message_id"] == response.json()["message_id"]
@@ -570,6 +580,10 @@ def test_collaboration_message_does_not_require_active_task(client):
     ).json()
     assert detail["messages"][-1]["message_type"] == "user.comment"
     assert "任务结束后继续询问" in detail["messages"][-1]["content_json"]
+    assert client.post(
+        f"/api/collaborations/{collaboration_id}/messages",
+        json={"text": "错误路由", "recipient_id": "codex"},
+    ).status_code == 400
     assert client.post(
         f"/api/collaborations/{collaboration_id}/messages",
         json={"text": " "},

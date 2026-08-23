@@ -276,6 +276,35 @@ async def test_user_steer_advances_context_and_reaches_same_session(
     assert len(client.steers) == 1
 
 
+async def test_disabled_agent_cannot_receive_user_steer(
+        tmp_path, monkeypatch):
+    from orchestrator import agent_control_store
+    from orchestrator.a2a_client import A2aClient
+    from orchestrator.task_manager import TaskManager
+
+    client = FakeA2aClient(native=True)
+    monkeypatch.setattr(
+        A2aClient, "for_agent", classmethod(
+            lambda cls, agent_name, direct_endpoint, timeout=30: client))
+    tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
+    task_id, _ = _task_with_collaboration(tm)
+    await (await tm.delegate_task(task_id, "http://fake", "codex"))
+    agent_control_store.set_enabled(
+        tm.conn, agent_id="codex", enabled=False, updated_by="test")
+
+    with pytest.raises(PermissionError, match="agent is disabled: codex"):
+        await tm.intervene_agent_session(
+            task_id, mode="steer", content={"text": "@codex 继续检查"},
+            agent_id="codex", endpoint="http://fake", user_id="user",
+            idempotency_key="disabled-steer")
+
+    assert client.steers == []
+    assert tm.conn.execute(
+        "SELECT COUNT(*) FROM conversation_messages"
+        " WHERE idempotency_key = 'disabled-steer';"
+    ).fetchone()[0] == 0
+
+
 async def test_failed_steer_can_retry_same_idempotency_key(
         tmp_path, monkeypatch):
     from orchestrator.a2a_client import A2aClient

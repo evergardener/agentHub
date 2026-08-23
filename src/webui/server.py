@@ -729,6 +729,12 @@ def create_app() -> FastAPI:
         """Persist a WebUI user message to Hermes without requiring a task."""
         from orchestrator import collaboration_store
 
+        recipient_id = (body or {}).get("recipient_id", "hermes")
+        if recipient_id != "hermes":
+            return JSONResponse(
+                {"error": "collaboration messages must target hermes"},
+                status_code=400,
+            )
         text = (body or {}).get("text")
         if not isinstance(text, str) or not text.strip():
             return JSONResponse({"error": "text required"}, status_code=400)
@@ -758,6 +764,7 @@ def create_app() -> FastAPI:
             )
             return {
                 "collaboration_id": collaboration_id,
+                "recipient_id": "hermes",
                 "message_id": message["id"],
                 "sequence": message["sequence"],
                 "context_revision": message["based_on_revision"],

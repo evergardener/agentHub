@@ -845,10 +845,37 @@
     background: rgba(255,255,255,.31); backdrop-filter: blur(18px);
   }
   .composer-row { display: flex; align-items: center; gap: 8px; color: var(--faint); font-size: 10.5px; }
-  .composer-row select {
-    max-width: 180px; padding: 5px 8px; border: 1px solid rgba(255,255,255,.78);
-    border-radius: 8px; background: rgba(255,255,255,.48); color: var(--fg); font: inherit;
+  .composer-target-wrap { position: relative; flex: none; }
+  .composer-target {
+    min-width: 78px; padding: 5px 9px; border: 1px solid rgba(103,151,151,.28);
+    border-radius: 999px; background: rgba(220,243,240,.68); color: var(--acc);
+    font: inherit; font-size: 11px; font-weight: 700; line-height: 1.2;
+    cursor: pointer; text-align: left;
   }
+  .composer-target::after { content: "⌄"; margin-left: 7px; color: var(--faint); }
+  .composer-target:disabled { opacity: .5; cursor: default; }
+  .mention-menu {
+    position: absolute; left: 0; bottom: calc(100% + 7px); z-index: 12;
+    width: min(300px, 72vw); max-height: 260px; overflow-y: auto; padding: 6px;
+    border: 1px solid rgba(255,255,255,.82); border-radius: 13px;
+    background: rgba(242,249,248,.94); box-shadow: 0 14px 34px rgba(58,87,91,.19);
+    backdrop-filter: blur(24px) saturate(132%);
+  }
+  .mention-menu[hidden] { display: none; }
+  .mention-option {
+    width: 100%; display: grid; grid-template-columns: 30px minmax(0,1fr) auto;
+    align-items: center; gap: 8px; padding: 8px; border: 0; border-radius: 9px;
+    background: transparent; color: var(--fg); font: inherit; text-align: left; cursor: pointer;
+  }
+  .mention-option:hover, .mention-option.active { background: rgba(220,243,240,.72); }
+  .mention-option.unavailable { color: var(--faint); }
+  .mention-option .mention-avatar {
+    width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%;
+    background: var(--acc); color: #fff; font-size: 11px; font-weight: 700;
+  }
+  .mention-option strong, .mention-option small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mention-option small { margin-top: 2px; color: var(--faint); font-size: 9.5px; }
+  .mention-option .mention-state { font-size: 9.5px; white-space: nowrap; }
   .composer-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .composer-row .spacer { flex: 1; }
   .composer-input-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; margin-top: 7px; }
@@ -863,7 +890,7 @@
     background: var(--acc); color: #fff; padding: 0 14px; cursor: pointer; font: inherit;
   }
   .composer-send:disabled, .composer-input-row textarea:disabled,
-  .composer-row select:disabled { opacity: .5; cursor: default; }
+  .composer-target:disabled { opacity: .5; cursor: default; }
   .composer-note { margin-top: 5px; color: var(--faint); font-size: 10px; }
 
   /* 右栏任务：目标、交付和执行分区 */
@@ -1049,18 +1076,20 @@
       </div>
       <div class="chat-composer" id="chat-composer">
         <div class="composer-row">
-          <select id="chat-recipient" aria-label="消息接收方" disabled>
-            <option value="hermes">发送给 Hermes</option>
-          </select>
+          <div class="composer-target-wrap">
+            <button class="composer-target" id="chat-target" type="button" aria-label="选择消息接收方"
+              aria-haspopup="listbox" aria-expanded="false" disabled>@hermes</button>
+            <div class="mention-menu" id="chat-mention-menu" role="listbox" aria-label="可用接收方" hidden></div>
+          </div>
           <span class="composer-hint" id="composer-hint">选择 Session 后可发送给 Hermes</span>
           <span class="spacer"></span>
           <span id="chat-refresh-state">等待数据</span>
         </div>
         <div class="composer-input-row">
-          <textarea id="chat-message" rows="2" placeholder="直接补充要求、纠正方向或向 Agent 发送指令…" disabled></textarea>
+          <textarea id="chat-message" rows="2" placeholder="输入 @ 选择 Hermes 或当前 Agent…" disabled></textarea>
           <button class="composer-send" id="chat-send" type="button" disabled>发送</button>
         </div>
-        <div class="composer-note">发送给 Hermes 会写入持久上下文；直接发送给 Agent 使用当前原生 Session 的实时纠正能力。</div>
+        <div class="composer-note">输入 @ 选择 Hermes 或当前 Agent；路由会写入持久记录，直接发送 Agent 仍使用当前原生 Session。</div>
       </div>
     </section>
   </main>
@@ -1232,6 +1261,9 @@ const S = {
   currentTaskDetail: null,
   currentSession: null,
   currentSessionCaps: {},
+  agents: [],
+  composerTarget: "hermes",
+  mentionIndex: 0,
   titleEditId: null,
   sessionFilter: "all",
   interactions: new Map(),
@@ -1798,6 +1830,7 @@ async function loadAll() {
   try {
     const ov = await fetchJson("/api/overview");
     if (ov.error) throw new Error(ov.error);
+    S.agents = ov.agents || [];
     renderAgents(ov.agents || []);
     renderChips(ov.task_counts || {});
     renderGrants(ov.grants || []);
@@ -2244,39 +2277,189 @@ async function loadConversationPanel(id, {preserveScroll = false} = {}) {
   $("#chat-refresh-state").textContent = `已同步 ${formatTime(new Date().toISOString())}`;
 }
 
+function composerRecipients() {
+  const task = S.currentTaskDetail?.task;
+  const terminal = !task || ["completed", "reviewed", "accepted", "failed", "cancelled"].includes(task.status);
+  const canWrite = S.role !== "viewer" && !!S.collaborationId;
+  const currentAgent = S.currentSession?.agent_id || task?.assigned_to || null;
+  const catalog = [...(S.agents || [])];
+  if (currentAgent && !catalog.some(agent => agent.id === currentAgent))
+    catalog.push({id: currentAgent, enabled: true, online: false});
+  return [{
+    id: "hermes", label: "Hermes", type: "hermes", enabled: true,
+    available: canWrite,
+    reason: canWrite ? "写入持久协作上下文" : "当前不可写",
+  }, ...catalog.filter(agent => String(agent.id).toLowerCase() !== "hermes").map(agent => {
+    const enabled = agent.enabled !== false;
+    const sameSession = !!currentAgent && agent.id === currentAgent && !!S.currentSession;
+    const available = canWrite && enabled && !!agent.online && sameSession && !terminal &&
+      S.currentSessionCaps?.steer === true;
+    let reason = "当前 Session 未绑定原生会话";
+    if (!enabled) reason = "已停用 · 选择后可确认启用";
+    else if (!agent.online) reason = "当前离线";
+    else if (terminal) reason = "任务已结束";
+    else if (sameSession && S.currentSessionCaps?.steer !== true) reason = "不支持实时纠正";
+    else if (available) reason = "直接纠正当前原生 Session";
+    return {id: agent.id, label: agent.id, type: "agent", enabled, available, reason};
+  })];
+}
+
+function recipientById(id) {
+  return composerRecipients().find(item => item.id.toLowerCase() === String(id || "").toLowerCase());
+}
+
+function mentionContext() {
+  const input = $("#chat-message");
+  const before = input.value.slice(0, input.selectionStart ?? input.value.length);
+  const match = before.match(/(^|\s)@([\w.-]*)$/);
+  if (!match) return null;
+  return {
+    start: before.length - match[2].length - 1,
+    end: before.length,
+    query: match[2].toLowerCase(),
+  };
+}
+
+function parseComposerTarget(text) {
+  let rest = String(text || "").trimStart();
+  const ids = [];
+  while (true) {
+    const match = rest.match(/^@([\w.-]+)(?:\s+|$)/);
+    if (!match) break;
+    ids.push(match[1]);
+    rest = rest.slice(match[0].length);
+  }
+  if (ids.length > 1) return {error: "一条消息不能指定多个 @ 接收者，请拆分后分别发送"};
+  const id = ids[0] || S.composerTarget || "hermes";
+  const target = recipientById(id);
+  if (!target) return {error: `未知接收者 @${id}`};
+  const normalized = ids.length ? String(text).trim() : `@${target.id} ${String(text).trim()}`;
+  return {target, text: normalized};
+}
+
+function closeMentionMenu() {
+  const menu = $("#chat-mention-menu");
+  menu.hidden = true;
+  $("#chat-target").setAttribute("aria-expanded", "false");
+}
+
+function openMentionMenu(query = "") {
+  const menu = $("#chat-mention-menu");
+  const matches = composerRecipients().filter(item =>
+    item.id.toLowerCase().includes(String(query).toLowerCase()));
+  S.mentionIndex = Math.min(S.mentionIndex, Math.max(matches.length - 1, 0));
+  menu.innerHTML = matches.map((item, index) =>
+    `<button class="mention-option ${item.available ? "" : "unavailable"} ${index === S.mentionIndex ? "active" : ""}" ` +
+    `type="button" role="option" aria-selected="${index === S.mentionIndex ? "true" : "false"}" ` +
+    `aria-disabled="${item.available ? "false" : "true"}" data-mention-agent="${esc(item.id)}">` +
+    `<span class="mention-avatar" style="background:${agentColor(item.id)}">${esc(item.id[0].toUpperCase())}</span>` +
+    `<span><strong>@${esc(item.id)}</strong><small>${esc(item.reason)}</small></span>` +
+    `<span class="mention-state">${item.available ? "可发送" : item.enabled ? "不可用" : "已停用"}</span></button>`
+  ).join("") || `<div class="empty">没有匹配的接收者</div>`;
+  menu.hidden = false;
+  $("#chat-target").setAttribute("aria-expanded", "true");
+  document.querySelectorAll("[data-mention-agent]").forEach(button =>
+    button.onclick = () => chooseComposerRecipient(button.dataset.mentionAgent));
+}
+
+async function enableDisabledRecipient(target) {
+  if (S.role !== "admin") {
+    showToast(`@${target.id} 已停用，需要管理员在设置中启用`, "error");
+    return false;
+  }
+  const confirmed = await requestConfirmation({
+    title: `启用 ${target.id}？`,
+    message: "该 Agent 当前已停用。启用后需等待健康心跳重新探测和注册，本条消息不会立即发送。",
+    label: "启用",
+  });
+  if (!confirmed) return false;
+  const result = await fetchJson(`/api/agents/${encodeURIComponent(target.id)}`, {
+    method: "PATCH", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({enabled: true}),
+  });
+  if (result.error) {
+    showToast(result.error, "error");
+    return false;
+  }
+  showToast(`${target.id} 已启用，等待重新上线后再发送`, "ok");
+  await loadAll();
+  return false;
+}
+
+async function chooseComposerRecipient(id) {
+  const target = recipientById(id);
+  if (!target) return;
+  if (!target.enabled) {
+    closeMentionMenu();
+    await enableDisabledRecipient(target);
+    return;
+  }
+  if (!target.available) {
+    showToast(`@${target.id} ${target.reason}`, "error");
+    return;
+  }
+  S.composerTarget = target.id;
+  const input = $("#chat-message");
+  const context = mentionContext();
+  let content = input.value;
+  if (context) content = content.slice(0, context.start) + content.slice(context.end);
+  content = content.replace(/^\s*@[\w.-]+(?:\s+|$)/, "").trimStart();
+  input.value = `@${target.id}${content ? " " + content : " "}`;
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+  closeMentionMenu();
+  updateComposer();
+}
+
 function updateComposer() {
-  const recipient = $("#chat-recipient");
   const input = $("#chat-message");
   const send = $("#chat-send");
   const hint = $("#composer-hint");
-  const detail = S.currentTaskDetail;
-  const task = detail?.task;
+  const targetButton = $("#chat-target");
+  const task = S.currentTaskDetail?.task;
   const terminal = !task || ["completed", "reviewed", "accepted", "failed", "cancelled"].includes(task.status);
   const canWriteHermes = S.role !== "viewer" && !!S.collaborationId;
-  const canWriteAgent = canWriteHermes && S.currentSession && !terminal &&
-    S.currentSessionCaps?.steer;
-  const previous = recipient.value;
-  recipient.innerHTML = `<option value="hermes">发送给 Hermes</option>` +
-    (canWriteAgent
-      ? `<option value="agent">直接发送给 ${esc(task.assigned_to || S.currentSession.agent_id)}</option>` : "");
-  if ([...recipient.options].some(option => option.value === previous)) recipient.value = previous;
-  recipient.disabled = !canWriteHermes;
+  let target = recipientById(S.composerTarget);
+  if (!target || (target.type === "agent" &&
+      S.currentSession?.agent_id !== target.id)) {
+    S.composerTarget = "hermes";
+    target = recipientById("hermes");
+  }
+  targetButton.textContent = `@${target?.id || "hermes"}`;
+  targetButton.disabled = !canWriteHermes;
   input.disabled = !canWriteHermes;
   send.disabled = !canWriteHermes;
+  input.placeholder = canWriteHermes
+    ? `发送给 @${target?.id || "hermes"}；输入 @ 可切换…`
+    : "选择 Session 后可发送消息";
+  if (!canWriteHermes) closeMentionMenu();
   if (S.role === "viewer") hint.textContent = "当前账号为只读角色";
   else if (!S.collaborationId) hint.textContent = "选择 Session 后可发送消息";
-  else if (!task) hint.textContent = "可继续发送给 Hermes；当前 Session 尚未创建任务";
-  else if (!S.currentSession) hint.textContent = "可发送给 Hermes；当前任务没有可恢复的 Agent Session";
-  else if (terminal) hint.textContent = "任务已结束，仍可继续发送给 Hermes";
-  else if (!S.currentSessionCaps?.steer) hint.textContent = "当前 Agent 不支持实时纠正，可将补充要求写入 Hermes 上下文";
-  else hint.textContent = "可发送给 Hermes，或直接纠正当前 Agent Session";
+  else if (!task) hint.textContent = "默认 @hermes；当前 Session 尚未创建任务";
+  else if (!S.currentSession) hint.textContent = "默认 @hermes；当前任务没有可恢复的 Agent Session";
+  else if (terminal) hint.textContent = "任务已结束，仍可发送给 @hermes";
+  else if (!S.currentSessionCaps?.steer) hint.textContent = "当前 Agent 不支持实时纠正，可发送给 @hermes";
+  else hint.textContent = `输入 @ 选择 @hermes 或 @${S.currentSession.agent_id}`;
 }
 
 async function sendChatMessage() {
-  const text = $("#chat-message").value.trim();
+  const parsed = parseComposerTarget($("#chat-message").value);
   const task = S.currentTaskDetail?.task;
-  if (!text || !S.collaborationId) return;
-  const direct = $("#chat-recipient").value === "agent";
+  if (!$("#chat-message").value.trim() || !S.collaborationId) return;
+  if (parsed.error) {
+    showToast(parsed.error, "error");
+    return;
+  }
+  const {target, text} = parsed;
+  if (!target.enabled) {
+    await enableDisabledRecipient(target);
+    return;
+  }
+  if (!target.available) {
+    showToast(`@${target.id} ${target.reason}`, "error");
+    return;
+  }
+  const direct = target.type === "agent";
   if (direct && (!task || !S.currentSession)) return;
   const button = $("#chat-send");
   button.disabled = true;
@@ -2286,11 +2469,12 @@ async function sendChatMessage() {
     : `/api/collaborations/${encodeURIComponent(S.collaborationId)}/messages`;
   const body = direct ? {
     mode: "steer",
-    agent_id: S.currentSession.agent_id,
+    agent_id: target.id,
     content: {text},
     idempotency_key: `webui-chat-${task.id}-${Date.now()}`,
   } : {
     text,
+    recipient_id: "hermes",
     idempotency_key: `message-${Date.now()}`,
   };
   const result = await fetchJson(endpoint, {
@@ -2304,16 +2488,58 @@ async function sendChatMessage() {
     return;
   }
   $("#chat-message").value = "";
-  showToast(direct ? "指令已发送给当前 Agent Session" : "消息已发送给 Hermes", "ok");
+  S.composerTarget = target.id;
+  showToast(`消息已发送给 @${target.id}`, "ok");
   await loadConversationPanel(S.collaborationId, {preserveScroll: false});
 }
 $("#chat-send").onclick = sendChatMessage;
+$("#chat-target").onclick = event => {
+  event.stopPropagation();
+  const menu = $("#chat-mention-menu");
+  if (menu.hidden) openMentionMenu(); else closeMentionMenu();
+};
+$("#chat-message").oninput = () => {
+  const context = mentionContext();
+  if (context) openMentionMenu(context.query);
+  else closeMentionMenu();
+  const parsed = parseComposerTarget($("#chat-message").value);
+  if (!parsed.error && parsed.target?.available) {
+    S.composerTarget = parsed.target.id;
+    $("#chat-target").textContent = `@${parsed.target.id}`;
+  }
+};
 $("#chat-message").onkeydown = event => {
+  const menu = $("#chat-mention-menu");
+  if (!menu.hidden && ["ArrowDown", "ArrowUp"].includes(event.key)) {
+    event.preventDefault();
+    const count = menu.querySelectorAll("[data-mention-agent]").length;
+    if (!count) return;
+    S.mentionIndex = (S.mentionIndex + (event.key === "ArrowDown" ? 1 : -1) + count) % count;
+    const context = mentionContext();
+    openMentionMenu(context?.query || "");
+    return;
+  }
+  if (!menu.hidden && event.key === "Enter" && !event.ctrlKey && !event.metaKey) {
+    const active = menu.querySelectorAll("[data-mention-agent]")[S.mentionIndex];
+    if (active) {
+      event.preventDefault();
+      chooseComposerRecipient(active.dataset.mentionAgent);
+      return;
+    }
+  }
+  if (!menu.hidden && event.key === "Escape") {
+    event.preventDefault();
+    closeMentionMenu();
+    return;
+  }
   if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
     event.preventDefault();
     sendChatMessage();
   }
 };
+document.addEventListener("click", event => {
+  if (!event.target.closest(".composer-target-wrap")) closeMentionMenu();
+});
 
 function closeDetail() {
   document.querySelectorAll("[data-task]").forEach(item =>
