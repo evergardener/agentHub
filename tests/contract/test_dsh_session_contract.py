@@ -38,6 +38,7 @@ async def test_dsh_a2a_card_and_native_session_metadata(tmp_path, monkeypatch):
             assert body["payload"]["args"] == {
                 "agentId": "session-contract-dsh",
                 "line": "/permission read-only",
+                "images": [],
             }
             events.extend([
                 {"event": {"seq": 0, "type": "permission/preset",

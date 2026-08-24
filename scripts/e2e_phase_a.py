@@ -121,7 +121,7 @@ def main() -> int:
             context_id=context_id,
             agent=worker,
             objective=(
-                "只读验收：运行 pwd -P 检查当前工作目录，不得修改任何文件；"
+                "只读验收：运行 pwd -P 查询当前工作目录，不得修改任何文件；"
                 "最终回复必须包含 pwd 的绝对路径。"),
             project="agentHub",
             workspace=str(ROOT),

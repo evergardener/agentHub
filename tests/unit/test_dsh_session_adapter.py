@@ -145,6 +145,7 @@ class DshFixture:
             assert args == {
                 "agentId": self.session_id,
                 "line": "/permission read-only",
+                "images": [],
             }
             self.events.extend([
                 self._event("permission/preset", {"preset": "read-only"}),

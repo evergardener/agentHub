@@ -620,6 +620,7 @@ class DshWebSessionAdapter(SessionAdapter):
             {"args": {
                 "agentId": native_session_id,
                 "line": f"/permission {permission}",
+                "images": [],
             }},
         )
         result = value.get("result")
