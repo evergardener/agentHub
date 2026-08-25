@@ -21,6 +21,8 @@
     tasks/accept  params.id → 对待验收任务执行正式验收通过
     tasks/request-rework params.id, feedback → 对待验收任务提报反馈返工
                   （精确动作；重复/晚到/终态返回稳定错误，不重复委派）
+    supervision/register|pull|ack|stop → qishuo 原会话的持久异步监督；
+                  仅返回任务/事件标识，不返回 worker 内容
 
 鉴权（/health 外全路径）：
   Authorization: Bearer <token>  LAS_A2A_PEERS 配置的 caller token →
@@ -51,7 +53,11 @@ from common import config as cfg
 from common.models import A2A_STATE_MAP, TaskStatus
 from hermes.policy import ApprovalPolicy
 from orchestrator import state_store
-from orchestrator.task_manager import TaskManager, normalize_execution_workspace
+from orchestrator.task_manager import (
+    TaskManager,
+    normalize_execution_workspace,
+    require_structured_workspace,
+)
 
 # legacy 自然语言审批（deprecated）：整句精确匹配，不做子串匹配——
 # 避免「不批准」因子串含「批准」被误放行。compatibility（SendMessage）
@@ -135,7 +141,9 @@ def _hub_command(text: str) -> tuple[dict | None, str | None]:
     if action not in {
             "agents/list", "tasks/create", "tasks/get",
             "tasks/approve", "tasks/reject", "tasks/accept",
-            "tasks/request-rework"}:
+            "tasks/request-rework", "interactions/respond",
+            "supervision/register", "supervision/pull",
+            "supervision/ack", "supervision/stop"}:
         return None, f"未知 agentHub action: {action}"
     return value, None
 
@@ -202,12 +210,22 @@ def _to_a2a(conn, row, *, context_id: str | None = None) -> dict:
         plan_context = json.loads(row["plan_context_json"] or "null")
     except (TypeError, ValueError):
         plan_context = None
-    if isinstance(plan_context, dict) and plan_context.get(
-            "execution_workspace"):
-        metadata["execution_workspace"] = plan_context[
-            "execution_workspace"]
+    if isinstance(plan_context, dict):
+        for source_key, target_key in (
+                ("execution_workspace", "execution_workspace"),
+                ("display_title", "display_title"),
+                ("objective_summary", "objective_summary"),
+                ("runtime_config", "runtime_config")):
+            if plan_context.get(source_key):
+                metadata[target_key] = plan_context[source_key]
     if state == "input-required" and input_required_kind is not None:
         metadata["input_required_kind"] = input_required_kind
+        if input_required_kind == "blocked":
+            from orchestrator import collaboration_store
+
+            metadata["pending_interactions"] = (
+                collaboration_store.pending_interaction_views(
+                    conn, task_id))
     return {
         "id": task_id,
         "status": {"state": state, "timestamp": row["updated_at"],
@@ -319,8 +337,8 @@ def create_app(tm: TaskManager | None = None,
         return {
             "name": "agenthub-orchestrator",
             "description": "agentHub 编排执行平面：任务委派、审批门禁、"
-                           "产物核验、事件审计。",
-            "version": "0.2.0",
+                           "持久监督、产物核验、事件审计。",
+            "version": "0.3.0",
             "url": base,
             "supportedInterfaces": [
                 # A2A clients select this URL and POST JSON-RPC to it verbatim.
@@ -338,7 +356,11 @@ def create_app(tm: TaskManager | None = None,
                  "description": "agents/list 返回实时 Agent/Profile 发现视图"},
                 {"id": "approval-gate",
                  "description": "写操作审批：input-required + "
-                                "tasks/approve | tasks/reject 放行"},
+                                "tasks/approve | tasks/reject；原生交互由 "
+                                "interactions/respond 按 ActionIntent 路由"},
+                {"id": "durable-supervision",
+                 "description": "peer/context 隔离的持久 watch 与租约 outbox；"
+                                "为原 Hermes 会话提供审批、失败和验收唤醒"},
             ],
         }
 
@@ -377,6 +399,9 @@ def create_app(tm: TaskManager | None = None,
         if method == "tasks/request-rework":
             return await _tasks_acceptance(
                 params, rpc_id, identity, approve=False)
+        if method == "interactions/respond":
+            return await _interaction_response(
+                params, rpc_id, identity, wrapped=False)
         return _error(rpc_id, -32601, f"method not found: {method}")
 
     @app.api_route("/worker-proxy/{agent_id}/{path:path}",
@@ -437,15 +462,32 @@ def create_app(tm: TaskManager | None = None,
             action = command["action"]
             if action == "agents/list":
                 from hermes.tools import HermesTools
+                from orchestrator import agent_profile_store
 
                 agents = HermesTools(tm, policy)._resolve_agents()
-                public = [{
-                    "id": agent_id,
-                    "enabled": info.get("enabled") is not False,
-                    "online": info.get("online"),
-                    "skills": info.get("skills") or [],
-                    "profile_id": info.get("profile_id"),
-                } for agent_id, info in sorted(agents.items())]
+                public = []
+                for agent_id, info in sorted(agents.items()):
+                    profile = (
+                        agent_profile_store.profile_policy(
+                            tm.conn, info["profile_id"])
+                        if info.get("profile_id") else None
+                    )
+                    public.append({
+                        "id": agent_id,
+                        "enabled": info.get("enabled") is not False,
+                        "online": info.get("online"),
+                        "skills": info.get("skills") or [],
+                        "profile_id": info.get("profile_id"),
+                        "runtime_policy": ({
+                            "model": profile.get("model"),
+                            "allowed_models": (
+                                profile.get("allowed_models") or []),
+                            "reasoning_effort": profile.get(
+                                "reasoning_effort"),
+                            "allowed_reasoning_efforts": profile.get(
+                                "allowed_reasoning_efforts") or [],
+                        } if profile else None),
+                    })
                 message = _text_message(json.dumps(
                     {"agents": public}, ensure_ascii=False), context_id)
                 return _result(rpc_id, {"message": message})
@@ -470,6 +512,65 @@ def create_app(tm: TaskManager | None = None,
                     context_id=context_id,
                     wrapped=True,
                 )
+            if action == "interactions/respond":
+                return await _interaction_response(
+                    {
+                        "interaction_id": command.get("interaction_id"),
+                        "outcome": command.get("outcome"),
+                        "note": command.get("note"),
+                    },
+                    rpc_id,
+                    identity,
+                    context_id=context_id,
+                    wrapped=True,
+                )
+            if action.startswith("supervision/"):
+                from orchestrator import supervision_store
+
+                try:
+                    if action == "supervision/register":
+                        if not context_id:
+                            raise ValueError(
+                                "supervision/register requires contextId")
+                        watch = supervision_store.register_watch(
+                            tm.conn,
+                            peer=identity["peer"],
+                            context_id=context_id,
+                            task_id=command.get("task_id"),
+                        )
+                        payload = {
+                            "status": watch["status"],
+                            "watch_id": watch["watch_id"],
+                            "task_id": watch["task_id"],
+                            "context_id": watch["context_id"],
+                        }
+                    elif action == "supervision/pull":
+                        payload = {"notifications":
+                            supervision_store.pull_notifications(
+                                tm.conn,
+                                peer=identity["peer"],
+                                watch_ids=command.get("watch_ids") or [],
+                                limit=command.get("limit") or 20,
+                            )}
+                    elif action == "supervision/ack":
+                        payload = supervision_store.acknowledge_notification(
+                            tm.conn,
+                            peer=identity["peer"],
+                            notification_id=command.get("notification_id"),
+                        )
+                    else:
+                        payload = supervision_store.stop_watch(
+                            tm.conn,
+                            peer=identity["peer"],
+                            task_id=command.get("task_id"),
+                        )
+                except PermissionError as exc:
+                    return _error(rpc_id, -32003, str(exc))
+                except (KeyError, TypeError, ValueError) as exc:
+                    return _error(rpc_id, -32602, str(exc))
+                message = _text_message(
+                    json.dumps(payload, ensure_ascii=False), context_id)
+                return _result(rpc_id, {"message": message})
             agent_id = str(command.get("agent") or "").strip()
             text = str(command.get("objective") or "").strip()
             if not agent_id or not text:
@@ -480,6 +581,10 @@ def create_app(tm: TaskManager | None = None,
             metadata = {
                 "project": command.get("project"),
                 "workspace": command.get("workspace"),
+                "title": command.get("title"),
+                "summary": command.get("summary"),
+                "model": command.get("model"),
+                "reasoning_effort": command.get("reasoning_effort"),
             }
         else:
             claimed = (metadata.get("agent") or "").strip()
@@ -491,6 +596,17 @@ def create_app(tm: TaskManager | None = None,
         agent, err = _resolve_agent(tm.conn, agent_id)
         if err:
             return _error(rpc_id, -32602, err)
+        from orchestrator.runtime_config import (
+            normalize_runtime_config,
+            resolve_runtime_config,
+        )
+        try:
+            requested_runtime = normalize_runtime_config(
+                metadata.get("model"), metadata.get("reasoning_effort"))
+            runtime_config = resolve_runtime_config(
+                tm.conn, agent_id=agent_id, requested=requested_runtime)
+        except (PermissionError, TypeError, ValueError) as exc:
+            return _error(rpc_id, -32602, str(exc))
         try:
             execution_workspace = (
                 normalize_execution_workspace(metadata["workspace"])
@@ -498,6 +614,24 @@ def create_app(tm: TaskManager | None = None,
             )
         except (TypeError, ValueError) as exc:
             return _error(rpc_id, -32602, str(exc))
+        try:
+            require_structured_workspace(text, execution_workspace)
+        except ValueError as exc:
+            return _error(rpc_id, -32602, str(exc))
+        display_title = metadata.get("title")
+        objective_summary = metadata.get("summary")
+        for key, value, maximum in (
+                ("title", display_title, 100),
+                ("summary", objective_summary, 500)):
+            if value is not None and (
+                    not isinstance(value, str) or not value.strip()
+                    or len(value.strip()) > maximum):
+                return _error(
+                    rpc_id, -32602,
+                    f"{key} 必须是 1-{maximum} 字符的非空字符串")
+        display_title = display_title.strip() if display_title else None
+        objective_summary = (
+            objective_summary.strip() if objective_summary else None)
 
         collaboration_id = None
         a2a_context = None
@@ -521,6 +655,14 @@ def create_app(tm: TaskManager | None = None,
             text,
             project=metadata.get("project"),
             collaboration_id=collaboration_id,
+            context={
+                **({"display_title": display_title}
+                   if display_title else {}),
+                **({"objective_summary": objective_summary}
+                   if objective_summary else {}),
+                **({"runtime_config": runtime_config}
+                   if runtime_config else {}),
+            } or None,
             execution_workspace=execution_workspace,
         )
         if a2a_context is not None:
@@ -543,6 +685,11 @@ def create_app(tm: TaskManager | None = None,
                     "contextId": context_id,
                     **({"workspace": execution_workspace}
                        if execution_workspace else {}),
+                    **({"title": display_title} if display_title else {}),
+                    **({"summary": objective_summary}
+                       if objective_summary else {}),
+                    **({"runtime_config": runtime_config}
+                       if runtime_config else {}),
                 },
                 based_on_revision=1,
                 idempotency_key=f"a2a-task-request:{tid}",
@@ -556,6 +703,12 @@ def create_app(tm: TaskManager | None = None,
                     "conversation_id": a2a_context["conversation_id"],
                     "collaboration_id": collaboration_id,
                 },
+            )
+        if runtime_config:
+            _record(
+                "task.runtime_config.selected",
+                tid,
+                {"agent_id": agent_id, "runtime_config": runtime_config},
             )
         decision = policy.decide(tm.conn, text)
         if decision.action == "ask":
@@ -660,6 +813,48 @@ def create_app(tm: TaskManager | None = None,
             return _error(rpc_id, -32602, f"task not found: {task_id}")
         task = _to_a2a(tm.conn, row, context_id=context_id)
         return _result(rpc_id, {"task": task} if wrapped else task)
+
+    async def _interaction_response(
+            params: dict, rpc_id, identity: dict, *,
+            context_id: str | None = None,
+            wrapped: bool = False) -> JSONResponse:
+        """Let an authenticated Hermes peer decide Hermes-routed intents."""
+        if identity.get("kind") != "hub":
+            return _error(
+                rpc_id, -32003,
+                "原生 Agent 交互只能由已认证 Hermes peer 或用户 WebUI 处理")
+        interaction_id = params.get("interaction_id") or params.get("id")
+        outcome = params.get("outcome")
+        if not interaction_id:
+            return _error(rpc_id, -32602, "interaction_id 必填")
+        if outcome not in {"allowed-once", "rejected"}:
+            return _error(
+                rpc_id, -32602,
+                "outcome 必须是 allowed-once 或 rejected")
+        note = params.get("note") or ""
+        if not isinstance(note, str) or len(note) > 2000:
+            return _error(
+                rpc_id, -32602, "note 必须是至多 2000 字符的字符串")
+        try:
+            native_result = await tm.respond_agent_interaction(
+                interaction_id,
+                response={"outcome": outcome, "note": note.strip()},
+                requested_by="hermes",
+            )
+        except PermissionError as exc:
+            return _error(rpc_id, -32003, str(exc))
+        except (KeyError, ValueError, RuntimeError) as exc:
+            return _error(rpc_id, -32602, str(exc))
+        result = {
+            "status": "responded",
+            "interaction_id": interaction_id,
+            "outcome": outcome,
+            "native_result": native_result,
+        }
+        if wrapped:
+            return _result(rpc_id, {"message": _text_message(
+                json.dumps(result, ensure_ascii=False), context_id)})
+        return _result(rpc_id, result)
 
     def _tasks_get(params: dict, rpc_id, *, context_id: str | None = None,
                    wrapped: bool = False) -> JSONResponse:

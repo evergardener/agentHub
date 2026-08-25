@@ -201,6 +201,78 @@ async def test_execution_workspace_is_sent_to_native_adapter(
         str(execution_workspace.resolve())
 
 
+async def test_profile_allowed_runtime_config_is_forwarded_and_snapshotted(
+        tmp_path, monkeypatch):
+    from orchestrator import agent_profile_store, collaboration_store, state_store
+    from orchestrator.a2a_client import A2aClient
+    from orchestrator.task_manager import TaskManager
+
+    client = FakeA2aClient(native=True)
+    monkeypatch.setattr(
+        A2aClient, "for_agent", classmethod(
+            lambda cls, agent_name, direct_endpoint, timeout=30: client))
+    tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
+    agent_profile_store.seed_catalog(tm.conn)
+    state_store.update_heartbeat(
+        tm.conn, "codex", endpoint="http://fake", skills=["coding"])
+    assert agent_profile_store.assign_seed_profile(tm.conn, "codex")
+    conversation_id = collaboration_store.create_conversation(tm.conn)
+    collaboration_id = collaboration_store.create_collaboration(
+        tm.conn, conversation_id=conversation_id, objective="runtime config")
+    task_id = tm.create_task(
+        "run validation", collaboration_id=collaboration_id,
+        context={"runtime_config": {
+            "model": "gpt-5.6-luna", "reasoning_effort": "max"}},
+    )
+
+    await (await tm.delegate_task(task_id, "http://fake", "codex"))
+
+    assert client.sent[0]["metadata"]["model"] == "gpt-5.6-luna"
+    assert client.sent[0]["metadata"]["reasoningEffort"] == "max"
+    binding = collaboration_store.get_current_agent_session(
+        tm.conn, task_id, "codex")
+    snapshot = json.loads(binding["context_snapshot_json"])
+    assert snapshot["runtime_config"] == {
+        "model": "gpt-5.6-luna", "reasoning_effort": "max"}
+
+
+async def test_native_session_rejects_runtime_config_change(
+        tmp_path, monkeypatch):
+    from orchestrator import agent_profile_store, collaboration_store, state_store
+    from orchestrator.a2a_client import A2aClient
+    from orchestrator.task_manager import TaskManager
+
+    client = FakeA2aClient(native=True)
+    monkeypatch.setattr(
+        A2aClient, "for_agent", classmethod(
+            lambda cls, agent_name, direct_endpoint, timeout=30: client))
+    tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
+    agent_profile_store.seed_catalog(tm.conn)
+    state_store.update_heartbeat(
+        tm.conn, "codex", endpoint="http://fake", skills=["coding"])
+    assert agent_profile_store.assign_seed_profile(tm.conn, "codex")
+    conversation_id = collaboration_store.create_conversation(tm.conn)
+    collaboration_id = collaboration_store.create_collaboration(
+        tm.conn, conversation_id=conversation_id, objective="runtime pin")
+    task_id = tm.create_task(
+        "implement", collaboration_id=collaboration_id,
+        context={"runtime_config": {
+            "model": "gpt-5.6-terra", "reasoning_effort": "medium"}},
+    )
+    await (await tm.delegate_task(task_id, "http://fake", "codex"))
+    tm.conn.execute(
+        "UPDATE tasks SET plan_context_json = ? WHERE id = ?;",
+        (json.dumps({"runtime_config": {
+            "model": "gpt-5.6-luna", "reasoning_effort": "max"}}), task_id),
+    )
+    tm.conn.commit()
+
+    with pytest.raises(RuntimeError, match="runtime config changed"):
+        await tm.delegate_task(task_id, "http://fake", "codex")
+
+    assert len(client.sent) == 1
+
+
 async def test_execution_workspace_must_fit_agent_profile_roots(
         tmp_path, monkeypatch):
     from orchestrator import agent_profile_store, state_store

@@ -32,6 +32,24 @@ RUN apt-get update \
 
 # ── 运行时 ──
 FROM ${REGISTRY}/python:${PYTHON_TAG}@${PYTHON_DIGEST}
+
+# Debian util-linux security update for CVE-2026-53612 through CVE-2026-53615.
+ARG UTIL_LINUX_VERSION=2.41.5-0+deb13u1
+ARG BSDUTILS_VERSION=1:2.41.5-0+deb13u1
+ARG LOGIN_VERSION=1:4.16.0-2+really2.41.5-0+deb13u1
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bsdutils="${BSDUTILS_VERSION}" \
+      libblkid1="${UTIL_LINUX_VERSION}" \
+      liblastlog2-2="${UTIL_LINUX_VERSION}" \
+      libmount1="${UTIL_LINUX_VERSION}" \
+      libsmartcols1="${UTIL_LINUX_VERSION}" \
+      libuuid1="${UTIL_LINUX_VERSION}" \
+      login="${LOGIN_VERSION}" \
+      mount="${UTIL_LINUX_VERSION}" \
+      util-linux="${UTIL_LINUX_VERSION}" \
+ && rm -rf /var/lib/apt/lists/*
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/src \
     LAS_WORKSPACE=/data/workspace

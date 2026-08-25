@@ -1270,6 +1270,8 @@ const S = {
   evCount: 0,
   EV_CAP: 300,           // 事件流 DOM 上限
   detailId: null,
+  taskDetailTab: "goals",
+  taskDetailScrolls: new Map(),
   collaborationId: null,
   collaborations: [],
   linkedTasks: [],
@@ -1790,14 +1792,20 @@ function renderInteractions(items) {
     try { p = JSON.parse(x.payload_json || "{}"); } catch (_) {}
     if (x.kind === "approval") {
       const view = p.toolView || {};
+      const semantic = view.semanticIntent || {};
       const detail = view.command || (view.paths || []).join(", ") ||
                      view.title || "未获得可审查的命令/路径";
       const allowDisabled = p.inspectable === true ? "" : " disabled";
+      const blockedReason = p.inspectable === true ? "" :
+        `<div class="sub" style="margin-bottom:8px;color:var(--warn)">` +
+        `无法批准此请求：${esc(semantic.reason || "任务缺少可验证的结构化执行边界")}。` +
+        `请拒绝后让 Hermes 使用绝对 workspace 重新创建任务。</div>`;
       return `<div class="appr">
         <div class="top"><span class="tid">${esc(x.agent_id)}</span>${badge("blocked")}</div>
         <div class="obj2"><b>${esc(p.toolName || "tool")}</b> · ${esc(p.reason || "请求执行原生工具")}</div>
         <div class="mono" style="margin-bottom:8px;max-height:120px">${esc(detail)}</div>
         <div class="sub" style="margin-bottom:8px;color:var(--mut)">${esc(x.operation || "未关联 ActionIntent")} · ${esc(x.action_intent_status || "pending")}</div>
+        ${blockedReason}
         ${S.role !== "viewer" ? `<button class="btn ok" data-i-allow="${esc(x.id)}"${allowDisabled}>逐次允许</button>
         <button class="btn no" data-i-reject="${esc(x.id)}">拒绝</button>` : `<span style="font-size:12px;color:var(--mut)">只读角色</span>`}
       </div>`;
@@ -2050,7 +2058,46 @@ function renderTaskSwitcher() {
     button.onclick = () => openDetail(button.dataset.taskSwitch, {syncConversation: false}));
 }
 
-function selectTaskDetailTab(name) {
+function taskDetailScrollKey(taskId = S.detailId, tab = S.taskDetailTab) {
+  return `${taskId || ""}:${tab || "goals"}`;
+}
+
+function taskDetailPanel(tab = S.taskDetailTab) {
+  return document.querySelector(`[data-task-detail-panel="${CSS.escape(tab)}"]`);
+}
+
+function rememberTaskDetailScroll() {
+  const panel = taskDetailPanel();
+  if (!panel || !S.detailId) return;
+  S.taskDetailScrolls.set(taskDetailScrollKey(), panel.scrollTop);
+}
+
+function restoreTaskDetailScroll() {
+  const taskId = S.detailId;
+  const tab = S.taskDetailTab;
+  const position = S.taskDetailScrolls.get(taskDetailScrollKey(taskId, tab)) || 0;
+  requestAnimationFrame(() => {
+    if (S.detailId !== taskId || S.taskDetailTab !== tab) return;
+    const panel = taskDetailPanel(tab);
+    if (panel) panel.scrollTop = position;
+  });
+}
+
+function bindTaskDetailScroll() {
+  document.querySelectorAll("[data-task-detail-panel]").forEach(panel => {
+    panel.onscroll = () => {
+      if (!S.detailId) return;
+      S.taskDetailScrolls.set(
+        taskDetailScrollKey(S.detailId, panel.dataset.taskDetailPanel),
+        panel.scrollTop,
+      );
+    };
+  });
+}
+
+function selectTaskDetailTab(name, {rememberScroll = true} = {}) {
+  if (rememberScroll) rememberTaskDetailScroll();
+  S.taskDetailTab = name;
   document.querySelectorAll("[data-task-detail-tab]").forEach(item => {
     const active = item.dataset.taskDetailTab === name;
     item.classList.toggle("active", active);
@@ -2058,9 +2105,12 @@ function selectTaskDetailTab(name) {
   });
   document.querySelectorAll("[data-task-detail-panel]").forEach(panel =>
     panel.hidden = panel.dataset.taskDetailPanel !== name);
+  restoreTaskDetailScroll();
 }
 
 async function openDetail(id, {syncConversation = true} = {}) {
+  rememberTaskDetailScroll();
+  if (S.detailId !== id) S.taskDetailTab = "goals";
   S.detailId = id;
   const d = await fetchJson("/api/tasks/" + encodeURIComponent(id));
   if (d.error) { showToast(d.error, "error"); return; }
@@ -2171,13 +2221,16 @@ async function openDetail(id, {syncConversation = true} = {}) {
 
   $("#d-body").innerHTML = `<div class="task-overview">
     <div class="task-detail-tabs" role="tablist">
-      <button class="task-detail-tab active" type="button" role="tab" aria-selected="true" data-task-detail-tab="goals">目标与交付</button>
+      <button class="task-detail-tab" type="button" role="tab" aria-selected="false" data-task-detail-tab="goals">目标与交付</button>
       <button class="task-detail-tab" type="button" role="tab" aria-selected="false" data-task-detail-tab="execution">执行记录</button>
     </div>
     <div class="task-detail-panel" role="tabpanel" data-task-detail-panel="goals">
       <section class="task-detail-block"><div class="task-section-label">任务目标</div>
-        <div class="task-objective-text">${esc(d.dispatched_objective || "（空）")}</div>
+        <div class="task-objective-text"><strong>${esc(d.objective_title || "（空）")}</strong></div>
+        ${d.objective_summary ? `<div class="task-result">${esc(d.objective_summary)}</div>` : ""}
         <div class="task-source">${esc(sourceNotes[d.instruction_source] || "数据库中的任务目标原文")}</div>
+        <details class="tool-card" style="margin-top:10px"><summary><strong>查看完整下发指令</strong>
+          <small>审计原文</small></summary><div class="task-objective-text">${esc(d.dispatched_objective || "（空）")}</div></details>
       </section>
       <section class="task-detail-block"><div class="task-section-label">交付物</div>
         <div class="delivery-list">${deliverables}</div><div class="artifact-actions">${artifactButtons}</div>
@@ -2216,8 +2269,9 @@ async function openDetail(id, {syncConversation = true} = {}) {
     button.onclick = () => decideAcceptance(button.dataset.reworkTask, "request-rework", button));
   document.querySelectorAll("[data-task-detail-tab]").forEach(button =>
     button.onclick = () => selectTaskDetailTab(button.dataset.taskDetailTab));
+  bindTaskDetailScroll();
+  selectTaskDetailTab(S.taskDetailTab, {rememberScroll: false});
   updateComposer();
-  $("#d-body").scrollTop = 0;
 }
 
 function renderEmptyConversation() {
@@ -2238,6 +2292,7 @@ function renderEmptyConversation() {
 
 function renderEmptyTask(message = "选择 Session 后，这里显示它创建的任务、审批、产物和介入操作。") {
   S.detailId = null;
+  S.taskDetailTab = "goals";
   S.currentTaskDetail = null;
   S.currentSession = null;
   S.currentSessionCaps = {};
@@ -2255,8 +2310,6 @@ async function loadConversationPanel(id, {preserveScroll = false} = {}) {
   if ([...picker.options].some(option => option.value === id)) picker.value = id;
   const transcript = $("#chat-transcript");
   const previousScroll = transcript.scrollTop;
-  const taskPane = $("#d-body");
-  const previousTaskScroll = taskPane.scrollTop;
   const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
   $("#chat-refresh-state").textContent = "同步中…";
   const d = await fetchJson("/api/collaborations/" + encodeURIComponent(id));
@@ -2271,19 +2324,19 @@ async function loadConversationPanel(id, {preserveScroll = false} = {}) {
   $("#chat-badge").innerHTML = badge(c.phase);
   const nativeSessions = (d.sessions || []).filter(s => s.native_session_id).length;
   const agents = [...new Set((d.tasks || []).map(task => task.assigned_to).filter(Boolean))];
+  const transcriptEntries = [...(d.messages || []), ...(d.agent_activity || [])]
+    .sort((left, right) => String(left.created_at || "").localeCompare(String(right.created_at || "")));
   $("#chat-subtitle").innerHTML =
-    `<span>${esc(c.id)}</span><span>${esc((d.messages || []).length)} 条消息</span>` +
+    `<span>${esc(c.id)}</span><span>${esc(transcriptEntries.length)} 条消息/活动</span>` +
     `<span>${esc((d.tasks || []).length)} 个任务</span><span>${esc(nativeSessions)} 个原生 Session</span>` +
     `<span>Agent ${esc(agents.join("、") || "未分配")}</span><span>控制权 ${esc(c.controller)}</span>`;
-  transcript.innerHTML = renderMessageList(d.messages || []);
+  transcript.innerHTML = renderMessageList(transcriptEntries);
   document.querySelectorAll("[data-session-card]").forEach(card =>
     card.classList.toggle("active", card.dataset.sessionCard === id));
   S.linkedTasks = d.tasks || [];
   if (S.linkedTasks.length) {
     const selected = S.linkedTasks.find(task => task.id === S.detailId) || S.linkedTasks[0];
-    const sameTask = selected.id === S.detailId;
     await openDetail(selected.id, {syncConversation: false});
-    if (preserveScroll && sameTask) taskPane.scrollTop = previousTaskScroll;
   } else {
     renderEmptyTask("此 Session 尚未创建任务；对话上下文仍会持续保留。");
   }

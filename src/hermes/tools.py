@@ -16,7 +16,7 @@ from uuid import uuid4
 import yaml
 
 from hermes.policy import ApprovalPolicy
-from orchestrator.task_manager import TaskManager
+from orchestrator.task_manager import TaskManager, require_structured_workspace
 
 DEFAULT_AGENTS = Path(__file__).resolve().parents[2] / "config" / "agents.yaml"
 
@@ -40,9 +40,19 @@ TOOL_SCHEMAS: list[dict] = [
                       "items": {"type": "object", "properties": {
                           "key": {"type": "string"},
                           "objective": {"type": "string"},
+                          "title": {"type": "string", "maxLength": 100},
+                          "summary": {"type": "string", "maxLength": 500},
                           "agent_id": {"type": "string"},
+                          "model": {"type": "string",
+                                    "description": "必须来自 Agent Profile "
+                                                   "allowed_models"},
+                          "reasoning_effort": {"type": "string",
+                                               "description": "必须来自 "
+                                                              "Agent Profile "
+                                                              "allowed_reasoning_efforts"},
                           "workspace": {"type": "string",
-                                        "description": "Agent 执行的绝对工作区路径；"
+                                        "description": "现有代码仓库任务必须填写的绝对"
+                                                       "工作区路径；不得只写在 objective；"
                                                        "写操作仍需 ActionIntent 审批"},
                           "depends_on": {"type": "array",
                                          "items": {"type": "string"}},
@@ -65,9 +75,18 @@ TOOL_SCHEMAS: list[dict] = [
                        "必须使用 create_task_plan。返回 task_id。",
         "parameters": {"type": "object", "properties": {
             "objective": {"type": "string", "description": "任务目标"},
+            "title": {"type": "string", "maxLength": 100,
+                      "description": "面向 WebUI 的简洁任务标题"},
+            "summary": {"type": "string", "maxLength": 500,
+                        "description": "面向 WebUI 的简要说明"},
             "project": {"type": "string"},
+            "agent_id": {"type": "string",
+                         "description": "指定 model 或 reasoning_effort 时必填"},
+            "model": {"type": "string"},
+            "reasoning_effort": {"type": "string"},
             "workspace": {"type": "string",
-                          "description": "Agent 执行的绝对工作区路径"},
+                          "description": "现有代码仓库任务必须填写的绝对工作区路径；"
+                                         "不得只写在 objective，否则原生工具请求无法批准"},
             "depends_on": {"type": "array", "items": {"type": "string"},
                            "description": "依赖的 task_id 列表"},
         }, "required": ["objective"]}}},
@@ -96,6 +115,20 @@ TOOL_SCHEMAS: list[dict] = [
             "task_id": {"type": "string"},
             "timeout_seconds": {"type": "integer", "default": 600},
         }, "required": ["task_id"]}}},
+    {"type": "function", "function": {
+        "name": "respond_agent_interaction",
+        "description": "回复 wait_task 返回的原生 Agent 交互。仅可批准 "
+                       "inspectable=true 且 action_intent_status=awaiting_hermes "
+                       "的请求；awaiting_user 必须由用户在 WebUI 决定。服务端会再次"
+                       "校验权限并签发一次性 ActionIntent receipt。",
+        "parameters": {"type": "object", "properties": {
+            "interaction_id": {"type": "string"},
+            "outcome": {"type": "string",
+                        "enum": ["allowed-once", "rejected"]},
+            "note": {"type": "string",
+                     "maxLength": 2000,
+                     "description": "核对目标、影响和回滚后的决策依据"},
+        }, "required": ["interaction_id", "outcome"]}}},
     {"type": "function", "function": {
         "name": "review_task",
         "description": "复审已完成任务：approved=true 验收（自动解锁依赖任务），"
@@ -249,6 +282,17 @@ class HermesTools:
         task_plan_store.validate_steps(steps)
         prepared: list[dict] = []
         for step in steps:
+            require_structured_workspace(
+                step["objective"], step.get("workspace"))
+            for key, value, maximum in (
+                    ("title", step.get("title"), 100),
+                    ("summary", step.get("summary"), 500)):
+                if value is not None and (
+                        not isinstance(value, str) or not value.strip()
+                        or len(value.strip()) > maximum):
+                    raise ValueError(
+                        f"步骤 {step['key']} 的 {key} 必须是 "
+                        f"1-{maximum} 字符的非空字符串")
             agent = self._agent_or_error(step["agent_id"])
             if "error" in agent:
                 if agent.get("reason") == "agent_disabled":
@@ -271,6 +315,15 @@ class HermesTools:
                 raise PermissionError(
                     f"步骤 {step['key']} 的操作超出 Profile: "
                     f"{sorted(disallowed | outside)}")
+            from orchestrator.runtime_config import (
+                normalize_runtime_config,
+                resolve_runtime_config,
+            )
+            requested_runtime = normalize_runtime_config(
+                step.get("model"), step.get("reasoning_effort"))
+            runtime_config = resolve_runtime_config(
+                self.tm.conn, agent_id=step["agent_id"],
+                requested=requested_runtime)
             prepared.append({
                 **step,
                 "profile_id": profile_id,
@@ -279,6 +332,7 @@ class HermesTools:
                 "role_prompt": profile.get("role_prompt"),
                 "responsibilities": profile.get("responsibilities") or [],
                 "timeout_seconds": profile["timeout_seconds"],
+                "runtime_config": runtime_config,
             })
 
         resolved: list[dict] = []
@@ -298,8 +352,14 @@ class HermesTools:
                 "expected_operations": step["expected_operations"],
                 "expected_artifacts": step.get("expected_artifacts") or [],
                 "acceptance_criteria": step["acceptance_criteria"],
+                **({"display_title": step["title"].strip()}
+                   if step.get("title") else {}),
+                **({"objective_summary": step["summary"].strip()}
+                   if step.get("summary") else {}),
                 **({"execution_workspace": step["workspace"]}
                    if step.get("workspace") else {}),
+                **({"runtime_config": step["runtime_config"]}
+                   if step.get("runtime_config") else {}),
             }
             task_id = self.tm.create_task(
                 step["objective"], project=project,
@@ -331,10 +391,51 @@ class HermesTools:
     async def _tool_create_task(self, objective: str,
                                 project: str | None = None,
                                 depends_on: list[str] | None = None,
-                                workspace: str | None = None) -> dict:
+                                workspace: str | None = None,
+                                title: str | None = None,
+                                summary: str | None = None,
+                                agent_id: str | None = None,
+                                model: str | None = None,
+                                reasoning_effort: str | None = None) -> dict:
+        require_structured_workspace(objective, workspace)
+        for key, value, maximum in (
+                ("title", title, 100), ("summary", summary, 500)):
+            if value is not None and (
+                    not isinstance(value, str) or not value.strip()
+                    or len(value.strip()) > maximum):
+                raise ValueError(
+                    f"{key} 必须是 1-{maximum} 字符的非空字符串")
+        from orchestrator.runtime_config import (
+            normalize_runtime_config,
+            resolve_runtime_config,
+        )
+        requested_runtime = normalize_runtime_config(model, reasoning_effort)
+        if requested_runtime and not agent_id:
+            raise ValueError(
+                "agent_id is required with model or reasoning_effort")
+        if requested_runtime and agent_id:
+            agent = self._agent_or_error(agent_id)
+            if "error" in agent:
+                return agent
+        runtime_config = (
+            resolve_runtime_config(
+                self.tm.conn, agent_id=agent_id,
+                requested=requested_runtime)
+            if requested_runtime and agent_id else None
+        )
         task_id = self.tm.create_task(objective, project=project,
                                       collaboration_id=self.collaboration_id,
                                       depends_on=depends_on,
+                                      context={
+                                          **({"display_title": title.strip()}
+                                             if title else {}),
+                                          **({"objective_summary": summary.strip()}
+                                             if summary else {}),
+                                          **({"agent_id": agent_id}
+                                             if runtime_config else {}),
+                                          **({"runtime_config": runtime_config}
+                                             if runtime_config else {}),
+                                      } or None,
                                       execution_workspace=workspace)
         return {"task_id": task_id, "status": "created",
                 "risk": self.policy.classify(objective)}
@@ -391,7 +492,26 @@ class HermesTools:
         row = self._task_or_error(task_id)
         return {"task_id": task_id, "status": status,
                 "objective": row.get("objective"),
-                "artifacts": self._artifacts_summary(task_id)}
+                "artifacts": self._artifacts_summary(task_id),
+                "pending_interactions": self._pending_interactions(task_id)}
+
+    async def _tool_respond_agent_interaction(
+            self, interaction_id: str, outcome: str,
+            note: str = "") -> dict:
+        if outcome not in {"allowed-once", "rejected"}:
+            raise ValueError(
+                "outcome must be allowed-once or rejected")
+        if not isinstance(note, str) or len(note) > 2000:
+            raise ValueError("note 必须是至多 2000 字符的字符串")
+        native_result = await self.tm.respond_agent_interaction(
+            interaction_id,
+            response={"outcome": outcome, "note": note},
+            requested_by="hermes",
+        )
+        return {
+            "status": "responded", "interaction_id": interaction_id,
+            "outcome": outcome, "native_result": native_result,
+        }
 
     async def _tool_get_task_artifacts(self, task_id: str) -> dict:
         row = self._task_or_error(task_id)
@@ -454,6 +574,12 @@ class HermesTools:
                             "responsibilities": profile["responsibilities"],
                             "allowed_operations": profile["allowed_operations"],
                             "denied_operations": profile["denied_operations"],
+                            "model": profile.get("model"),
+                            "allowed_models": profile.get("allowed_models") or [],
+                            "reasoning_effort": profile.get(
+                                "reasoning_effort"),
+                            "allowed_reasoning_efforts": profile.get(
+                                "allowed_reasoning_efforts") or [],
                             "status": profile["status"],
                         } if profile else None)})
         return {"agents": out}
@@ -485,6 +611,12 @@ class HermesTools:
         from orchestrator import state_store
         return [{"name": a["name"], "type": a["type"]}
                 for a in state_store.list_artifacts(self.tm.conn, task_id)]
+
+    def _pending_interactions(self, task_id: str) -> list[dict]:
+        from orchestrator import collaboration_store
+
+        return collaboration_store.pending_interaction_views(
+            self.tm.conn, task_id)
 
     def _artifact_veto_reason(self, objective: str, task_id: str) -> str | None:
         """目标声明创建文件但无实际产出时返回驳回理由，否则 None。"""

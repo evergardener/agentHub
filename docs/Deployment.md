@@ -445,6 +445,28 @@ compose 默认 `LAS_WEBUI_REQUIRE_AUTH=true`，缺 token 或 session secret 会�
 发布到宿主机 loopback。跨主机开放必须在可信反向代理上启用 HTTPS，同时设置
 `LAS_WEBUI_COOKIE_SECURE=true`；不得以裸 HTTP 暴露到局域网或公网。
 
+### 3.8 qishuo 异步任务监督
+
+qishuo 使用 profile-local `agenthub-supervisor` plugin，不新增公网端口，也不让
+Hermes 直连数据库或 NATS。Plugin 复用 peer 的 JSON-RPC route
+`http://127.0.0.1:8300/agenthub/a2a` 和
+`AGENTHUB_A2A_TOKEN`，在 `tasks/create` 成功后把原 gateway session、A2A
+context 和 Task 登记为持久 watch。State Writer 在 Task 进入审批、原生交互、
+blocked、failed/cancelled 或等待验收时，同事务写入租约 outbox；Plugin 拉取后只
+向原 session 注入 ID/状态 envelope，Hermes 再通过 `tasks/get` 读取权威详情。
+
+迁移 `012_supervision_outbox.sql` 会创建 `supervision_watches` 和
+`supervision_outbox`。生产升级仍必须先执行本章第 5 节备份 Gate。部署 qishuo
+profile 前，使用 `scripts/install-qishuo-agenthub.py` 创建 profile 备份、演练回退，
+并同步安装 `agenthub-orchestration` skill、prompt appendix 与 supervisor plugin；
+完整命令和真实验收矩阵见 `docs/Hermes_AgentHub_Profile_Integration.md`。
+
+只有 qishuo profile 的 `plugins.entries.agenthub-supervisor` 可设置
+`allow_gateway_injection: true`。该授权仅允许投递到已有 gateway session，不授予
+任务审批或验收权限。通知 ACK 之前按租约重试；服务或 Hermes 重启不丢 watch。
+用户显式接受之前，Task 必须保持 `awaiting_acceptance`，supervisor 不得调用
+`tasks/accept`。
+
 ## 4. 日常操作速查
 
 | 操作 | 命令 |

@@ -38,8 +38,16 @@ def test_install_backup_and_rollback(tmp_path):
     (skill / "SKILL.md").write_text("skill", encoding="utf-8")
     appendix = tmp_path / "appendix.md"
     appendix.write_text("mandatory route", encoding="utf-8")
+    supervisor = tmp_path / "agenthub-supervisor"
+    supervisor.mkdir()
+    (supervisor / "plugin.yaml").write_text(
+        "name: agenthub-supervisor\n", encoding="utf-8")
+    (supervisor / "__init__.py").write_text(
+        "def register(ctx): pass\n", encoding="utf-8")
 
-    result = MODULE.install(profile, agenthub_env, skill, appendix)
+    result = MODULE.install(
+        profile, agenthub_env, skill, appendix,
+        supervisor_plugin_source=supervisor)
     backup = Path(result["backup"])
     assert result["rollback_drill"] == "passed"
     assert stat.S_IMODE(backup.stat().st_mode) == 0o700
@@ -48,6 +56,11 @@ def test_install_backup_and_rollback(tmp_path):
     assert set(config["a2a_agents"]) == {"unrelated", "agenthub"}
     assert config["a2a_agents"]["agenthub"]["url"].endswith("/agenthub")
     assert MODULE.PROMPT_START in config["agent"]["system_prompt"]
+    assert "agenthub-supervisor" in config["plugins"]["enabled"]
+    assert config["plugins"]["entries"]["agenthub-supervisor"][
+        "allow_gateway_injection"] is True
+    assert (profile / "plugins" / "agenthub-supervisor" /
+            "plugin.yaml").exists()
     assert "AGENTHUB_A2A_TOKEN=" + "t" * 48 in (
         profile / ".env").read_text()
 
@@ -56,6 +69,7 @@ def test_install_backup_and_rollback(tmp_path):
     assert yaml.safe_load((profile / "config.yaml").read_text()) == original
     assert (profile / ".env").read_text() == "KEEP=value\n"
     assert not (profile / "skills" / "agenthub-orchestration").exists()
+    assert not (profile / "plugins" / "agenthub-supervisor").exists()
 
 
 def test_manifest_does_not_contain_token(tmp_path):
@@ -67,6 +81,34 @@ def test_manifest_does_not_contain_token(tmp_path):
     backup, _ = MODULE._backup(profile)
     manifest = json.loads((backup / "manifest.json").read_text())
     assert token not in json.dumps(manifest)
+
+
+def test_backup_manifest_covers_skill_and_plugin_trees(tmp_path):
+    profile = tmp_path / "qishuo"
+    profile.mkdir()
+    (profile / "config.yaml").write_text("agent: {}\n", encoding="utf-8")
+    (profile / ".env").write_text("KEEP=value\n", encoding="utf-8")
+    skill = profile / "skills" / "agenthub-orchestration"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("old skill", encoding="utf-8")
+    plugin = profile / "plugins" / "agenthub-supervisor"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.yaml").write_text("name: old\n", encoding="utf-8")
+
+    backup, manifest = MODULE._backup(profile)
+
+    skill_entry = manifest["entries"]["skill"]
+    plugin_entry = manifest["entries"]["supervisor_plugin"]
+    assert skill_entry["sha256"] == MODULE._tree_sha256(
+        backup / "skill.before")
+    assert plugin_entry["sha256"] == MODULE._tree_sha256(
+        backup / "supervisor-plugin.before")
+    MODULE._verify_restore_drill(backup, manifest)
+
+    (backup / "skill.before" / "SKILL.md").write_text(
+        "tampered", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="rollback drill checksum failed: skill"):
+        MODULE._verify_restore_drill(backup, manifest)
 
 
 def test_install_replaces_managed_prompt_block(tmp_path):

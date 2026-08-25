@@ -1,6 +1,6 @@
 # qishuo Hermes → agentHub 生产接入
 
-状态：2026-08-22 单一 Hub peer 契约。
+状态：2026-08-24 单一 Hub peer + 持久监督契约。
 
 ## 边界
 
@@ -34,6 +34,12 @@ a2a_agents:
       token: ${AGENTHUB_A2A_TOKEN}
     timeout: 900
     capabilities: [orchestration, registry, approvals, artifacts]
+
+plugins:
+  enabled: [agenthub-supervisor]
+  entries:
+    agenthub-supervisor:
+      allow_gateway_injection: true
 ```
 
 profile `.env` 仅保存 `AGENTHUB_A2A_TOKEN`，权限必须为 `0600`。token 值与
@@ -55,7 +61,16 @@ qishuo 原生 `a2a_call` 不提供自定义 `metadata.agent`，因此 agentHub
    `task.id`）；
 5. `input-required` 时向用户请求批准，也可在 WebUI 审批中心处理；
 6. 使用同一 `context_id` 调用 `tasks/get/approve/reject`；
-7. 核对终态、产物和审计记录后汇报。
+7. `agenthub-supervisor` 持久轮询 agentHub outbox；发生审批、阻塞、失败或等待验收
+   时，以只含 ID/状态的可信 envelope 唤醒原 gateway session；
+8. Hermes 使用 envelope 中原 `context_id` 调用 `tasks/get`，处理并向用户汇报后
+   ACK；未 ACK 会按租约重投，重启后从 profile state 恢复；
+9. 核对终态、产物和审计记录后汇报，只有用户显式接受才能 `tasks/accept`。
+
+后台唤醒不授予任何审批权限。`awaiting_user` 必须留给 WebUI 用户，Hermes 只能
+处理 `inspectable=true` 且 `action_intent_status=awaiting_hermes` 的交互。Plugin
+不得把 objective、worker 内容、工具参数或审批 payload 注入模型上下文；先
+`tasks/get` 是强制的权威状态刷新。
 
 WebUI 审批中心同时列出委派前的 queued/input-required 门禁与 worker 已运行后
 产生的 blocked 原生审批；两者使用同一批准/拒绝按钮，但审计事件保留来源。
@@ -70,7 +85,8 @@ Kimi 停用时，`agents/list` 会标记 `enabled=false`；如用户仍指定 Ki
 
 1. 创建权限 `0700` 的时间戳备份目录；
 2. 复制 `config.yaml`、`.env` 和已有同名 skill，文件权限 `0600`；
-3. 生成 SHA-256 manifest，不记录密钥内容；
+3. 同时备份已有 `plugins/agenthub-supervisor`，生成 SHA-256 manifest，不记录
+   密钥内容；
 4. 在临时目录演练恢复并校验 hash 一致；
 5. 只在 Gate 通过后修改 profile；修改后检查 YAML、权限、peer 数量和
    skill 可见性，再重启 qishuo 运行时。
@@ -87,3 +103,32 @@ Kimi 停用时，`agents/list` 会标记 `enabled=false`；如用户仍指定 Ki
 - 写操作先返回 `input-required`，批准前 worker 无调用。
 - 用户指定 Kimi 时 Hermes 询问启用或改派，没有 Kimi 心跳探测/任务。
 - 对同一 task/context 继续两轮，不生成重复任务。
+- qishuo plugin doctor 通过，配置中仅该 profile 对 supervisor 开启
+  `allow_gateway_injection`；全局 Hermes 配置未修改。
+- 创建任务后工具结果出现 `agentHub supervision active`；让任务进入批准、阻塞或
+  等待验收，原 Hermes session 在一个轮询周期内被唤醒并先调用 `tasks/get`。
+- 暂停 Hermes 超过一个租约周期后恢复，收到同一个 `notification_id`；ACK 后不再
+  重投。Hermes/profile 重启后 watch 仍存在并继续监督。
+- 通知 envelope 不含 objective、worker 回复、tool args 或 approval payload；
+  `awaiting_user` 不会被 Hermes 自批，等待验收也不会自动 `tasks/accept`。
+
+安装或升级 profile-local skill/plugin（命令输出只含备份路径，不含 token）：
+
+```bash
+.venv/bin/python scripts/install-qishuo-agenthub.py \
+  --profile /Users/evergarden/.hermes/profiles/qishuo \
+  --agenthub-env .env \
+  --skill-source integrations/hermes-qishuo/agenthub-orchestration \
+  --prompt-appendix integrations/hermes-qishuo/system-prompt-appendix.md \
+  --supervisor-plugin-source integrations/hermes-qishuo/agenthub-supervisor
+```
+
+安装器会先创建可校验备份并演练恢复，再更新单一 peer、skill、prompt appendix、
+plugin 和 profile-local injection allowlist。完成后运行 plugin doctor 并重启 qishuo
+gateway。回退使用安装器输出的备份目录：
+
+```bash
+.venv/bin/python scripts/install-qishuo-agenthub.py \
+  --profile /Users/evergarden/.hermes/profiles/qishuo \
+  --rollback /Users/evergarden/.hermes/profiles/qishuo/backups/agenthub-unified-...
+```

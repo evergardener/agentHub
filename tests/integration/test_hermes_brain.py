@@ -5,9 +5,10 @@ durable consumer + TaskManager + HermesTools；LLM 用 ScriptedLLM 替身
 （按已见 tool result 数量推进剧本，断言每个工具结果）。
 
 场景：
-  A. 只读任务自动批准流：create → delegate(approval=auto) → wait → review → accepted
+  A. 只读任务自动批准流：create → delegate(approval=auto) → wait → review →
+     awaiting explicit user acceptance
   B. 对话审批流：重启 → needs_approval（任务不动）→ 用户"批准" →
-     approve_and_delegate（记录 task.approved 事件）→ 完成验收
+     approve_and_delegate（记录 task.approved 事件）→ 完成复审并等待用户验收
   C. 常驻授权流（直接驱动 HermesTools）：grant → delegate(approval=granted，
      记录 task.auto_approved) → revoke → 回到 needs_approval
 """
@@ -184,21 +185,21 @@ async def test_brain_readonly_auto_approve(tmp_path, monkeypatch):
                 return ("wait_task", {"task_id": tid, "timeout_seconds": 30})
             if n == 3:
                 return ("review_task", {"task_id": tid, "approved": True})
-            return "调研完成，结果已验收。"
+            return "调研完成并已复审，等待您验收。"
 
         llm = ScriptedLLM(handler)
         hermes = Hermes(tm, llm=llm, agents_path=agents_path)
         reply = await hermes.chat("帮我调研一下本地镜像加速方案")
 
-        assert reply == "调研完成，结果已验收。"
-        # create → delegate(auto) → wait(completed) → review(accepted)
+        assert reply == "调研完成并已复审，等待您验收。"
+        # create → delegate(auto) → wait(completed) → review(recommendation)
         assert llm.results[1]["approval"] == "auto"
         assert llm.results[1]["status"] == "delegated"
-        assert llm.results[2]["status"] == "completed"
-        assert llm.results[3]["status"] == "accepted"
+        assert llm.results[2]["status"] == "awaiting_acceptance"
+        assert llm.results[3]["status"] == "reviewed"
         row = tm.conn.execute("SELECT status FROM tasks WHERE id = ?;",
                               (box["tid"],)).fetchone()
-        assert row["status"] == "accepted"
+        assert row["status"] == "reviewed"
     finally:
         await _stop_harness(nats_proc, srv, thread, writer_stop, writer_task)
 
@@ -238,7 +239,7 @@ async def test_brain_write_needs_dialog_approval(tmp_path, monkeypatch):
                 return ("wait_task", {"task_id": tid, "timeout_seconds": 30})
             if n == 4:
                 return ("review_task", {"task_id": tid, "approved": True})
-            return "已重启完成并验收。"
+            return "已重启完成并复审，等待您验收。"
 
         llm = ScriptedLLM(handler)
         hermes = Hermes(tm, llm=llm, agents_path=agents_path)
@@ -253,7 +254,7 @@ async def test_brain_write_needs_dialog_approval(tmp_path, monkeypatch):
         assert row["assigned_to"] is None
 
         done = await hermes.chat("批准")
-        assert done == "已重启完成并验收。"
+        assert done == "已重启完成并复审，等待您验收。"
         assert llm.results[2]["approval"] == "user"
         # 对话即审批：task.approved 事件落库
         ev = tm.conn.execute(
@@ -262,7 +263,7 @@ async def test_brain_write_needs_dialog_approval(tmp_path, monkeypatch):
         assert ev is not None
         row = tm.conn.execute("SELECT status FROM tasks WHERE id = ?;",
                               (box["tid"],)).fetchone()
-        assert row["status"] == "accepted"
+        assert row["status"] == "reviewed"
     finally:
         await _stop_harness(nats_proc, srv, thread, writer_stop, writer_task)
 
@@ -300,7 +301,10 @@ async def test_tools_standing_grant_flow(tmp_path, monkeypatch):
         assert ev is not None
         w1 = await tools.dispatch(
             "wait_task", {"task_id": t1["task_id"], "timeout_seconds": 30})
-        assert w1["status"] == "completed"
+        assert w1["status"] == "awaiting_acceptance"
+        assert tm.conn.execute(
+            "SELECT status FROM tasks WHERE id = ?;", (t1["task_id"],)
+        ).fetchone()["status"] == "awaiting_acceptance"
 
         # 3. 撤销后回到 ask
         r = await tools.dispatch("revoke_grant", {"grant_id": g["grant_id"]})
@@ -364,6 +368,9 @@ async def test_dynamic_discovery_via_heartbeat(tmp_path, monkeypatch):
         assert d["status"] == "delegated", d
         w = await tools.dispatch(
             "wait_task", {"task_id": t["task_id"], "timeout_seconds": 30})
-        assert w["status"] == "completed"
+        assert w["status"] == "awaiting_acceptance"
+        assert tm.conn.execute(
+            "SELECT status FROM tasks WHERE id = ?;", (t["task_id"],)
+        ).fetchone()["status"] == "awaiting_acceptance"
     finally:
         await _stop_harness(nats_proc, srv, thread, writer_stop, writer_task)

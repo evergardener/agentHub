@@ -9,7 +9,12 @@ import pytest
 from adapters.codex.runner import CodexFailed
 from adapters.codex.session import CodexSessionAdapter
 from adapters.common import A2aTask
-from adapters.session import SessionCapabilityError, SessionHandle
+from adapters.session import (
+    SessionCapabilityError,
+    SessionHandle,
+    SessionMessage,
+    SessionTurnResult,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -255,6 +260,138 @@ async def test_explicit_workspace_is_used_for_start_and_resume(
         assert params["runtimeWorkspaceRoots"] == [
             str(execution_workspace.resolve())]
         assert params["sandbox"] == "read-only"
+
+
+async def test_task_runtime_config_is_validated_and_applied(
+        monkeypatch, tmp_path):
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    adapter = CodexSessionAdapter(timeout_seconds=1)
+    calls = []
+
+    async def connected():
+        return None
+
+    async def rpc(method, params):
+        calls.append((method, params))
+        if method == "model/list":
+            return {"data": [{
+                "model": "gpt-5.6-luna", "isDefault": False,
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "medium", "description": ""},
+                    {"reasoningEffort": "max", "description": ""},
+                ],
+            }], "nextCursor": None}
+        if method == "thread/start":
+            return {
+                "thread": {"id": "native-runtime"},
+                "cwd": str(execution_workspace.resolve()),
+                "model": "gpt-5.6-luna", "reasoningEffort": "max",
+            }
+        raise AssertionError(method)
+
+    monkeypatch.setattr(adapter, "_ensure_connected", connected)
+    monkeypatch.setattr(adapter, "_rpc", rpc)
+    task = A2aTask(
+        id="T-runtime", status_state="working", objective="validate",
+        session_id="S-runtime", context_revision=1,
+    )
+    await adapter.start_session(
+        task, session_id="S-runtime", metadata={
+            "executionWorkspace": str(execution_workspace),
+            "model": "gpt-5.6-luna", "reasoningEffort": "max",
+        })
+
+    assert [method for method, _ in calls] == ["model/list", "thread/start"]
+    params = calls[-1][1]
+    assert params["model"] == "gpt-5.6-luna"
+    assert params["config"]["model_reasoning_effort"] == "max"
+    assert adapter._session_models["S-runtime"] == "gpt-5.6-luna"
+    assert adapter._session_reasoning_efforts["S-runtime"] == "max"
+
+
+async def test_task_runtime_config_rejects_unsupported_model_or_effort(
+        monkeypatch, tmp_path):
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    adapter = CodexSessionAdapter(timeout_seconds=1)
+
+    async def connected():
+        return None
+
+    async def rpc(method, params):
+        assert method == "model/list"
+        return {"data": [{
+            "model": "gpt-5.6-terra", "isDefault": True,
+            "supportedReasoningEfforts": [{
+                "reasoningEffort": "medium", "description": ""}],
+        }], "nextCursor": None}
+
+    monkeypatch.setattr(adapter, "_ensure_connected", connected)
+    monkeypatch.setattr(adapter, "_rpc", rpc)
+    task = A2aTask(
+        id="T-runtime-invalid", status_state="working", objective="validate",
+        session_id="S-runtime-invalid", context_revision=1,
+    )
+    with pytest.raises(CodexFailed, match="unsupported model"):
+        await adapter.start_session(
+            task, session_id="S-runtime-invalid", metadata={
+                "executionWorkspace": str(execution_workspace),
+                "model": "gpt-5.6-luna"})
+    with pytest.raises(CodexFailed, match="unsupported reasoning effort"):
+        await adapter.start_session(
+            task, session_id="S-runtime-invalid", metadata={
+                "executionWorkspace": str(execution_workspace),
+                "model": "gpt-5.6-terra", "reasoningEffort": "max"})
+
+
+def test_thread_result_must_match_requested_runtime_config(tmp_path):
+    with pytest.raises(CodexFailed, match="model does not match"):
+        CodexSessionAdapter._verify_thread_result(
+            {"thread": {"id": "native"}, "cwd": str(tmp_path),
+             "model": "gpt-5.6-terra", "reasoningEffort": "max"},
+            expected_workspace=tmp_path,
+            expected_model="gpt-5.6-luna", expected_reasoning_effort="max")
+    with pytest.raises(CodexFailed, match="reasoning effort does not match"):
+        CodexSessionAdapter._verify_thread_result(
+            {"thread": {"id": "native"}, "cwd": str(tmp_path),
+             "model": "gpt-5.6-luna", "reasoningEffort": "medium"},
+            expected_workspace=tmp_path,
+            expected_model="gpt-5.6-luna", expected_reasoning_effort="max")
+
+
+async def test_task_runtime_config_is_reapplied_to_each_turn(
+        monkeypatch, tmp_path):
+    adapter = _seed_adapter()
+    adapter._session_models["S-codex"] = "gpt-5.6-luna"
+    adapter._session_reasoning_efforts["S-codex"] = "max"
+    calls = []
+    control_workspace = tmp_path / "control"
+    control_workspace.mkdir()
+
+    async def loaded(session_id):
+        return None
+
+    async def rpc(method, params):
+        calls.append((method, params))
+        return {"turn": {"id": "turn-runtime"}}
+
+    async def completed(session_id):
+        return SessionTurnResult(state="completed")
+
+    monkeypatch.setattr(adapter, "_ensure_native_loaded", loaded)
+    monkeypatch.setattr(adapter, "_rpc", rpc)
+    monkeypatch.setattr(adapter, "_await_turn_or_interaction", completed)
+    monkeypatch.setattr(
+        adapter, "_workspace", lambda task_id: control_workspace)
+    result = await adapter.send_message(
+        "S-codex", SessionMessage(
+            message_id="M-runtime", role="user", content="validate"))
+
+    assert result.state == "completed"
+    assert calls[0][0] == "turn/start"
+    assert calls[0][1]["model"] == "gpt-5.6-luna"
+    assert calls[0][1]["effort"] == "max"
 
 
 async def test_explicit_workspace_must_exist_and_be_a_directory(

@@ -16,6 +16,7 @@ hermes_approve:
   - git.commit
 
 require_user:
+  - command.execute
   - database.write
   - dependency.install
   - deployment.apply

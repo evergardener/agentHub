@@ -15,12 +15,14 @@ from state.db import now_iso
 JSON_FIELDS = {
     "responsibilities", "allowed_operations", "denied_operations",
     "allowed_tools", "workspace_roots", "task_types", "cost_limit",
+    "allowed_models", "allowed_reasoning_efforts",
 }
 PROFILE_FIELDS = {
     "name", "project", "role_prompt", "responsibilities",
     "execution_mode", "allowed_operations", "denied_operations",
     "allowed_tools", "workspace_roots", "task_types",
-    "reviewer_profile_id", "model", "cost_limit", "priority",
+    "reviewer_profile_id", "model", "allowed_models",
+    "reasoning_effort", "allowed_reasoning_efforts", "cost_limit", "priority",
     "timeout_seconds", "max_concurrent_tasks", "approval_level", "status",
 }
 DEFAULT_CATALOG = (
@@ -30,6 +32,35 @@ DEFAULT_CATALOG = (
 
 class ProfileVersionConflict(RuntimeError):
     pass
+
+
+def _validate_runtime_policy(
+    *, model: str | None, allowed_models: list[str] | None,
+    reasoning_effort: str | None,
+    allowed_reasoning_efforts: list[str] | None,
+) -> None:
+    from orchestrator.runtime_config import normalize_runtime_config
+
+    for field, values in (
+            ("allowed_models", allowed_models),
+            ("allowed_reasoning_efforts", allowed_reasoning_efforts)):
+        if values is not None and (
+                not isinstance(values, list)
+                or any(not isinstance(item, str) or not item.strip()
+                       for item in values)
+                or len(values) != len(set(values))):
+            raise ValueError(f"{field} must be a unique list of identifiers")
+    normalize_runtime_config(model, reasoning_effort)
+    for item in allowed_models or []:
+        normalize_runtime_config(item, None)
+    for item in allowed_reasoning_efforts or []:
+        normalize_runtime_config(None, item)
+    if model is not None and model not in set(allowed_models or []):
+        raise ValueError("model must be present in allowed_models")
+    if (reasoning_effort is not None
+            and reasoning_effort not in set(allowed_reasoning_efforts or [])):
+        raise ValueError(
+            "reasoning_effort must be present in allowed_reasoning_efforts")
 
 
 def _id(prefix: str) -> str:
@@ -123,6 +154,9 @@ def create_profile(conn, *, template_id: str, name: str, created_by: str,
                    task_types: list[str] | None = None,
                    reviewer_profile_id: str | None = None,
                    model: str | None = None,
+                   allowed_models: list[str] | None = None,
+                   reasoning_effort: str | None = None,
+                   allowed_reasoning_efforts: list[str] | None = None,
                    cost_limit: dict | None = None,
                    priority: int = 50, timeout_seconds: int = 3600,
                    max_concurrent_tasks: int = 1,
@@ -132,6 +166,11 @@ def create_profile(conn, *, template_id: str, name: str, created_by: str,
         raise KeyError(f"agent template not found: {template_id}")
     if execution_mode not in {"read_only", "execute"}:
         raise ValueError("execution_mode must be read_only or execute")
+    _validate_runtime_policy(
+        model=model, allowed_models=allowed_models,
+        reasoning_effort=reasoning_effort,
+        allowed_reasoning_efforts=allowed_reasoning_efforts,
+    )
     profile_id = profile_id or _id("AP")
     ts = now_iso()
     try:
@@ -140,15 +179,19 @@ def create_profile(conn, *, template_id: str, name: str, created_by: str,
             " role_prompt, responsibilities_json, execution_mode,"
             " allowed_operations_json, denied_operations_json,"
             " allowed_tools_json, workspace_roots_json, task_types_json,"
-            " reviewer_profile_id, model, cost_limit_json, priority,"
+            " reviewer_profile_id, model, allowed_models_json,"
+            " reasoning_effort, allowed_reasoning_efforts_json,"
+            " cost_limit_json, priority,"
             " timeout_seconds, max_concurrent_tasks, approval_level, status,"
             " version, created_by, created_at, updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?);",
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?);",
             (profile_id, template_id, name, project, role_prompt,
              _json(responsibilities or []), execution_mode,
              _json(allowed_operations or []), _json(denied_operations or []),
              _json(allowed_tools or []), _json(workspace_roots or []),
              _json(task_types or []), reviewer_profile_id, model,
+             _json(allowed_models or []), reasoning_effort,
+             _json(allowed_reasoning_efforts or []),
              _json(cost_limit) if cost_limit is not None else None,
              priority, timeout_seconds, max_concurrent_tasks, approval_level,
              status, created_by, ts, ts),
@@ -180,6 +223,17 @@ def update_profile(conn, profile_id: str, *, expected_version: int,
         raise ProfileVersionConflict(
             f"profile {profile_id} expected version {expected_version}, "
             f"current {row['version']}")
+    current = _profile_snapshot(row)
+    _validate_runtime_policy(
+        model=changes.get("model", current.get("model")),
+        allowed_models=changes.get(
+            "allowed_models", current.get("allowed_models")),
+        reasoning_effort=changes.get(
+            "reasoning_effort", current.get("reasoning_effort")),
+        allowed_reasoning_efforts=changes.get(
+            "allowed_reasoning_efforts",
+            current.get("allowed_reasoning_efforts")),
+    )
     if not changes:
         return row
 

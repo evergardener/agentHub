@@ -4,13 +4,36 @@ from __future__ import annotations
 
 import pytest
 
-from hermes.brain import Hermes
+from hermes.brain import SYSTEM_PROMPT, Hermes
 from hermes.llm import LLMReply
+from hermes.tools import TOOL_SCHEMAS
 from orchestrator import collaboration_store
 from orchestrator.task_manager import TaskManager
 
 
 pytestmark = pytest.mark.anyio
+
+
+def test_hermes_requires_structured_workspace_for_repository_work():
+    schema = next(
+        item["function"] for item in TOOL_SCHEMAS
+        if item["function"]["name"] == "create_task"
+    )
+    workspace = schema["parameters"]["properties"]["workspace"]
+    assert "代码仓库" in workspace["description"]
+    assert "绝对" in workspace["description"]
+    assert "不得只写在 objective" in workspace["description"]
+    assert {"title", "summary"}.issubset(
+        schema["parameters"]["properties"])
+    assert "代码仓库" in SYSTEM_PROMPT
+    assert "workspace" in SYSTEM_PROMPT
+    interaction_schema = next(
+        item["function"] for item in TOOL_SCHEMAS
+        if item["function"]["name"] == "respond_agent_interaction"
+    )
+    assert "awaiting_hermes" in interaction_schema["description"]
+    assert "awaiting_user" in interaction_schema["description"]
+    assert "respond_agent_interaction" in SYSTEM_PROMPT
 
 
 class RecordingLLM:
@@ -64,6 +87,51 @@ async def test_hermes_created_tasks_link_to_collaboration(tmp_path):
         "SELECT collaboration_id FROM tasks WHERE id = ?;",
         (result["task_id"],)).fetchone()
     assert row["collaboration_id"] == brain.collaboration_id
+
+
+async def test_hermes_rejects_prose_only_absolute_repository_path(tmp_path):
+    tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
+    brain = Hermes(tm, llm=RecordingLLM("ok"))
+    await brain.chat("开始修复")
+
+    before = tm.conn.execute("SELECT COUNT(*) AS n FROM tasks;").fetchone()["n"]
+    rejected = await brain.tools.dispatch("create_task", {
+        "objective": "修改 /Users/example/project/Dockerfile 并运行测试",
+    })
+    assert "缺少结构化 workspace" in rejected["error"]
+    after = tm.conn.execute("SELECT COUNT(*) AS n FROM tasks;").fetchone()["n"]
+    assert after == before
+
+
+async def test_hermes_native_interaction_response_uses_hermes_authority(
+        tmp_path, monkeypatch):
+    tm = TaskManager(db_path=tmp_path / "state.db", workspace=tmp_path / "ws")
+    brain = Hermes(tm, llm=RecordingLLM("ok"))
+    captured = {}
+
+    async def fake_response(self, interaction_id, *, response,
+                            requested_by, endpoint=None):
+        captured.update({
+            "interaction_id": interaction_id,
+            "response": response,
+            "requested_by": requested_by,
+        })
+        return {"status": {"state": "working"}}
+
+    monkeypatch.setattr(
+        TaskManager, "respond_agent_interaction", fake_response)
+    result = await brain.tools.dispatch("respond_agent_interaction", {
+        "interaction_id": "INT-1", "outcome": "allowed-once",
+        "note": "目标内可回滚修改",
+    })
+
+    assert result["status"] == "responded"
+    assert captured == {
+        "interaction_id": "INT-1",
+        "response": {"outcome": "allowed-once",
+                     "note": "目标内可回滚修改"},
+        "requested_by": "hermes",
+    }
 
 
 async def test_live_hermes_sees_webui_user_intervention(tmp_path):

@@ -170,6 +170,7 @@ class StateWriter:
                             source="state-writer",
                             task_id=task_id,
                             detail=payload.get("error") or "task failed",
+                            commit=False,
                         )
                 if event_type == "task.input_required":
                     self._persist_interactions(
@@ -210,6 +211,13 @@ class StateWriter:
             else:
                 self.conn.commit()
                 return "ignored"
+            if task_id and event_type in {
+                    "task.input_required", "task.blocked", "task.completed",
+                    "task.failed", "task.cancelled"}:
+                from orchestrator import supervision_store
+
+                supervision_store.sync_task(
+                    self.conn, task_id, commit=False)
         except state_store.IllegalTransition as e:
             self.conn.rollback()
             # Rejected attempts remain auditable but are not allowed to poison
@@ -329,6 +337,7 @@ class StateWriter:
                     else "unknown"),
                 recovery_state="event_recovered",
                 context_snapshot={"objective": task["objective"]},
+                commit=False,
             )
         collaboration = collaboration_store.get_collaboration(
             self.conn, task["collaboration_id"])
@@ -379,6 +388,7 @@ class StateWriter:
                 session_binding_id=binding["id"],
                 agent_id=agent_id,
                 interaction=item,
+                commit=False,
             )
             if saved["kind"] != "approval" or saved["action_intent_id"]:
                 continue
@@ -425,9 +435,10 @@ class StateWriter:
                 rollback_plan=(semantic.get("rollbackPlan") if verified
                                else None),
                 based_on_revision=collaboration["context_revision"],
+                commit=False,
             )
             collaboration_store.attach_action_intent(
-                self.conn, saved["id"], intent["id"])
+                self.conn, saved["id"], intent["id"], commit=False)
 
     @staticmethod
     def _workspace_root() -> Path:

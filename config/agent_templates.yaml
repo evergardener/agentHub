@@ -56,6 +56,9 @@ profiles:
        database.write, secret.access, service.restart]
     allowed_tools: [filesystem.read, filesystem.search, test.run]
     task_types: [backend, testing, migration]
+    allowed_models:
+      [gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4]
+    allowed_reasoning_efforts: [none, low, medium, high, xhigh, max]
     approval_level: hermes
     timeout_seconds: 3600
     max_concurrent_tasks: 1

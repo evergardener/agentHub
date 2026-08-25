@@ -29,6 +29,7 @@ def upsert_alert(
     source: str,
     task_id: str | None = None,
     detail: str | None = None,
+    commit: bool = True,
 ) -> dict:
     if severity not in SEVERITIES:
         raise ValueError(f"unsupported alert severity: {severity}")
@@ -48,8 +49,6 @@ def upsert_alert(
         (alert_id, key, kind, severity, source, task_id, detail,
          timestamp, timestamp, timestamp),
     )
-    conn.commit()
-
     if existing is None:
         from orchestrator import state_store
 
@@ -59,8 +58,10 @@ def upsert_alert(
             task_id=task_id,
             payload={"alert_id": alert_id, "kind": kind,
                      "severity": severity, "detail": detail},
-        ).to_dict())
+        ).to_dict(), commit=False)
     row = conn.execute("SELECT * FROM alerts WHERE id = ?;", (alert_id,)).fetchone()
+    if commit:
+        conn.commit()
     return _as_dict(row)
 
 

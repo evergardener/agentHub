@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from hermes.action_policy import ActionPolicy
@@ -43,7 +41,7 @@ def test_workspace_write_with_rollback_routes_to_hermes(workspace):
 
 @pytest.mark.parametrize("operation", [
     "filesystem.delete", "git.push", "deployment.apply",
-    "database.write", "secret.access",
+    "database.write", "secret.access", "command.execute",
 ])
 def test_critical_operations_route_to_user(workspace, operation):
     decision = ActionPolicy(workspace=workspace).evaluate(

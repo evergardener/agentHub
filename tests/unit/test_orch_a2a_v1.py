@@ -15,6 +15,7 @@ from orchestrator.task_manager import TaskManager
 pytestmark = pytest.mark.anyio
 
 HUB_TOKEN = "test-agenthub-peer-token-0123456789"
+OTHER_HUB_TOKEN = "other-agenthub-peer-token-0123456789"
 LEGACY_TOKEN = "test-legacy-token-0123456789"
 
 
@@ -24,16 +25,21 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("LAS_API_TOKEN", LEGACY_TOKEN)
     monkeypatch.setenv("LAS_A2A_PEERS", json.dumps({
         HUB_TOKEN: {"peer": "qishuo"},
+        OTHER_HUB_TOKEN: {"peer": "other"},
     }))
     monkeypatch.delenv("LAS_GATEWAY_API_KEY", raising=False)
     monkeypatch.delenv("AGENT_GATEWAY_API_KEY", raising=False)
     monkeypatch.delenv("LAS_ORCH_REQUIRE_AUTH", raising=False)
     tm = TaskManager(db_path=tmp_path / "state.db",
                      workspace=tmp_path / "ws")
+    from orchestrator import agent_profile_store
+    agent_profile_store.seed_catalog(tm.conn)
     state_store.update_heartbeat(tm.conn, "codex",
                                  endpoint="http://worker:8201")
     state_store.update_heartbeat(tm.conn, "kimi",
                                  endpoint="http://worker:8202")
+    assert agent_profile_store.assign_seed_profile(tm.conn, "codex")
+    assert agent_profile_store.assign_seed_profile(tm.conn, "kimi")
     delegated: list[tuple[str, str]] = []
 
     async def fake_delegate(self, task_id, endpoint, agent_id, attempt=1):
@@ -85,6 +91,11 @@ def test_registry_discovery_uses_single_peer(env):
     message = response["result"]["message"]
     payload = json.loads(message["parts"][0]["text"])
     assert {item["id"] for item in payload["agents"]} >= {"codex", "kimi"}
+    codex = next(item for item in payload["agents"]
+                 if item["id"] == "codex")
+    assert "gpt-5.6-luna" in codex["runtime_policy"]["allowed_models"]
+    assert "max" in codex["runtime_policy"][
+        "allowed_reasoning_efforts"]
     assert "fake" not in {item["id"] for item in payload["agents"]}
     assert message["contextId"] == "ctx-live"
     assert not delegated
@@ -130,7 +141,6 @@ def test_task_response_is_native_hermes_readable(env):
     text = task["status"]["message"]["parts"][0]["text"]
     assert f"task_id={task['id']}" in text
     assert task["contextId"] == "ctx-live"
-    assert delegated == [(task["id"], "codex")]
     row = state_store.get_task(tm.conn, task["id"])
     assert row["collaboration_id"]
     collaboration = collaboration_store.get_collaboration(
@@ -188,6 +198,211 @@ def test_tasks_create_rejects_relative_execution_workspace(env):
     assert "absolute" in response["error"]["message"]
     assert delegated == []
     assert tm.conn.execute("SELECT COUNT(*) FROM tasks;").fetchone()[0] == 0
+
+
+def test_tasks_create_rejects_prose_only_absolute_repository_path(env):
+    tm, client, delegated = env
+    response = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="codex",
+            objective="修改 /Users/example/project/Dockerfile 并运行测试"),
+        headers=_bearer()).json()
+
+    assert response["error"]["code"] == -32602
+    assert "缺少结构化 workspace" in response["error"]["message"]
+    assert delegated == []
+    assert tm.conn.execute("SELECT COUNT(*) FROM tasks;").fetchone()[0] == 0
+
+
+def test_tasks_create_persists_structured_display_copy(env, tmp_path):
+    tm, client, _ = env
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    response = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="codex",
+            objective="很长的完整下发指令，包含全部约束和事实证据",
+            title="修复 GitHub 流水线构建失败问题",
+            summary="更新 Debian Trxie 安全补丁并保持 Trivy 门禁。",
+            workspace=str(execution_workspace)),
+        headers=_bearer()).json()
+
+    task = response["result"]["task"]
+    row = state_store.get_task(tm.conn, task["id"])
+    context = json.loads(row["plan_context_json"])
+    assert context["display_title"] == "修复 GitHub 流水线构建失败问题"
+    assert context["objective_summary"].startswith("更新 Debian")
+    assert task["metadata"]["display_title"] == context["display_title"]
+    message = collaboration_store.list_collaboration_messages(
+        tm.conn, row["collaboration_id"])[0]
+    payload = json.loads(message["content_json"])
+    assert payload["title"] == context["display_title"]
+    assert payload["summary"] == context["objective_summary"]
+
+
+def test_tasks_create_persists_profile_allowed_runtime_config(env, tmp_path):
+    tm, client, delegated = env
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    response = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="codex", objective="查询运行状态",
+            model="gpt-5.6-luna", reasoning_effort="max",
+            workspace=str(execution_workspace)),
+        headers=_bearer()).json()
+
+    task = response["result"]["task"]
+    row = state_store.get_task(tm.conn, task["id"])
+    context = json.loads(row["plan_context_json"])
+    assert context["runtime_config"] == {
+        "model": "gpt-5.6-luna", "reasoning_effort": "max"}
+    assert task["metadata"]["runtime_config"] == context["runtime_config"]
+    message = collaboration_store.list_collaboration_messages(
+        tm.conn, row["collaboration_id"])[0]
+    assert json.loads(message["content_json"])["runtime_config"] == \
+        context["runtime_config"]
+    audit = tm.conn.execute(
+        "SELECT payload_json FROM events WHERE task_id = ?"
+        " AND event_type = 'task.runtime_config.selected';",
+        (task["id"],),
+    ).fetchone()
+    assert json.loads(audit["payload_json"])["runtime_config"] == \
+        context["runtime_config"]
+    assert delegated == [(task["id"], "codex")]
+
+
+@pytest.mark.parametrize("fields, expected", [
+    ({"model": "unlisted-model"}, "allowed_models"),
+    ({"reasoning_effort": "extreme"}, "allowed_reasoning_efforts"),
+])
+def test_tasks_create_rejects_runtime_config_outside_profile(
+        env, fields, expected):
+    tm, client, delegated = env
+    response = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="codex", objective="查询状态", **fields),
+        headers=_bearer()).json()
+
+    assert response["error"]["code"] == -32602
+    assert expected in response["error"]["message"]
+    assert delegated == []
+    assert tm.conn.execute("SELECT COUNT(*) FROM tasks;").fetchone()[0] == 0
+
+
+def test_tasks_create_rejects_runtime_override_for_unsupported_adapter(env):
+    tm, client, delegated = env
+    response = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="kimi", objective="查询状态",
+            model="gpt-5.6-luna"),
+        headers=_bearer()).json()
+
+    assert response["error"]["code"] == -32602
+    assert "does not support task runtime overrides" in \
+        response["error"]["message"]
+    assert delegated == []
+    assert tm.conn.execute("SELECT COUNT(*) FROM tasks;").fetchone()[0] == 0
+
+
+def test_hub_can_respond_to_hermes_routed_native_interaction(
+        env, monkeypatch):
+    _, client, _ = env
+    captured = {}
+
+    async def fake_respond(self, interaction_id, *, response,
+                           requested_by, endpoint=None):
+        captured.update({
+            "interaction_id": interaction_id,
+            "response": response,
+            "requested_by": requested_by,
+        })
+        return {"status": {"state": "working"}}
+
+    monkeypatch.setattr(TaskManager, "respond_agent_interaction", fake_respond)
+    response = client.post(
+        "/a2a", json=_control(
+            "interactions/respond", interaction_id="INT-1",
+            outcome="allowed-once", note="已核对可回滚变更"),
+        headers=_bearer()).json()
+
+    payload = json.loads(response["result"]["message"]["parts"][0]["text"])
+    assert payload["status"] == "responded"
+    assert captured == {
+        "interaction_id": "INT-1",
+        "response": {"outcome": "allowed-once", "note": "已核对可回滚变更"},
+        "requested_by": "hermes",
+    }
+
+
+def test_tasks_get_exposes_safe_pending_native_interaction(env):
+    tm, client, _ = env
+    conversation_id = collaboration_store.create_conversation(tm.conn)
+    collaboration_id = collaboration_store.create_collaboration(
+        tm.conn, conversation_id=conversation_id, objective="修复")
+    task_id = tm.create_task(
+        "修复问题", collaboration_id=collaboration_id)
+    for status in (
+        state_store.TaskStatus.ASSIGNED,
+        state_store.TaskStatus.WORKING,
+        state_store.TaskStatus.BLOCKED,
+    ):
+        state_store.transition_task(tm.conn, task_id, status)
+    binding = collaboration_store.bind_agent_session(
+        tm.conn, collaboration_id=collaboration_id, task_id=task_id,
+        agent_id="codex", adapter_session_id="S-codex",
+        native_session_id="native-codex", resume_capability="native")
+    interaction = collaboration_store.upsert_session_interaction(
+        tm.conn, collaboration_id=collaboration_id, task_id=task_id,
+        session_binding_id=binding["id"], agent_id="codex",
+        interaction={
+            "interactionId": "codex:edit-1", "kind": "approval",
+            "nativeRequestId": "rpc-1",
+            "payload": {
+                "toolName": "edit", "inspectable": True,
+                "reason": "更新 Dockerfile",
+                "toolView": {"kind": "edit", "paths": ["/repo/Dockerfile"]},
+            },
+        })
+    intent = collaboration_store.create_action_intent(
+        tm.conn, collaboration_id=collaboration_id, task_id=task_id,
+        session_binding_id=binding["id"], requested_by_agent_id="codex",
+        operation="filesystem.write",
+        targets={"paths": ["/repo/Dockerfile"]},
+        purpose="更新 Dockerfile", expected_effects={"toolName": "edit"},
+        rollback_plan="git restore Dockerfile", based_on_revision=1)
+    tm.conn.execute(
+        "UPDATE action_intents SET status = 'awaiting_hermes',"
+        " policy_route = 'hermes' WHERE id = ?;", (intent["id"],))
+    tm.conn.commit()
+    collaboration_store.attach_action_intent(
+        tm.conn, interaction["id"], intent["id"])
+
+    task = client.post(
+        "/a2a", json=_control("tasks/get", task_id=task_id),
+        headers=_bearer()).json()["result"]["task"]
+    pending = task["metadata"]["pending_interactions"]
+    assert pending == [{
+        "interaction_id": interaction["id"],
+        "agent_id": "codex", "kind": "approval", "status": "pending",
+        "inspectable": True, "tool_name": "edit",
+        "reason": "更新 Dockerfile",
+        "tool_view": {"kind": "edit", "paths": ["/repo/Dockerfile"]},
+        "operation": "filesystem.write", "risk": "unknown",
+        "policy_route": "hermes",
+        "action_intent_status": "awaiting_hermes",
+        "policy_reason": None,
+    }]
+    tm.conn.execute(
+        "UPDATE action_intents SET status = 'awaiting_user',"
+        " policy_route = 'user' WHERE id = ?;", (intent["id"],))
+    tm.conn.commit()
+    denied = client.post(
+        "/a2a", json=_control(
+            "interactions/respond", interaction_id=interaction["id"],
+            outcome="allowed-once"),
+        headers=_bearer()).json()
+    assert denied["error"]["code"] == -32003
+    assert "requires user approval" in denied["error"]["message"]
 
 
 def test_same_peer_context_reuses_collaboration_for_multiple_tasks(env):
@@ -324,7 +539,79 @@ def test_auth_and_card_contract(env):
                       headers=_bearer()).json()
     assert card["supportedInterfaces"][0]["protocolVersion"] == "1.0"
     assert {item["id"] for item in card["skills"]} >= {
-        "orchestrate", "registry-discovery", "approval-gate"}
+        "orchestrate", "registry-discovery", "approval-gate",
+        "durable-supervision"}
+
+
+def test_supervision_register_pull_and_ack_are_peer_scoped(env):
+    tm, client, _ = env
+    created = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="codex", objective="查询当前状态"),
+        headers=_bearer()).json()["result"]["task"]
+
+    registered = client.post(
+        "/a2a", json=_control(
+            "supervision/register", task_id=created["id"]),
+        headers=_bearer()).json()["result"]["message"]
+    watch = json.loads(registered["parts"][0]["text"])
+    assert watch["status"] == "active"
+    assert watch["task_id"] == created["id"]
+    assert watch["context_id"] == "ctx-live"
+
+    state_store.transition_task(
+        tm.conn, created["id"], state_store.TaskStatus.WORKING)
+    state_store.transition_task(
+        tm.conn, created["id"], state_store.TaskStatus.AWAITING_ACCEPTANCE)
+
+    pulled = client.post(
+        "/a2a", json=_control(
+            "supervision/pull", watch_ids=[watch["watch_id"]]),
+        headers=_bearer()).json()["result"]["message"]
+    notifications = json.loads(pulled["parts"][0]["text"])["notifications"]
+    assert len(notifications) == 1
+    notification = notifications[0]
+    assert notification["watch_id"] == watch["watch_id"]
+    assert notification["task_id"] == created["id"]
+    assert notification["event_type"] == "task.awaiting_acceptance"
+    assert set(notification) == {
+        "notification_id", "watch_id", "task_id", "context_id",
+        "event_type", "internal_status", "created_at",
+    }
+
+    acked = client.post(
+        "/a2a", json=_control(
+            "supervision/ack",
+            notification_id=notification["notification_id"]),
+        headers=_bearer()).json()["result"]["message"]
+    assert json.loads(acked["parts"][0]["text"])["status"] == "acknowledged"
+    acked_again = client.post(
+        "/a2a", json=_control(
+            "supervision/ack",
+            notification_id=notification["notification_id"]),
+        headers=_bearer()).json()["result"]["message"]
+    assert json.loads(acked_again["parts"][0]["text"])["status"] == \
+        "acknowledged"
+
+
+def test_supervision_rejects_context_or_watch_not_owned_by_peer(env):
+    _, client, _ = env
+    created = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="codex", objective="查询当前状态"),
+        headers=_bearer()).json()["result"]["task"]
+
+    wrong_context = client.post(
+        "/a2a", json=_control(
+            "supervision/register", context_id="ctx-other",
+            task_id=created["id"]), headers=_bearer()).json()
+    assert wrong_context["error"]["code"] == -32003
+
+    response = client.post(
+        "/a2a", json=_control(
+            "supervision/pull", watch_ids=["WATCH-does-not-belong"]),
+        headers=_bearer(OTHER_HUB_TOKEN)).json()
+    assert response["error"]["code"] in {-32003, -32602}
 
 
 def test_worker_proxy_treats_adapter_token_as_downstream_credential(

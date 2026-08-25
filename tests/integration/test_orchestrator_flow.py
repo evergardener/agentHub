@@ -101,26 +101,36 @@ async def test_phase4_orchestrator_flow(tmp_path, monkeypatch):
         # ── 事件驱动等待 ──
         final = await tm.wait_task(task_id, timeout=30, nats_url=NATS_URL)
         await call  # A2A 调用收尾
-        assert final == "completed", final
+        assert final == "awaiting_acceptance", final
 
         # State Writer 落库确认
         await asyncio.sleep(0.5)
         row = tm.conn.execute(
             "SELECT status, result_summary FROM tasks WHERE id = ?;",
             (task_id,)).fetchone()
-        assert row["status"] == "completed"
+        assert row["status"] == "awaiting_acceptance"
 
-        # ── Review 拒绝 → 返工 → 再完成 → 接受 ──
-        assert tm.review_result(task_id, approved=False, notes="redo") == "working"
+        # ── Hermes 建议返工 → 用户明确返工 → 再完成 → 用户明确接受 ──
+        assert tm.review_result(
+            task_id, approved=False, notes="redo") == "reviewed"
+        assert tm.reject_result(
+            task_id, feedback="redo", decided_by="user",
+            via="integration-test") == "rework_pending"
         state = tm.conn.execute(
             "SELECT status FROM tasks WHERE id = ?;", (task_id,)).fetchone()
-        assert state[0] == "working"
-        # 返工完成（模拟 Worker 再次上报 completed）
+        assert state[0] == "rework_pending"
+        # fake adapter is intentionally one-shot; model a valid second worker
+        # attempt through the authoritative state transitions.
         from common.models import TaskStatus
         from orchestrator import state_store
 
-        state_store.transition_task(tm.conn, task_id, TaskStatus.COMPLETED)
-        assert tm.review_result(task_id, approved=True) == "accepted"
+        state_store.transition_task(tm.conn, task_id, TaskStatus.ASSIGNED)
+        state_store.transition_task(tm.conn, task_id, TaskStatus.WORKING)
+        state_store.transition_task(
+            tm.conn, task_id, TaskStatus.AWAITING_ACCEPTANCE)
+        assert tm.review_result(task_id, approved=True) == "reviewed"
+        assert tm.accept_result(
+            task_id, decided_by="user", via="integration-test") == "accepted"
     finally:
         writer_stop.set()
         if writer_task:

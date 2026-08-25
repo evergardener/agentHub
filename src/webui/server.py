@@ -18,6 +18,7 @@ import binascii
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import time
 from pathlib import Path
@@ -227,6 +228,113 @@ def _with_rendered_markdown(messages: list[dict]) -> list[dict]:
         item["content_html"] = MARKDOWN.render(text) if text.strip() else ""
         rendered.append(item)
     return rendered
+
+
+def _objective_presentation(objective: str) -> tuple[str, str]:
+    """Build concise display copy while retaining the full audit objective."""
+    normalized = re.sub(r"\s+", " ", str(objective or "")).strip()
+    if not normalized:
+        return "", ""
+    parts = [part.strip() for part in re.split(
+        r"(?<=[。！？!?])", normalized) if part.strip()]
+    first = parts[0].rstrip("。！？!?")
+    title = re.sub(r"^修复\s+agentHub\s+", "修复 ", first,
+                   flags=re.IGNORECASE)
+    title = re.sub(
+        r"GitHub Actions(?:\s+Docker)?\s+发布流水线",
+        "GitHub 流水线", title, flags=re.IGNORECASE)
+    title = re.sub(
+        r"\s*在\s*commit\s+[0-9a-f]{7,64}\s*失败的问题$",
+        "构建失败问题", title, flags=re.IGNORECASE)
+    if len(title) > 56:
+        clause = re.split(r"[，,；;：:]", title, maxsplit=1)[0].strip()
+        title = clause if 8 <= len(clause) <= 56 else title[:55].rstrip() + "…"
+    summary = "".join(parts[1:]).strip()
+    if len(summary) > 180:
+        summary = summary[:180].rstrip() + "…"
+    return title, summary
+
+
+def _agent_activity_messages(conn, collaboration_id: str,
+                             persisted_messages: list[dict]) -> list[dict]:
+    """Project safe native lifecycle events into the conversation transcript."""
+    rows = _rows(conn.execute(
+        "SELECT e.seq, e.task_id, e.agent_id AS event_agent_id,"
+        " e.payload_json, e.created_at, t.assigned_to"
+        " FROM events e JOIN tasks t ON t.id = e.task_id"
+        " WHERE t.collaboration_id = ?"
+        " AND e.event_type = 'agent.session.event' ORDER BY e.seq;",
+        (collaboration_id,),
+    ))
+    persisted_text = {
+        _message_text(message).strip() for message in persisted_messages
+        if _message_text(message).strip()
+    }
+    activities: list[dict] = []
+    tool_positions: dict[tuple[str, str, str], int] = {}
+    for row in rows:
+        try:
+            payload = json.loads(row.get("payload_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if payload.get("nativeEventType") != "item.lifecycle":
+            continue
+        data = payload.get("data") or {}
+        item = data.get("item") or {}
+        phase = data.get("phase")
+        item_type = item.get("type")
+        item_id = item.get("id")
+        agent_id = row.get("event_agent_id") or row.get("assigned_to") or "agent"
+        base = {
+            "conversation_id": None,
+            "collaboration_id": collaboration_id,
+            "task_id": row.get("task_id"),
+            "agent_id": agent_id,
+            "sender_type": "agent",
+            "sender_id": agent_id,
+            "recipient_type": "hermes",
+            "recipient_id": "hermes",
+            "sequence": f"event-{row['seq']}",
+            "based_on_revision": None,
+            "delivery_status": "event",
+            "created_at": row.get("created_at"),
+        }
+        if item_type == "agentMessage":
+            text = item.get("text")
+            if (phase != "completed" or not isinstance(text, str)
+                    or not text.strip() or text.strip() in persisted_text):
+                continue
+            activities.append({
+                **base,
+                "id": f"native-message:{row['seq']}",
+                "message_type": "agent.activity.message",
+                "content_json": json.dumps(
+                    {"text": text, "phase": item.get("phase")},
+                    ensure_ascii=False, separators=(",", ":")),
+            })
+            continue
+        if item_type not in {"commandExecution", "fileChange"}:
+            continue
+        safe_item = {key: value for key, value in item.items()
+                     if key not in {"id", "type"}}
+        content_json = json.dumps({
+            "tool_calls": [{"name": item_type, "arguments": {
+                **safe_item, "lifecycle": phase,
+            }}],
+        }, ensure_ascii=False, separators=(",", ":"))
+        key = (str(row.get("task_id")), str(item_id), str(item_type))
+        existing = tool_positions.get(key)
+        if existing is not None:
+            activities[existing]["content_json"] = content_json
+            continue
+        tool_positions[key] = len(activities)
+        activities.append({
+            **base,
+            "id": f"native-tool:{row['seq']}",
+            "message_type": "agent.activity.tool",
+            "content_json": content_json,
+        })
+    return activities
 
 
 def create_app() -> FastAPI:
@@ -586,6 +694,20 @@ def create_app() -> FastAPI:
             else:
                 objective = row["objective"]
                 instruction_source = "task_record"
+            objective_title, objective_summary = _objective_presentation(
+                objective)
+            try:
+                task_context = json.loads(row["plan_context_json"] or "null")
+            except (TypeError, ValueError):
+                task_context = None
+            if isinstance(task_context, dict):
+                structured_title = task_context.get("display_title")
+                structured_summary = task_context.get("objective_summary")
+                if isinstance(structured_title, str) and structured_title.strip():
+                    objective_title = structured_title.strip()
+                if (isinstance(structured_summary, str)
+                        and structured_summary.strip()):
+                    objective_summary = structured_summary.strip()
             return {"task": {k: row[k] for k in keys}, "runs": runs,
                     "artifacts": artifacts, "events": events,
                     "interactions": interactions, "sessions": sessions,
@@ -593,6 +715,8 @@ def create_app() -> FastAPI:
                     "plan_steps": plan_steps,
                     "collaboration": collaboration,
                     "dispatched_objective": objective,
+                    "objective_title": objective_title,
+                    "objective_summary": objective_summary,
                     "instruction_source": instruction_source}
         finally:
             conn.close()
@@ -718,8 +842,11 @@ def create_app() -> FastAPI:
                 " WHERE collaboration_id = ? ORDER BY created_at;",
                 (collaboration_id,)))
             merged_messages = _with_legacy_task_results(messages, tasks)
+            agent_activity = _agent_activity_messages(
+                conn, collaboration_id, merged_messages)
             return {"collaboration": collaboration,
                     "messages": _with_rendered_markdown(merged_messages),
+                    "agent_activity": _with_rendered_markdown(agent_activity),
                     "tasks": tasks, "sessions": sessions}
         finally:
             conn.close()

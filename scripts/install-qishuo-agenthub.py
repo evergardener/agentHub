@@ -34,6 +34,19 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _tree_sha256(root: Path) -> str:
+    """Hash a directory tree without depending on filesystem traversal order."""
+    digest = hashlib.sha256()
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        file_hash = bytes.fromhex(_sha256(path))
+        digest.update(len(file_hash).to_bytes(8, "big"))
+        digest.update(file_hash)
+    return digest.hexdigest()
+
+
 def _copy_secure(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     shutil.copyfile(source, target)
@@ -59,9 +72,25 @@ def _backup(profile: Path) -> tuple[Path, dict]:
         for path in saved.rglob("*"):
             if path.is_file():
                 os.chmod(path, 0o600)
-        entries["skill"] = {"existed": True}
+        entries["skill"] = {
+            "existed": True,
+            "sha256": _tree_sha256(saved),
+        }
     else:
         entries["skill"] = {"existed": False}
+    supervisor_plugin = profile / "plugins" / "agenthub-supervisor"
+    if supervisor_plugin.exists():
+        saved = target / "supervisor-plugin.before"
+        shutil.copytree(supervisor_plugin, saved)
+        for path in saved.rglob("*"):
+            if path.is_file():
+                os.chmod(path, 0o600)
+        entries["supervisor_plugin"] = {
+            "existed": True,
+            "sha256": _tree_sha256(saved),
+        }
+    else:
+        entries["supervisor_plugin"] = {"existed": False}
     manifest = {"version": 1, "profile": str(profile), "entries": entries}
     manifest_path = target / "manifest.json"
     manifest_path.write_text(
@@ -80,6 +109,17 @@ def _verify_restore_drill(backup: Path, manifest: dict) -> None:
             shutil.copyfile(backup / entry["backup"], restored)
             if _sha256(restored) != entry["sha256"]:
                 raise RuntimeError(f"rollback drill checksum failed: {name}")
+        for entry_name, backup_name in (
+                ("skill", "skill.before"),
+                ("supervisor_plugin", "supervisor-plugin.before")):
+            entry = manifest["entries"].get(entry_name, {"existed": False})
+            if not entry["existed"]:
+                continue
+            restored = drill / backup_name
+            shutil.copytree(backup / backup_name, restored)
+            if _tree_sha256(restored) != entry["sha256"]:
+                raise RuntimeError(
+                    f"rollback drill checksum failed: {entry_name}")
 
 
 def _upsert_prompt_appendix(existing: str, appendix: str) -> str:
@@ -99,7 +139,8 @@ def _upsert_prompt_appendix(existing: str, appendix: str) -> str:
 
 
 def install(profile: Path, agenthub_env: Path, skill_source: Path,
-            prompt_appendix: Path) -> dict[str, str]:
+            prompt_appendix: Path,
+            supervisor_plugin_source: Path | None = None) -> dict[str, str]:
     backup, manifest = _backup(profile)
     _verify_restore_drill(backup, manifest)
 
@@ -120,6 +161,24 @@ def install(profile: Path, agenthub_env: Path, skill_source: Path,
     }
     config["a2a_agents"] = peers
 
+    if supervisor_plugin_source is not None:
+        required = {
+            "plugin.yaml": supervisor_plugin_source / "plugin.yaml",
+            "__init__.py": supervisor_plugin_source / "__init__.py",
+        }
+        missing = [name for name, path in required.items() if not path.is_file()]
+        if missing:
+            raise ValueError(
+                f"agenthub-supervisor plugin missing: {', '.join(missing)}")
+        plugins = config.setdefault("plugins", {})
+        enabled = list(plugins.get("enabled") or [])
+        if "agenthub-supervisor" not in enabled:
+            enabled.append("agenthub-supervisor")
+        plugins["enabled"] = enabled
+        entries = plugins.setdefault("entries", {})
+        plugin_entry = entries.setdefault("agenthub-supervisor", {})
+        plugin_entry["allow_gateway_injection"] = True
+
     agent = config.setdefault("agent", {})
     existing_prompt = str(agent.get("system_prompt") or "").rstrip()
     appendix = prompt_appendix.read_text(encoding="utf-8").strip()
@@ -138,6 +197,12 @@ def install(profile: Path, agenthub_env: Path, skill_source: Path,
     if skill_target.exists():
         shutil.rmtree(skill_target)
     shutil.copytree(skill_source, skill_target)
+    if supervisor_plugin_source is not None:
+        plugin_target = profile / "plugins" / "agenthub-supervisor"
+        plugin_target.parent.mkdir(parents=True, exist_ok=True)
+        if plugin_target.exists():
+            shutil.rmtree(plugin_target)
+        shutil.copytree(supervisor_plugin_source, plugin_target)
     return {"backup": str(backup), "rollback_drill": "passed"}
 
 
@@ -156,7 +221,22 @@ def rollback(profile: Path, backup: Path) -> dict[str, str]:
     if skill_target.exists():
         shutil.rmtree(skill_target)
     if manifest["entries"]["skill"]["existed"]:
-        shutil.copytree(backup / "skill.before", skill_target)
+        skill_backup = backup / "skill.before"
+        if _tree_sha256(skill_backup) != manifest["entries"]["skill"][
+                "sha256"]:
+            raise ValueError("backup checksum mismatch: skill")
+        shutil.copytree(skill_backup, skill_target)
+    plugin_target = profile / "plugins" / "agenthub-supervisor"
+    plugin_target.parent.mkdir(parents=True, exist_ok=True)
+    if plugin_target.exists():
+        shutil.rmtree(plugin_target)
+    plugin_entry = manifest["entries"].get(
+        "supervisor_plugin", {"existed": False})
+    if plugin_entry["existed"]:
+        plugin_backup = backup / "supervisor-plugin.before"
+        if _tree_sha256(plugin_backup) != plugin_entry["sha256"]:
+            raise ValueError("backup checksum mismatch: supervisor_plugin")
+        shutil.copytree(plugin_backup, plugin_target)
     return {"restored": str(profile), "backup": str(backup)}
 
 
@@ -167,6 +247,7 @@ def main() -> None:
     parser.add_argument("--agenthub-env", type=Path)
     parser.add_argument("--skill-source", type=Path)
     parser.add_argument("--prompt-appendix", type=Path)
+    parser.add_argument("--supervisor-plugin-source", type=Path)
     args = parser.parse_args()
     if args.rollback:
         result = rollback(args.profile, args.rollback)
@@ -175,7 +256,8 @@ def main() -> None:
                     args.prompt_appendix)):
             parser.error("install requires agenthub env, skill source and appendix")
         result = install(args.profile, args.agenthub_env, args.skill_source,
-                         args.prompt_appendix)
+                         args.prompt_appendix,
+                         supervisor_plugin_source=args.supervisor_plugin_source)
     print(json.dumps(result, ensure_ascii=False))
 
 

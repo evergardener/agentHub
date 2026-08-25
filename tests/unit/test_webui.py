@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -312,6 +314,16 @@ def test_index_page(client):
     assert 'data-task-detail-tab="execution"' in r.text
     assert "目标与交付" in r.text
     assert "执行记录" in r.text
+    assert "S.taskDetailTab = name" in r.text
+    assert "selectTaskDetailTab(S.taskDetailTab, {rememberScroll: false})" in r.text
+    assert "taskDetailScrolls: new Map()" in r.text
+    assert "function rememberTaskDetailScroll()" in r.text
+    assert "function restoreTaskDetailScroll()" in r.text
+    assert "panel.dataset.taskDetailPanel" in r.text
+    assert '$("#d-body").scrollTop = 0;' not in r.text
+    assert "previousTaskScroll" not in r.text
+    assert "无法批准此请求" in r.text
+    assert "绝对 workspace" in r.text
     assert ".workspace-card > .chat-transcript" in r.text
     assert "overscroll-behavior: contain" in r.text
     assert 'class="markdown-body"' in r.text
@@ -323,6 +335,9 @@ def test_index_page(client):
     assert "/messages`" in r.text
     assert "产物已显示在右侧" in r.text
     assert '<div class="task-section-label">结果摘要</div>' not in r.text
+    assert 'esc(d.objective_title || "（空）")' in r.text
+    assert "d.objective_summary" in r.text
+    assert "查看完整下发指令" in r.text
     assert 'esc(d.dispatched_objective || "（空）")' in r.text
     assert 'esc(t.objective || "（空）")' not in r.text
     assert "esc(plan.plan_objective)" not in r.text
@@ -367,7 +382,65 @@ def test_task_detail_uses_task_scoped_dispatch_objective(client):
     detail = client.get(f"/api/tasks/{task['id']}").json()
     assert detail["task"]["objective"] == "调研 X"
     assert detail["dispatched_objective"] == "实际下发给 Codex 的完整实施目标"
+    assert detail["objective_title"] == "实际下发给 Codex 的完整实施目标"
     assert detail["instruction_source"] == "a2a_task_request"
+
+
+def test_task_detail_summarizes_long_dispatch_but_preserves_audit_text(client):
+    from orchestrator import collaboration_store
+    from state.db import connect
+
+    objective = (
+        "修复 agentHub GitHub Actions Docker 发布流水线在 commit "
+        "71581e944614c3e4558e2e2cd52e3d92b6b2cbb0 失败的问题。"
+        "事实证据：Actions run 32681623853 的 test 与 multi-platform "
+        "candidate build/push 成功；Trivy gate 失败，扫描结果 Total 36。"
+        "不得降低扫描门禁，也不得直接修改 main。"
+    )
+    conn = connect()
+    task = conn.execute(
+        "SELECT id, collaboration_id FROM tasks WHERE id = 'T-2';"
+    ).fetchone()
+    collaboration = collaboration_store.get_collaboration(
+        conn, task["collaboration_id"])
+    collaboration_store.append_message(
+        conn,
+        conversation_id=collaboration["conversation_id"],
+        collaboration_id=task["collaboration_id"],
+        task_id=task["id"], agent_id="codex",
+        sender_type="hermes", sender_id="hermes",
+        recipient_type="agent", recipient_id="codex",
+        message_type="a2a.task.request",
+        content={"text": objective},
+        based_on_revision=collaboration["context_revision"],
+    )
+    conn.close()
+
+    detail = client.get(f"/api/tasks/{task['id']}").json()
+    assert detail["objective_title"] == "修复 GitHub 流水线构建失败问题"
+    assert detail["objective_summary"].startswith("事实证据：Actions run")
+    assert len(detail["objective_summary"]) <= 181
+    assert detail["dispatched_objective"] == objective
+
+
+def test_task_detail_prefers_structured_display_copy(client):
+    from state.db import connect
+
+    conn = connect()
+    conn.execute(
+        "UPDATE tasks SET plan_context_json = ? WHERE id = 'T-2';",
+        (json.dumps({
+            "display_title": "结构化任务标题",
+            "objective_summary": "结构化简要说明",
+        }, ensure_ascii=False),),
+    )
+    conn.commit()
+    conn.close()
+
+    detail = client.get("/api/tasks/T-2").json()
+    assert detail["objective_title"] == "结构化任务标题"
+    assert detail["objective_summary"] == "结构化简要说明"
+    assert detail["dispatched_objective"] == "调研 X"
 
 
 def test_task_detail_falls_back_to_plan_step_then_task_record(client):
@@ -416,6 +489,68 @@ def test_collaboration_detail_renders_safe_markdown(client):
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "<script>" not in html
     assert 'href="javascript:' not in html
+
+
+def test_collaboration_detail_includes_native_agent_messages_and_tools(client):
+    from orchestrator import state_store
+    from state.db import connect
+
+    conn = connect()
+    task = conn.execute(
+        "SELECT id, collaboration_id FROM tasks WHERE id = 'T-2';"
+    ).fetchone()
+    conn.execute("UPDATE tasks SET assigned_to = 'codex' WHERE id = ?;",
+                 (task["id"],))
+    state_store.record_event(conn, {
+        "event_id": "native-message", "event_type": "agent.session.event",
+        "task_id": task["id"], "source": "codex",
+        "payload": {
+            "nativeEventType": "item.lifecycle",
+            "data": {"phase": "completed", "item": {
+                "id": "msg-1", "type": "agentMessage",
+                "text": "我已定位 Dockerfile 中的基础镜像问题。",
+                "phase": "commentary",
+            }},
+        },
+    })
+    state_store.record_event(conn, {
+        "event_id": "native-tool-start", "event_type": "agent.session.event",
+        "task_id": task["id"], "source": "codex",
+        "payload": {
+            "nativeEventType": "item.lifecycle",
+            "data": {"phase": "started", "item": {
+                "id": "edit-1", "type": "fileChange",
+                "changes": [{"path": "/project/Dockerfile",
+                             "kind": {"type": "update"}}],
+            }},
+        },
+    })
+    state_store.record_event(conn, {
+        "event_id": "native-tool-complete", "event_type": "agent.session.event",
+        "task_id": task["id"], "source": "codex",
+        "payload": {
+            "nativeEventType": "item.lifecycle",
+            "data": {"phase": "completed", "item": {
+                "id": "edit-1", "type": "fileChange", "status": "completed",
+                "changes": [{"path": "/project/Dockerfile",
+                             "kind": {"type": "update"}}],
+            }},
+        },
+    })
+    conn.close()
+
+    detail = client.get(
+        f"/api/collaborations/{task['collaboration_id']}"
+    ).json()
+    activity = detail["agent_activity"]
+    assert [item["message_type"] for item in activity] == [
+        "agent.activity.message", "agent.activity.tool"]
+    assert json.loads(activity[0]["content_json"])["text"].startswith(
+        "我已定位 Dockerfile")
+    tool = json.loads(activity[1]["content_json"])["tool_calls"][0]
+    assert tool["name"] == "fileChange"
+    assert tool["arguments"]["status"] == "completed"
+    assert activity[1]["sequence"].startswith("event-")
 
 
 def test_index_has_bounded_alert_center_and_in_page_dialogs(client):

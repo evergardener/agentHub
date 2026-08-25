@@ -63,6 +63,52 @@ def test_profile_is_versioned_audited_and_rollbackable(conn):
         "agent.profile.updated"]
 
 
+def test_profile_runtime_model_policy_is_versioned(conn):
+    from orchestrator import agent_profile_store
+
+    template_id = _template(conn)
+    profile_id = agent_profile_store.create_profile(
+        conn, template_id=template_id, name="runtime-policy",
+        created_by="user-1", model="gpt-5.6-terra",
+        allowed_models=["gpt-5.6-terra", "gpt-5.6-luna"],
+        reasoning_effort="medium",
+        allowed_reasoning_efforts=["medium", "high", "max"],
+    )
+
+    first = agent_profile_store.profile_policy(conn, profile_id)
+    assert first["model"] == "gpt-5.6-terra"
+    assert first["allowed_models"] == [
+        "gpt-5.6-terra", "gpt-5.6-luna"]
+    assert first["reasoning_effort"] == "medium"
+    assert first["allowed_reasoning_efforts"] == [
+        "medium", "high", "max"]
+
+    second = agent_profile_store.update_profile(
+        conn, profile_id, expected_version=1, updated_by="user-1",
+        changes={"model": "gpt-5.6-luna", "reasoning_effort": "max"},
+    )
+    assert second["version"] == 2
+    snapshot = agent_profile_store.profile_policy(conn, profile_id)
+    assert snapshot["model"] == "gpt-5.6-luna"
+    assert snapshot["reasoning_effort"] == "max"
+
+
+def test_profile_runtime_defaults_must_stay_inside_allowlists(conn):
+    from orchestrator import agent_profile_store
+
+    template_id = _template(conn)
+    with pytest.raises(ValueError, match="present in allowed_models"):
+        agent_profile_store.create_profile(
+            conn, template_id=template_id, name="invalid-model",
+            created_by="user-1", model="gpt-5.6-luna",
+            allowed_models=["gpt-5.6-terra"])
+    with pytest.raises(ValueError, match="present in allowed_reasoning"):
+        agent_profile_store.create_profile(
+            conn, template_id=template_id, name="invalid-effort",
+            created_by="user-1", reasoning_effort="max",
+            allowed_reasoning_efforts=["medium"])
+
+
 def test_profile_assignment_and_action_intent_restriction(conn, tmp_path,
                                                           monkeypatch):
     from hermes.action_policy import ActionPolicy

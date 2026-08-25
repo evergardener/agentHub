@@ -476,7 +476,8 @@ def upsert_agent_session(conn, *, collaboration_id: str, task_id: str,
                          resume_capability: str = "unknown",
                          recovery_state: str = "none",
                          context_snapshot: dict | None = None,
-                         adapter_instance_id: str | None = None):
+                         adapter_instance_id: str | None = None,
+                         commit: bool = True):
     """Idempotently refresh the current binding or create a replacement."""
     current = get_current_agent_session(conn, task_id, agent_id)
     if (current is not None
@@ -510,7 +511,8 @@ def upsert_agent_session(conn, *, collaboration_id: str, task_id: str,
                         "native_session_id": resolved_native,
                         "recovery_state": recovery_state,
                     })
-            conn.commit()
+            if commit:
+                conn.commit()
         except Exception:
             conn.rollback()
             raise
@@ -524,7 +526,7 @@ def upsert_agent_session(conn, *, collaboration_id: str, task_id: str,
         resume_capability=resume_capability, capabilities=capabilities,
         recovery_state=recovery_state,
         replacement_of_id=current["id"] if current is not None else None,
-        context_snapshot=context_snapshot)
+        context_snapshot=context_snapshot, commit=commit)
 
 
 def update_agent_session_status(conn, binding_id: str, *, status: str,
@@ -596,6 +598,7 @@ def upsert_session_interaction(
     session_binding_id: str,
     agent_id: str,
     interaction: dict,
+    commit: bool = True,
 ):
     """Persist an adapter interaction once and preserve its decision state."""
     adapter_id = interaction.get("interactionId")
@@ -635,7 +638,8 @@ def upsert_session_interaction(
                 "native_request_id": interaction.get("nativeRequestId"),
             },
         )
-        conn.commit()
+        if commit:
+            conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -666,14 +670,52 @@ def list_session_interactions(conn, *, task_id: str | None = None,
     ).fetchall()
 
 
+def pending_interaction_views(conn, task_id: str) -> list[dict]:
+    """Return safe, structured interaction details for Hermes/UI routing."""
+    rows = conn.execute(
+        "SELECT i.id, i.agent_id, i.kind, i.status, i.payload_json,"
+        " a.operation, a.risk, a.policy_route,"
+        " a.status AS action_intent_status, a.policy_reason"
+        " FROM agent_session_interactions i"
+        " LEFT JOIN action_intents a ON a.id = i.action_intent_id"
+        " WHERE i.task_id = ? AND i.status IN ('pending', 'failed')"
+        " ORDER BY i.requested_at, i.id;",
+        (task_id,),
+    ).fetchall()
+    pending = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        pending.append({
+            "interaction_id": row["id"],
+            "agent_id": row["agent_id"],
+            "kind": row["kind"],
+            "status": row["status"],
+            "inspectable": payload.get("inspectable") is True,
+            "tool_name": payload.get("toolName"),
+            "reason": payload.get("reason"),
+            "tool_view": payload.get("toolView"),
+            "operation": row["operation"],
+            "risk": row["risk"],
+            "policy_route": row["policy_route"],
+            "action_intent_status": row["action_intent_status"],
+            "policy_reason": row["policy_reason"],
+        })
+    return pending
+
+
 def attach_action_intent(conn, interaction_id: str,
-                         action_intent_id: str) -> None:
+                         action_intent_id: str, *,
+                         commit: bool = True) -> None:
     cur = conn.execute(
         "UPDATE agent_session_interactions SET action_intent_id = ?"
         " WHERE id = ? AND action_intent_id IS NULL;",
         (action_intent_id, interaction_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     if cur.rowcount != 1:
         raise ValueError(
             f"interaction already linked or missing: {interaction_id}")
@@ -727,7 +769,8 @@ def create_action_intent(conn, *, collaboration_id: str, task_id: str,
                          based_on_revision: int,
                          risk: str = "unknown",
                          rollback_plan: str | None = None,
-                         session_binding_id: str | None = None):
+                         session_binding_id: str | None = None,
+                         commit: bool = True):
     _, current = _current_revision(conn, collaboration_id)
     if based_on_revision != current:
         raise ContextConflict(collaboration_id, based_on_revision, current)
@@ -754,7 +797,8 @@ def create_action_intent(conn, *, collaboration_id: str, task_id: str,
                 "risk": risk,
                 "based_on_revision": based_on_revision,
             })
-        conn.commit()
+        if commit:
+            conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -763,7 +807,8 @@ def create_action_intent(conn, *, collaboration_id: str, task_id: str,
     ).fetchone()
 
 
-def route_action_intent(conn, intent_id: str, *, policy=None):
+def route_action_intent(conn, intent_id: str, *, policy=None,
+                        commit: bool = True):
     """Apply structured policy and route to auto/Hermes/user authority."""
     from common import config as cfg
     from hermes.action_policy import ActionDecision, ActionPolicy
@@ -861,7 +906,8 @@ def route_action_intent(conn, intent_id: str, *, policy=None):
                 "profile_id": profile_id,
                 "plan_step_id": plan_step["id"] if plan_step else None,
             })
-        conn.commit()
+        if commit:
+            conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -870,10 +916,11 @@ def route_action_intent(conn, intent_id: str, *, policy=None):
     ).fetchone()
 
 
-def request_action_intent(conn, *, policy=None, **kwargs):
+def request_action_intent(conn, *, policy=None, commit: bool = True, **kwargs):
     """Create, audit, and immediately route one agent ActionIntent."""
-    intent = create_action_intent(conn, **kwargs)
-    return route_action_intent(conn, intent["id"], policy=policy)
+    intent = create_action_intent(conn, commit=commit, **kwargs)
+    return route_action_intent(
+        conn, intent["id"], policy=policy, commit=commit)
 
 
 def decide_action_intent(conn, intent_id: str, *, approved: bool,

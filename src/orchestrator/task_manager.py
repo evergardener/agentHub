@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 import uuid
 from pathlib import Path
@@ -40,6 +41,17 @@ def normalize_execution_workspace(value: str | Path) -> str:
     return str(resolved)
 
 
+def require_structured_workspace(objective: str,
+                                 workspace: str | Path | None) -> None:
+    """Reject prose-only absolute paths instead of guessing a safety scope."""
+    if workspace:
+        return
+    if re.search(r"(?:^|[\s（(：:])/[A-Za-z0-9_.-]", objective or ""):
+        raise ValueError(
+            "objective 含绝对代码路径，但缺少结构化 workspace；"
+            "请用 workspace 字段传入代码仓库绝对路径后重试")
+
+
 class TaskManager:
     def __init__(self, db_path: str | Path | None = None,
                  workspace: Path | None = None,
@@ -62,6 +74,11 @@ class TaskManager:
                     context: dict | str | None = None,
                     execution_workspace: str | Path | None = None) -> str:
         plan_context = dict(context) if isinstance(context, dict) else None
+        context_workspace = (
+            plan_context.get("execution_workspace")
+            if isinstance(plan_context, dict) else None)
+        require_structured_workspace(
+            objective, execution_workspace or context_workspace)
         if execution_workspace is not None:
             normalized_workspace = normalize_execution_workspace(
                 execution_workspace)
@@ -154,6 +171,24 @@ class TaskManager:
                     f"workspace exceeds Agent Profile roots: {workspace}")
         return workspace
 
+    def _runtime_config_for_agent(self, row, agent_id: str) -> dict | None:
+        try:
+            plan_context = json.loads(row["plan_context_json"] or "null")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("task plan_context_json is invalid") from exc
+        requested = (
+            plan_context.get("runtime_config")
+            if isinstance(plan_context, dict) else None
+        )
+        if requested is not None and not isinstance(requested, dict):
+            raise ValueError("task runtime_config must be an object")
+        from orchestrator.runtime_config import resolve_runtime_config
+
+        return resolve_runtime_config(
+            self.conn, agent_id=agent_id, requested=requested,
+            include_profile_defaults=True,
+        )
+
     def _deps_satisfied(self, depends_on: list[str]) -> bool:
         for dep in depends_on:
             row = state_store.get_task(self.conn, dep)
@@ -184,6 +219,7 @@ class TaskManager:
             raise KeyError(f"task not found: {task_id}")
         execution_workspace = self._execution_workspace_for_agent(
             row, agent_id)
+        runtime_config = self._runtime_config_for_agent(row, agent_id)
         if row["status"] == TaskStatus.QUEUED.value:
             needs_assignment = True
             is_rework = False
@@ -271,6 +307,11 @@ class TaskManager:
                     raise RuntimeError(
                         "execution workspace changed for a native session; "
                         "create a replacement session")
+                previous_runtime_config = snapshot.get("runtime_config")
+                if previous_runtime_config != runtime_config:
+                    raise RuntimeError(
+                        "runtime config changed for a native session; "
+                        "create a replacement session")
                 adapter_session_id = (
                     binding["adapter_session_id"] or adapter_session_id)
                 native_session_id = binding["native_session_id"]
@@ -292,6 +333,19 @@ class TaskManager:
             " WHERE id = ?;", (agent_id, now_iso(), task_id),
         )
         self.conn.commit()
+        if runtime_config:
+            state_store.record_event(self.conn, {
+                "event_id": f"runtime-dispatched-{task_id}-"
+                            f"{uuid.uuid4().hex[:8]}",
+                "event_type": "task.runtime_config.dispatched",
+                "task_id": task_id,
+                "source": "hermes",
+                "payload": {
+                    "agent_id": agent_id,
+                    "runtime_config": runtime_config,
+                    "recovery_mode": recovery_plan,
+                },
+            })
 
         def _session_metadata(task: dict) -> tuple[str | None, dict, str | None]:
             meta = (task.get("metadata") or {}).get("agentHub") or {}
@@ -327,6 +381,7 @@ class TaskManager:
                     "objective": row["objective"],
                     "project": row["project"],
                     "context_revision": context_revision,
+                    "runtime_config": runtime_config,
                     "task_plan": json.loads(
                         row["plan_context_json"] or "null"),
                 })
@@ -366,6 +421,13 @@ class TaskManager:
                         "recoveryMode": recovery_plan,
                         "taskPlan": plan_context,
                         "attempt": attempt,
+                        **({"model": runtime_config["model"]}
+                           if runtime_config and runtime_config.get("model")
+                           else {}),
+                        **({"reasoningEffort":
+                            runtime_config["reasoning_effort"]}
+                           if runtime_config
+                           and runtime_config.get("reasoning_effort") else {}),
                         **({"executionWorkspace": execution_workspace}
                            if execution_workspace else {}),
                     },

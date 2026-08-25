@@ -66,6 +66,8 @@ async def test_create_task_plan_binds_tasks_agents_profiles_and_dependencies(
                  if item["id"] == "codex")
     assert codex["profile"]["version"] == 1
     assert "filesystem.write" in codex["profile"]["allowed_operations"]
+    assert "gpt-5.6-luna" in codex["profile"]["allowed_models"]
+    assert "max" in codex["profile"]["allowed_reasoning_efforts"]
     result = await tools.dispatch("create_task_plan", {
         "objective": "implement then review", "project": "agenthub",
         "steps": _steps(),
@@ -87,6 +89,28 @@ async def test_create_task_plan_binds_tasks_agents_profiles_and_dependencies(
     assert json.loads(review_task["depends_on_json"]) == [backend_task["id"]]
     assert backend_task["status"] == "queued"
     assert review_task["status"] == "created"
+
+
+async def test_task_plan_persists_profile_allowed_runtime_config(tmp_path):
+    tm, tools, _ = _setup(tmp_path)
+    steps = _steps()
+    steps[0]["model"] = "gpt-5.6-luna"
+    steps[0]["reasoning_effort"] = "max"
+
+    result = await tools.dispatch("create_task_plan", {
+        "objective": "implement then review", "steps": steps})
+
+    task = state_store.get_task(tm.conn, result["steps"][0]["task_id"])
+    context = json.loads(task["plan_context_json"])
+    assert context["runtime_config"] == {
+        "model": "gpt-5.6-luna", "reasoning_effort": "max"}
+
+
+async def test_legacy_task_runtime_config_requires_bound_agent(tmp_path):
+    _, tools, _ = _setup(tmp_path)
+    result = await tools.dispatch("create_task", {
+        "objective": "implement", "model": "gpt-5.6-luna"})
+    assert "agent_id is required" in result["error"]
 
 
 async def test_plan_rejects_agent_substitution_and_profile_drift(tmp_path):

@@ -1,0 +1,31 @@
+name: agenthub-supervisor
+version: 1.0.0
+description: >
+  Persistently supervise agentHub tasks and wake the originating qishuo gateway
+  session for approvals, failures, and result acceptance. Remote worker content
+  is never injected; every wakeup requires an authoritative tasks/get call.
+author: evergarden
+hooks:
+  - transform_tool_result
+  - on_session_start
+provides_hooks:
+  - transform_tool_result
+  - on_session_start
+provides_tools:
+  - agenthub_supervision_ack
+  - agenthub_supervision_register
+  - agenthub_supervision_status
+  - agenthub_supervision_stop
+optional_env:
+  - name: AGENTHUB_A2A_TOKEN
+    description: Bearer credential for the single configured agentHub A2A peer.
+    prompt: agentHub A2A token
+    password: true
+  - name: AGENTHUB_SUPERVISOR_URL
+    description: Fixed agentHub JSON-RPC URL behind the qishuo loopback gateway.
+    prompt: agentHub supervisor URL
+    password: false
+  - name: AGENTHUB_SUPERVISOR_POLL_SECONDS
+    description: Background outbox polling interval, clamped to 2-60 seconds.
+    prompt: Supervisor polling interval
+    password: false

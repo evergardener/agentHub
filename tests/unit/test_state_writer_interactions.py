@@ -238,3 +238,70 @@ def test_state_writer_verifies_codex_file_change_for_hermes_route(
     assert intent["operation"] == "filesystem.write"
     assert intent["status"] == "awaiting_hermes"
     assert intent["policy_route"] == "hermes"
+
+
+def test_state_writer_structures_codex_login_shell_for_user_approval(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path / "agenthub"))
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    writer = StateWriter(tmp_path / "state.db")
+    conversation_id = collaboration_store.create_conversation(writer.conn)
+    collaboration_id = collaboration_store.create_collaboration(
+        writer.conn, conversation_id=conversation_id,
+        objective="build the image")
+    state_store.create_task(
+        writer.conn, task_id="T-codex-command", objective="build",
+        created_by="hermes", assigned_to="codex",
+        collaboration_id=collaboration_id, status=TaskStatus.QUEUED,
+        plan_context={"execution_workspace": str(execution_workspace)},
+    )
+    state_store.transition_task(
+        writer.conn, "T-codex-command", TaskStatus.ASSIGNED)
+    state_store.transition_task(
+        writer.conn, "T-codex-command", TaskStatus.WORKING)
+
+    writer.apply({
+        "event_id": "E-codex-command",
+        "event_type": "task.input_required",
+        "source": "codex",
+        "task_id": "T-codex-command",
+        "payload": {
+            "session_id": "S-codex-command",
+            "native_session_id": "native-codex-command",
+            "interactions": [{
+                "interactionId": "codex:command",
+                "kind": "approval",
+                "nativeRequestId": "rpc-command",
+                "nativeSessionId": "native-codex-command",
+                "payload": {
+                    "toolName": "shell",
+                    "inspectable": True,
+                    "reason": "build image",
+                    "toolView": {
+                        "kind": "shell",
+                        "command": "/bin/zsh -lc 'docker build .'",
+                        "cwd": str(execution_workspace),
+                    },
+                },
+            }],
+        },
+    })
+
+    interaction = collaboration_store.list_session_interactions(
+        writer.conn, task_id="T-codex-command")[0]
+    payload = json.loads(interaction["payload_json"])
+    intent = writer.conn.execute(
+        "SELECT * FROM action_intents WHERE id = ?;",
+        (interaction["action_intent_id"],),
+    ).fetchone()
+    targets = json.loads(intent["targets_json"])
+
+    assert payload["inspectable"] is True
+    assert intent["operation"] == "command.execute"
+    assert intent["status"] == "awaiting_user"
+    assert intent["policy_route"] == "user"
+    assert targets["workspace"] == str(execution_workspace.resolve())
+    assert targets["cwd"] == str(execution_workspace.resolve())
+    assert targets["command"] == "docker"
+    assert targets["args"] == ["build", "."]

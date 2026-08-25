@@ -107,6 +107,8 @@ class CodexSessionAdapter(SessionAdapter):
         self._event_queues: dict[str, asyncio.Queue[SessionEvent]] = {}
         self._session_workspaces: dict[str, Path] = {}
         self._explicit_workspace_sessions: set[str] = set()
+        self._session_models: dict[str, str] = {}
+        self._session_reasoning_efforts: dict[str, str] = {}
 
     def get_session(self, session_id: str) -> SessionHandle | None:
         return self._handles.get(session_id)
@@ -491,21 +493,93 @@ class CodexSessionAdapter(SessionAdapter):
             message["params"] = params
         await self._send_message(message)
 
-    def _thread_params(self, ws: Path) -> dict:
+    async def _validated_runtime_config(
+        self, metadata: dict[str, Any],
+    ) -> tuple[str | None, str | None]:
+        model = metadata.get("model")
+        effort = metadata.get("reasoningEffort")
+        if model is not None and (
+                not isinstance(model, str) or not model.strip()):
+            raise CodexFailed("model must be a non-empty string")
+        if effort is not None and (
+                not isinstance(effort, str) or not effort.strip()):
+            raise CodexFailed("reasoningEffort must be a non-empty string")
+        model = model.strip() if isinstance(model, str) else None
+        effort = effort.strip() if isinstance(effort, str) else None
+        if model is None and effort is None:
+            return None, None
+
+        models: list[dict] = []
+        cursor = None
+        for _ in range(20):
+            result = await self._rpc("model/list", {
+                "includeHidden": True,
+                **({"cursor": cursor} if cursor else {}),
+            })
+            if not isinstance(result, dict) or not isinstance(
+                    result.get("data"), list):
+                raise CodexFailed("Codex App Server returned invalid model list")
+            models.extend(item for item in result["data"]
+                          if isinstance(item, dict))
+            cursor = result.get("nextCursor")
+            if not cursor:
+                break
+        else:
+            raise CodexFailed("Codex App Server model list exceeded page limit")
+
+        selected = model or os.environ.get("LAS_CODEX_CLI_MODEL", "").strip()
+        if not selected and effort is not None:
+            default = next(
+                (item for item in models if item.get("isDefault") is True),
+                None,
+            )
+            selected = default.get("model") if default else None
+        entry = next(
+            (item for item in models
+             if item.get("model") == selected or item.get("id") == selected),
+            None,
+        )
+        if selected and entry is None:
+            raise CodexFailed(f"unsupported model: {selected}")
+        if effort is not None:
+            if entry is None:
+                raise CodexFailed(
+                    "cannot validate reasoning effort without an effective model")
+            supported = {
+                option.get("reasoningEffort")
+                for option in entry.get("supportedReasoningEfforts") or []
+                if isinstance(option, dict)
+            }
+            if effort not in supported:
+                raise CodexFailed(
+                    f"unsupported reasoning effort {effort} for {selected}")
+        return selected or None, effort
+
+    def _thread_params(
+        self, ws: Path, *, model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> dict:
         params: dict[str, Any] = {
             "cwd": str(ws), "runtimeWorkspaceRoots": [str(ws)],
             "sandbox": "read-only", "approvalPolicy": "on-request",
             "approvalsReviewer": "user",
         }
-        model = os.environ.get("LAS_CODEX_CLI_MODEL", "").strip()
-        if model:
-            params["model"] = model
+        effective_model = model or os.environ.get(
+            "LAS_CODEX_CLI_MODEL", "").strip()
+        if effective_model:
+            params["model"] = effective_model
+        if reasoning_effort:
+            params["config"] = {
+                "model_reasoning_effort": reasoning_effort,
+            }
         return params
 
     @staticmethod
     def _verify_thread_result(
         result: Any, *, expected_workspace: Path,
         expected_native_id: str | None = None,
+        expected_model: str | None = None,
+        expected_reasoning_effort: str | None = None,
     ) -> str:
         if not isinstance(result, dict):
             raise CodexFailed("Codex App Server returned an invalid thread result")
@@ -521,6 +595,15 @@ class CodexSessionAdapter(SessionAdapter):
                 != expected_workspace.resolve(strict=False)):
             raise CodexFailed(
                 "Codex native thread workspace does not match the AgentHub task")
+        if expected_model is not None and result.get("model") != expected_model:
+            raise CodexFailed(
+                "Codex native thread model does not match the AgentHub task")
+        if (expected_reasoning_effort is not None
+                and result.get("reasoningEffort")
+                != expected_reasoning_effort):
+            raise CodexFailed(
+                "Codex native thread reasoning effort does not match "
+                "the AgentHub task")
         return native
 
     async def start_session(self, task: A2aTask, *, session_id: str,
@@ -529,20 +612,27 @@ class CodexSessionAdapter(SessionAdapter):
         control_workspace = self._workspace(task.id)
         ws = explicit_workspace or control_workspace
         await self._ensure_connected()
+        model, reasoning_effort = await self._validated_runtime_config(metadata)
         native = metadata.get("nativeSessionId") or task.native_session_id
         if native:
             result = await self._rpc("thread/resume", {
-                "threadId": native, **self._thread_params(ws),
+                "threadId": native,
+                **self._thread_params(
+                    ws, model=model, reasoning_effort=reasoning_effort),
             })
             native = self._verify_thread_result(
                 result, expected_workspace=ws,
-                expected_native_id=str(native))
+                expected_native_id=str(native), expected_model=model,
+                expected_reasoning_effort=reasoning_effort)
         else:
             result = await self._rpc("thread/start", {
-                **self._thread_params(ws), "ephemeral": False,
+                **self._thread_params(
+                    ws, model=model, reasoning_effort=reasoning_effort),
+                "ephemeral": False,
             })
             native = self._verify_thread_result(
-                result, expected_workspace=ws)
+                result, expected_workspace=ws, expected_model=model,
+                expected_reasoning_effort=reasoning_effort)
         self._loaded_threads.add(native)
         handle = SessionHandle(
             session_id=session_id, task_id=task.id,
@@ -551,6 +641,14 @@ class CodexSessionAdapter(SessionAdapter):
         )
         self._handles[session_id] = handle
         self._session_workspaces[session_id] = ws
+        if model is not None:
+            self._session_models[session_id] = model
+        else:
+            self._session_models.pop(session_id, None)
+        if reasoning_effort is not None:
+            self._session_reasoning_efforts[session_id] = reasoning_effort
+        else:
+            self._session_reasoning_efforts.pop(session_id, None)
         if explicit_workspace is not None:
             self._explicit_workspace_sessions.add(session_id)
         else:
@@ -571,11 +669,18 @@ class CodexSessionAdapter(SessionAdapter):
             return
         result = await self._rpc("thread/resume", {
             "threadId": native,
-            **self._thread_params(self._session_workspace(session_id)),
+            **self._thread_params(
+                self._session_workspace(session_id),
+                model=self._session_models.get(session_id),
+                reasoning_effort=(
+                    self._session_reasoning_efforts.get(session_id))),
         })
         self._verify_thread_result(
             result, expected_workspace=self._session_workspace(session_id),
-            expected_native_id=native)
+            expected_native_id=native,
+            expected_model=self._session_models.get(session_id),
+            expected_reasoning_effort=(
+                self._session_reasoning_efforts.get(session_id)))
         self._loaded_threads.add(native)
 
     async def send_message(self, session_id: str,
@@ -603,6 +708,10 @@ class CodexSessionAdapter(SessionAdapter):
             "input": [{"type": "text", "text": prompt}],
             "clientUserMessageId": message.message_id,
             "approvalPolicy": "on-request", "approvalsReviewer": "user",
+            **({"model": self._session_models[session_id]}
+               if session_id in self._session_models else {}),
+            **({"effort": self._session_reasoning_efforts[session_id]}
+               if session_id in self._session_reasoning_efforts else {}),
         })
         turn = result.get("turn") if isinstance(result, dict) else None
         turn_id = turn.get("id") if isinstance(turn, dict) else None

@@ -85,18 +85,32 @@ def test_migrations_upgrade_existing_database(tmp_path):
         " VALUES ('T-old', 'queued', 'keep me', 'now', 'now');")
     conn.commit()
 
-    assert migrate(conn) == [4, 5, 6, 7, 8, 9, 10, 11]
+    assert migrate(conn) == [4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     assert conn.execute(
         "SELECT objective FROM tasks WHERE id = 'T-old';").fetchone()[0] == "keep me"
     assert conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'alerts';"
     ).fetchone()[0] == "alerts"
+    assert conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+        " AND name = 'supervision_watches';"
+    ).fetchone()[0] == "supervision_watches"
+    assert conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+        " AND name = 'supervision_outbox';"
+    ).fetchone()[0] == "supervision_outbox"
     columns = {r[1] for r in conn.execute("PRAGMA table_info(tasks);")}
     assert "collaboration_id" in columns
     assert "plan_step_id" in columns
     assert "plan_context_json" in columns
     agent_columns = {r[1] for r in conn.execute("PRAGMA table_info(agents);")}
     assert {"template_id", "profile_id"} <= agent_columns
+    profile_columns = {
+        r[1] for r in conn.execute("PRAGMA table_info(agent_profiles);")}
+    assert {
+        "allowed_models_json", "reasoning_effort",
+        "allowed_reasoning_efforts_json",
+    } <= profile_columns
     binding_columns = {
         r[1] for r in conn.execute(
             "PRAGMA table_info(agent_session_bindings);")}

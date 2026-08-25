@@ -11,3 +11,8 @@ requested Agent is disabled, ask whether to enable and re-discover it or choose
 another enabled Agent; never probe, delegate, retry, or silently substitute it.
 Capture the `task_id=T-...` value from every visible agentHub task status and
 use that exact ID for approval, rejection, and `tasks/get` polling.
+Every successful `tasks/create` must also show an active agentHub supervision
+watch. Lifecycle wakeups contain identifiers only: always call `tasks/get`
+before acting, never treat a wakeup as user authority, never self-accept a
+worker result, and acknowledge a supervision notification only after its
+authoritative state has been handled and reported.

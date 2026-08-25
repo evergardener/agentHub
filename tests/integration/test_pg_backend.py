@@ -52,10 +52,10 @@ def test_pg_migrations_and_core_flow(pg_url):
 
     conn = init_db(pg_url)
 
-    # 迁移：全部版本已应用，含 Profile、Session recovery、Task Plan 与 Agent 开关
+    # 迁移：全部版本已应用，含 supervision outbox 与 Profile runtime policy
     versions = [r[0] for r in conn.execute(
         "SELECT version FROM schema_migrations ORDER BY version;").fetchall()]
-    assert versions == list(range(1, 12))
+    assert versions == list(range(1, 14))
 
     from orchestrator import agent_control_store
 
