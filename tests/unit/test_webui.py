@@ -306,10 +306,14 @@ def test_index_page(client):
     assert "多个 @ 接收者" in r.text
     assert 'agent_id: target.id' in r.text
     assert 'class="task-action-input" id="acceptance-feedback"' in r.text
-    assert 'class="task-action-input" id="d-intervention-text"' in r.text
+    # Task follow-up text is sent from the central @mention composer; the
+    # task-control pane must not expose a second competing conversation box.
+    assert 'id="d-intervention-text"' not in r.text
     assert ".task-action-input:focus" in r.text
     assert 'id="acceptance-feedback" rows="2" style=' not in r.text
     assert 'id="d-intervention-text" rows="2" style=' not in r.text
+    assert "const wasNearBottom = panel.scrollHeight - panel.scrollTop" in r.text
+    assert "wasNearBottom ? panel.scrollHeight : previousTop" in r.text
     assert 'data-task-detail-tab="goals"' in r.text
     assert 'data-task-detail-tab="execution"' in r.text
     assert "目标与交付" in r.text

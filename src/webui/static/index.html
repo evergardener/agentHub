@@ -786,8 +786,9 @@
   .chat-transcript .message.outbound .message-shell { grid-column: 1; grid-row: 1;
                                                        border-radius: 14px 4px 14px 14px; }
   .message-agent-label { color: var(--mut); }
-  .message .mc { font-family: inherit; font-size: 13px; line-height: 1.72; }
+  .message .mc { font-family: inherit; font-size: 13px; line-height: 1.45; }
   .message .mc, .markdown-body { min-width: 0; overflow-wrap: anywhere; }
+  .markdown-body { line-height: 1.45; color: var(--fg); }
   .markdown-body > :first-child { margin-top: 0; }
   .markdown-body > :last-child { margin-bottom: 0; }
   .markdown-body p { margin: 0 0 .72em; }
@@ -815,11 +816,19 @@
   }
   .markdown-body pre code { padding: 0; background: none; color: inherit; }
   .markdown-body a { color: var(--acc); text-underline-offset: 2px; }
-  .markdown-body table { display: block; max-width: 100%; overflow-x: auto;
-                         border-collapse: collapse; margin: .7em 0; }
+  .markdown-body table { display: block; max-width: 100%; overflow-x: auto; margin: .7em 0;
+                        border: 1px solid rgba(89,115,119,.20); border-collapse: collapse; }
+  .markdown-body thead th,
+  .markdown-body thead td { background: rgba(255,255,255,.55); }
+  .markdown-body thead { background: rgba(255,255,255,.12); }
   .markdown-body th, .markdown-body td {
-    padding: 5px 8px; border: 1px solid rgba(89,115,119,.20); text-align: left;
+    padding: 5px 8px;
+    border: 1px solid rgba(89,115,119,.20);
+    text-align: left;
+    vertical-align: top;
+    line-height: 1.4;
   }
+  .markdown-body th { font-weight: 700; color: var(--fg); }
   .tool-stack { display: grid; gap: 7px; margin-top: 8px; }
   .tool-card {
     border: 1px solid rgba(167,127,83,.22); border-radius: 10px;
@@ -968,6 +977,7 @@
                            width: 7px; height: 7px; border-radius: 50%; background: var(--acc); }
   .timeline-item strong { display: block; color: var(--fg); font-size: 11.5px; font-weight: 600; }
   .timeline-item span { color: var(--faint); font-size: 10px; }
+  .timeline-item .stage-sub { display: block; color: var(--mut); margin-top: 3px; font-size: 10px; }
   .run-list, .interaction-list { display: grid; gap: 7px; }
   .run-card, .interaction-card { padding: 8px 9px; border-radius: 10px; background: rgba(255,255,255,.30); }
   .run-card .run-head, .interaction-card .run-head { display: flex; align-items: center; gap: 7px; }
@@ -1270,6 +1280,7 @@ const S = {
   evCount: 0,
   EV_CAP: 300,           // 事件流 DOM 上限
   detailId: null,
+  taskExecutionEvents: new Map(),
   taskDetailTab: "goals",
   taskDetailScrolls: new Map(),
   collaborationId: null,
@@ -1926,19 +1937,244 @@ function eventDetail(e) {
   return `agent.session · ${kind}${text ? " · " + String(text).slice(0, 90) : ""}`;
 }
 
+function taskEventPayload(event) {
+  if (!event || !event.payload_json) return {};
+  try {
+    return JSON.parse(event.payload_json) || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function normalizeText(value, maxLen = 100) {
+  const text = compactValue(value).trim();
+  if (text.length <= maxLen) return text;
+  return text.slice(0, maxLen - 1).trim() + "…";
+}
+
+function toExecutionStage(event) {
+  const eventType = String(event.event_type || "");
+  const payload = taskEventPayload(event);
+  const common = {
+    seq: event.seq,
+    time: event.created_at || "",
+  };
+
+  if (eventType === "task.runtime_config.dispatched") {
+    const agent = payload.agent_id || payload.assigned_to || "agent";
+    const runtime = payload.runtime_config || {};
+    const model = runtime.model ? ` · ${runtime.model}` : "";
+    const effort = runtime.reasoning_effort ? ` / ${runtime.reasoning_effort}` : "";
+    return {
+      ...common,
+      title: "Hermes 下发任务",
+      detail: `${agent}${model}${effort}`,
+      kind: "dispatch",
+    };
+  }
+  if (eventType === "task.runtime_config.selected") {
+    const runtime = payload.runtime_config || {};
+    const model = runtime.model ? `${runtime.model}` : "";
+    const effort = runtime.reasoning_effort ? ` / ${runtime.reasoning_effort}` : "";
+    return {
+      ...common,
+      title: "任务运行参数确认",
+      detail: model || effort ? `${model}${effort}` : "",
+      kind: "runtime",
+    };
+  }
+  if (eventType === "task.a2a_context.bound") {
+    return {
+      ...common,
+      title: "任务上下文已绑定",
+      detail: payload.context_id || "",
+      kind: "context",
+    };
+  }
+  if (eventType === "task.started") {
+    const stage = payload.status_from === "input-required" ? "继续执行" : "开始执行";
+    return {
+      ...common,
+      title: `Codex ${stage}`,
+      detail: payload.status_to ? `状态 ${payload.status_to}` : "",
+      kind: "started",
+    };
+  }
+  if (eventType === "task.input_required") {
+    const interactions = Array.isArray(payload.interactions)
+      ? payload.interactions.length : 1;
+    return {
+      ...common,
+      title: "Codex 阻塞需审批",
+      detail: `${interactions} 个原生交互待处理`,
+      kind: "input_required",
+    };
+  }
+  if (eventType === "task.approval_requested") {
+    return {
+      ...common,
+      title: "等待 Hermes 审批",
+      detail: normalizeText(payload.reason || payload.risk, 80),
+      kind: "approval_requested",
+    };
+  }
+  if (eventType === "task.auto_approved") {
+    return {
+      ...common,
+      title: "系统自动批准",
+      detail: normalizeText(payload.reason || "", 80),
+      kind: "auto_approved",
+    };
+  }
+  if (eventType === "task.approved") {
+    return {
+      ...common,
+      title: "Hermes 审批通过",
+      detail: payload.by || payload.notes || payload.via || "已通过",
+      kind: "approved",
+    };
+  }
+  if (eventType === "task.rejected") {
+    return {
+      ...common,
+      title: "Hermes 审批拒绝",
+      detail: normalizeText(payload.notes || payload.reason, 80),
+      kind: "rejected",
+    };
+  }
+  if (eventType === "task.completed") {
+    return {
+      ...common,
+      title: "Codex 执行完成",
+      detail: normalizeText(payload.summary || payload.result_text || "", 80),
+      kind: "completed",
+    };
+  }
+  if (eventType === "task.failed") {
+    return {
+      ...common,
+      title: "任务执行失败",
+      detail: normalizeText(payload.error || "", 100),
+      kind: "failed",
+    };
+  }
+  if (eventType === "session.interaction.responded") {
+    return {
+      ...common,
+      title: "原生交互已响应",
+      detail: normalizeText((payload.responded_by || payload.kind || ""),
+        90),
+      kind: "interaction_responded",
+    };
+  }
+  if (eventType === "artifact.created") {
+    return {
+      ...common,
+      title: "产物已落盘",
+      detail: normalizeText(payload.name || payload.path || "", 80),
+      kind: "artifact",
+    };
+  }
+  if (eventType === "agent.session.event") {
+    const kind = payload.nativeEventType || "";
+    if (kind !== "item.lifecycle") return null;
+    const data = payload.data || {};
+    const phase = data.phase || "";
+    const item = data.item || {};
+    if ((item.type || "") === "commandExecution") {
+      const command = item.command || "";
+      return {
+        ...common,
+        title: phase === "completed" ? "Codex 命令执行结束" : "Codex 执行命令",
+        detail: normalizeText(command, 90),
+        kind: phase || "command",
+      };
+    }
+    if ((item.type || "") === "fileChange") {
+      const paths = Array.isArray(item.changes) ? item.changes.join(" · ") : "";
+      return {
+        ...common,
+        title: phase === "completed" ? "文件变更完成" : "检测到文件变更",
+        detail: normalizeText(paths, 90),
+        kind: "filechange",
+      };
+    }
+    if ((item.type || "") === "agentMessage") {
+      const text = item.text || "";
+      return {
+        ...common,
+        title: "Agent 消息",
+        detail: normalizeText(text, 90),
+        kind: "agent_message",
+      };
+    }
+  }
+  if (eventType.startsWith("agent.session.")) {
+    const native = (eventType.split(".")[2] || "").replace("_", " ");
+    return {
+      ...common,
+      title: `会话控制 · ${native || eventType}`,
+      detail: payload.operation || payload.status || "",
+      kind: "agent_session",
+    };
+  }
+  return null;
+}
+
+function executionTimeline(events) {
+  const rows = [];
+  const list = Array.isArray(events) ? events : [];
+  for (const event of list) {
+    const stage = toExecutionStage(event);
+    if (!stage) continue;
+    if (rows.length && rows[rows.length - 1].kind === stage.kind
+        && rows[rows.length - 1].title === stage.title) {
+      if ((rows[rows.length - 1].detail || "") !== (stage.detail || "")) {
+        rows.push(stage);
+      }
+      continue;
+    }
+    rows.push(stage);
+  }
+  return rows;
+}
+
+function fillExecutionTimeline(taskId, events) {
+  const panel = document.querySelector('[data-task-detail-panel="execution"]');
+  if (!panel) return;
+  const box = panel.querySelector("[data-live-events]");
+  if (!box) return;
+  const previousTop = panel.scrollTop;
+  const wasNearBottom = panel.scrollHeight - panel.scrollTop
+    - panel.clientHeight <= 24;
+  const lines = executionTimeline(events).filter(Boolean);
+  if (!lines.length) {
+    box.className = "empty";
+    box.textContent = "暂无执行阶段";
+    return;
+  }
+  box.className = "timeline";
+  box.innerHTML = lines.map(item =>
+    `<div class="timeline-item"><strong>${esc(item.title)}`
+    + `<span class="stage-sub">${esc(item.detail || "")}</span>`
+    + `</strong><span>#${esc(item.seq)} · ${esc(formatTime(item.time))}</span></div>`
+  ).join("");
+  requestAnimationFrame(() => {
+    if (S.detailId !== taskId || S.taskDetailTab !== "execution") return;
+    panel.scrollTop = wasNearBottom ? panel.scrollHeight : previousTop;
+  });
+}
+
 function appendDetailEvent(e) {
   if (!S.detailId || e.task_id !== S.detailId) return;
-  const box = $("[data-live-events]");
-  if (!box) return;
-  if (box.classList.contains("empty")) {
-    box.className = "timeline";
-    box.textContent = "";
+  const timeline = S.taskExecutionEvents.get(S.detailId) || [];
+  const exists = timeline.some(item => item.seq === e.seq);
+  if (!exists) {
+    timeline.push(e);
+    timeline.sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0));
+    S.taskExecutionEvents.set(S.detailId, timeline);
   }
-  const item = document.createElement("div");
-  item.className = "timeline-item";
-  item.innerHTML = `<strong>${esc(eventDetail(e))}</strong>` +
-    `<span>#${esc(e.seq)} · ${esc(formatTime(e.created_at))}</span>`;
-  box.appendChild(item);
+  fillExecutionTimeline(S.detailId, timeline);
 }
 
 function startStream() {
@@ -1999,14 +2235,14 @@ function renderMessageBody(message, value) {
       if (typeof args === "string") {
         try { args = JSON.parse(args); } catch (_) { /* 保留命令原文 */ }
       }
-      return `<details class="tool-card" open><summary><strong>${esc(fn.name || call.name || "tool")}</strong>` +
+      return `<details class="tool-card"><summary><strong>${esc(fn.name || call.name || "tool")}</strong>` +
         `<small>工具调用</small></summary><div class="tool-fields">${toolFields(args)}</div></details>`;
     }).join("") + `</div>`;
   }
   if (isToolMessage && !calls.length) {
     const toolName = value?.name || value?.tool_name || message.sender_id || "工具返回";
     const result = text || value?.result || value?.output || value;
-    html = `<div class="tool-stack"><details class="tool-card" open>` +
+    html = `<div class="tool-stack"><details class="tool-card">` +
       `<summary><strong>${esc(toolName)}</strong><small>执行结果</small></summary>` +
       `<div class="tool-fields">${toolFields(result)}</div></details></div>`;
   }
@@ -2193,20 +2429,21 @@ async function openDetail(id, {syncConversation = true} = {}) {
     `<div class="artifact-actions"><button class="btn ok" data-accept-task="${esc(t.id)}">接受结果</button>` +
     `<button class="btn no" data-rework-task="${esc(t.id)}">要求返工</button></div></section>` : "";
   const controls = canControl ? `<section class="task-detail-block"><div class="task-section-label">任务控制</div>` +
-    `<textarea class="task-action-input" id="d-intervention-text" rows="2" ` +
-    `placeholder="补充给 Hermes 或纠正当前 Agent"></textarea>` +
-    `<div class="artifact-actions"><button class="btn" data-intervene="comment">备注给 Hermes</button>` +
-    (sessionCaps.steer ? `<button class="btn" data-intervene="steer">直接纠正 ${esc(t.assigned_to || "Agent")}</button>` : "") +
+    `<div class="artifact-actions">` +
     (collaboration.controller !== "user" && sessionCaps.interrupt ? `<button class="btn no" data-intervene="takeover">接管</button>` : "") +
     (collaboration.controller === "user" ? `<button class="btn" data-intervene="return_to_hermes">归还 Hermes</button>` : "") +
     (sessionCaps.interrupt ? `<button class="btn no" data-intervene="interrupt">中断 turn</button>` : "") +
     (sessionCaps.cancel ? `<button class="btn no" data-intervene="cancel">取消任务</button>` : "") +
     `</div></section>` : "";
 
-  const timeline = (d.events || []).length ? `<div class="timeline" data-live-events>` +
-    (d.events || []).map(event => `<div class="timeline-item"><strong>${esc(eventDetail(event))}</strong>` +
-      `<span>#${esc(event.seq)} · ${esc(formatTime(event.created_at))}</span></div>`).join("") + `</div>` :
-    `<div class="empty" data-live-events>暂无任务事件</div>`;
+  const timelineEvents = Array.isArray(d.events) ? d.events.slice() : [];
+  S.taskExecutionEvents.set(t.id, timelineEvents);
+  const timelineItems = executionTimeline(timelineEvents);
+  const timeline = timelineItems.length ? `<div class="timeline" data-live-events>` +
+    timelineItems.map(item => `<div class="timeline-item"><strong>${esc(item.title)}` +
+      `${item.detail ? `<span class="stage-sub">${esc(item.detail)}</span>` : ""}</strong>` +
+      `<span>#${esc(item.seq)} · ${esc(formatTime(item.time))}</span></div>`).join("") + `</div>` :
+    `<div class="empty" data-live-events>暂无执行阶段</div>`;
   const runs = (d.runs || []).length ? `<div class="run-list">` + (d.runs || []).map((run, index) =>
     `<article class="run-card"><div class="run-head"><strong>Run ${index + 1} · ${esc(STATUS_LABELS[run.status] || run.status)}</strong>` +
     `<small>${esc(run.agent_id || "-")}</small></div><p>开始 ${esc(formatTime(run.started_at))}` +
@@ -2757,10 +2994,14 @@ async function respondInteraction(id, response, btn) {
 }
 
 async function interveneTask(taskId, agentId, mode, btn) {
-  const input = $("#d-intervention-text");
-  const text = (input?.value || "").trim();
-  if (["steer", "comment", "takeover", "return_to_hermes"].includes(mode) && !text) {
-    showToast("请先输入介入内容", "error"); return;
+  const defaultText = {
+    takeover: "用户接管当前子 Agent，要求手动接管执行路径。",
+    return_to_hermes: "用户已接管，需返回 Hermes 重新规划后续工作。",
+  };
+  const payloadText = defaultText[mode] || "";
+  if ((mode === "takeover" || mode === "return_to_hermes") && !payloadText) {
+    showToast("无法生成默认介入内容", "error");
+    return;
   }
   const confirmations = {
     interrupt: ["中断当前 turn？", "Agent 当前执行会停止，任务本身不会被取消。", "中断 turn"],
@@ -2776,7 +3017,8 @@ async function interveneTask(taskId, agentId, mode, btn) {
   const r = await fetchJson(`/api/tasks/${encodeURIComponent(taskId)}/interventions`, {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({
-      mode, agent_id: agentId, content: {text},
+      mode, agent_id: agentId,
+      content: payloadText ? {text: payloadText} : {},
       idempotency_key: `webui-${taskId}-${mode}-${Date.now()}`,
     }),
   });
