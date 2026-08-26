@@ -208,12 +208,21 @@ class StateWriter:
                 from orchestrator import agent_profile_store
 
                 agent_profile_store.assign_seed_profile(self.conn, source)
+            elif event_type == "agent.interaction.requested" and task_id:
+                # Some recovery/adapters persist the interaction event
+                # independently of task.input_required.  Reconcile any
+                # supplied interaction records and always wake an active
+                # supervision watch from the authoritative task/interaction
+                # rows below.
+                if payload.get("interactions"):
+                    self._persist_interactions(task_id, source, payload)
             else:
                 self.conn.commit()
                 return "ignored"
             if task_id and event_type in {
                     "task.input_required", "task.blocked", "task.completed",
-                    "task.failed", "task.cancelled"}:
+                    "task.failed", "task.cancelled",
+                    "agent.interaction.requested"}:
                 from orchestrator import supervision_store
 
                 supervision_store.sync_task(

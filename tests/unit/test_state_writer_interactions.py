@@ -305,3 +305,81 @@ def test_state_writer_structures_codex_login_shell_for_user_approval(
     assert targets["cwd"] == str(execution_workspace.resolve())
     assert targets["command"] == "docker"
     assert targets["args"] == ["build", "."]
+
+
+def test_state_writer_routes_structured_codex_docker_ps_to_hermes_once(
+        tmp_path, monkeypatch):
+    """A safe Docker read is Hermes-owned, not silently user-approved.
+
+    StateWriter persists the signed-approval boundary; the supervising Hermes
+    session is responsible for the native one-shot response.  This catches the
+    regression where a new read operation is either classified as critical or
+    marked approved without any native delivery path.
+    """
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path / "agenthub"))
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    writer = StateWriter(tmp_path / "state.db")
+    conversation_id = collaboration_store.create_conversation(
+        writer.conn, title="Grafana read-only investigation")
+    collaboration_id = collaboration_store.create_collaboration(
+        writer.conn, conversation_id=conversation_id,
+        objective="inspect Docker state")
+    state_store.create_task(
+        writer.conn, task_id="T-codex-docker-read", objective="inspect",
+        created_by="hermes", assigned_to="codex",
+        collaboration_id=collaboration_id, status=TaskStatus.QUEUED,
+        plan_context={"execution_workspace": str(execution_workspace)},
+    )
+    state_store.transition_task(
+        writer.conn, "T-codex-docker-read", TaskStatus.ASSIGNED)
+    state_store.transition_task(
+        writer.conn, "T-codex-docker-read", TaskStatus.WORKING)
+
+    writer.apply({
+        "event_id": "E-codex-docker-read",
+        "event_type": "task.input_required",
+        "source": "codex",
+        "task_id": "T-codex-docker-read",
+        "payload": {
+            "session_id": "S-codex-docker-read",
+            "native_session_id": "native-codex-docker-read",
+            "interactions": [{
+                "interactionId": "codex:docker-ps",
+                "kind": "approval",
+                "nativeRequestId": "rpc-docker-ps",
+                "nativeSessionId": "native-codex-docker-read",
+                "payload": {
+                    "toolName": "shell",
+                    "inspectable": True,
+                    "reason": "discover running containers",
+                    "toolView": {
+                        "kind": "shell",
+                        "command": "/bin/zsh -lc 'docker ps'",
+                        "cwd": str(execution_workspace),
+                    },
+                },
+            }],
+        },
+    })
+
+    interaction = collaboration_store.list_session_interactions(
+        writer.conn, task_id="T-codex-docker-read")[0]
+    payload = json.loads(interaction["payload_json"])
+    intent = writer.conn.execute(
+        "SELECT * FROM action_intents WHERE id = ?;",
+        (interaction["action_intent_id"],),
+    ).fetchone()
+    assert payload["inspectable"] is True
+    assert intent["operation"] == "command.read"
+    assert intent["risk"] == "read"
+    assert intent["policy_route"] == "hermes"
+    assert intent["status"] == "awaiting_hermes"
+    assert intent["decided_by"] is None
+
+    pending = collaboration_store.pending_interaction_views(
+        writer.conn, "T-codex-docker-read")
+    assert pending[0]["interaction_id"] == interaction["id"]
+    assert pending[0]["action_intent_status"] == "awaiting_hermes"
+    assert pending[0]["operation"] == "command.read"
+    assert pending[0]["risk"] == "read"

@@ -11,6 +11,10 @@ auto:
   - test.run
 
 hermes_approve:
+  # Native adapters still need a signed, one-shot response.  The Hermes
+  # supervisor may provide that response only after inspecting the normalized
+  # command.read interaction; this is not direct adapter auto-delivery.
+  - command.read
   - filesystem.create
   - filesystem.write
   - git.commit

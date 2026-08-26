@@ -193,3 +193,42 @@ def test_dsh_catalog_seed_is_idempotent_and_assigns_only_when_empty(conn):
     assert assigned["template_id"] == "TPL-DSH"
     assert assigned["profile_id"] == "AP-DSH-REVIEW"
     assert agent_profile_store.assign_seed_profile(conn, "dsh") is False
+
+
+def test_catalog_additively_upgrades_only_untouched_seed_profile(
+        conn, tmp_path):
+    from orchestrator import agent_profile_store
+
+    legacy = tmp_path / "legacy-catalog.yaml"
+    legacy.write_text(
+        "templates:\n"
+        "  - id: TPL-CODEX\n"
+        "    name: Codex\n"
+        "    adapter_kind: codex-app-server\n"
+        "profiles:\n"
+        "  - id: AP-CODEX-BACKEND\n"
+        "    template_id: TPL-CODEX\n"
+        "    name: Codex Backend Implementer\n"
+        "    execution_mode: execute\n"
+        "    allowed_operations: [filesystem.read]\n"
+        "    allowed_tools: [filesystem.read]\n",
+        encoding="utf-8",
+    )
+    agent_profile_store.seed_catalog(conn, legacy)
+
+    agent_profile_store.seed_catalog(conn)
+    upgraded = agent_profile_store.profile_policy(conn, "AP-CODEX-BACKEND")
+    assert upgraded["version"] == 2
+    assert upgraded["allowed_operations"] == [
+        "filesystem.read", "command.read"]
+    assert upgraded["allowed_tools"] == ["filesystem.read", "command.read"]
+
+    # A versioned operator edit moves the profile beyond the declared source
+    # version, so later catalog seeds remain no-ops.
+    agent_profile_store.update_profile(
+        conn, "AP-CODEX-BACKEND", expected_version=2, updated_by="user",
+        changes={"allowed_tools": ["filesystem.read"]})
+    agent_profile_store.seed_catalog(conn)
+    preserved = agent_profile_store.profile_policy(conn, "AP-CODEX-BACKEND")
+    assert preserved["version"] == 3
+    assert preserved["allowed_tools"] == ["filesystem.read"]

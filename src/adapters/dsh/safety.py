@@ -19,6 +19,35 @@ _READ_ONLY_COMPOUND_OPERATIONS = frozenset({
 })
 _COMPOUND_OPERATORS = frozenset({"&&", ";", "|"})
 
+# Docker is a daemon-facing command, so its basename must not by itself make
+# the request safe.  Keep this recognizer deliberately smaller than Docker's
+# CLI: only metadata/log reads with bounded, explicitly parsed arguments may
+# become ``command.read``.  In particular, no global daemon/context flags,
+# shell wrappers, compose commands, exec, streaming logs, or lifecycle/image
+# mutation commands are accepted here.
+_DOCKER_READ_FLAGS = {
+    "ps": frozenset({
+        "-a", "--all", "-q", "--quiet", "--no-trunc", "--size",
+        "-s", "--latest", "-l", "--noheading",
+    }),
+    "inspect": frozenset({"-s", "--size"}),
+    "logs": frozenset({"--details", "-t", "--timestamps"}),
+    "stats": frozenset({"--no-stream", "-a", "--all"}),
+    "images": frozenset({
+        "-a", "--all", "--no-trunc", "--digests",
+    }),
+    "version": frozenset(),
+}
+_DOCKER_READ_VALUE_FLAGS = {
+    "ps": frozenset({"-f", "--filter", "--format"}),
+    "inspect": frozenset({"-f", "--format", "--type", "--platform"}),
+    "logs": frozenset({"--since", "--until", "--tail"}),
+    "stats": frozenset({"--format"}),
+    "images": frozenset({"-f", "--filter", "--format"}),
+    "version": frozenset({"--format"}),
+}
+_DOCKER_READ_SUBCOMMANDS = frozenset(_DOCKER_READ_FLAGS)
+
 _SEARCH_FLAG_ONLY = {
     "rg": frozenset({
         "-n", "--line-number", "-i", "--ignore-case", "-s",
@@ -328,6 +357,118 @@ def _find_paths(
     return paths
 
 
+def _docker_option_value_safe(value: str) -> bool:
+    """Bound values for Docker's read-only formatting/filter options."""
+    return bool(
+        isinstance(value, str)
+        and value
+        and len(value) <= 4096
+        and not value.startswith("-")
+        and not any(char in value for char in ("\x00", "\r", "\n"))
+    )
+
+
+def _docker_read_args(
+    subcommand: str, args: list[str],
+) -> tuple[list[str], set[str]] | None:
+    """Parse one restricted Docker read command's options and operands.
+
+    This intentionally does not accept Docker global options.  Rejecting them
+    prevents a seemingly read-only command from selecting another daemon,
+    config, or TLS credential set.  Option values are consumed as argv items,
+    never interpreted as shell syntax.
+    """
+    flags = _DOCKER_READ_FLAGS[subcommand]
+    value_flags = _DOCKER_READ_VALUE_FLAGS[subcommand]
+    operands: list[str] = []
+    seen: set[str] = set()
+    index = 0
+    options_done = False
+    while index < len(args):
+        item = args[index]
+        if options_done or not item.startswith("-"):
+            if (not item or len(item) > 256
+                    or "\x00" in item):
+                return None
+            operands.append(item)
+            index += 1
+            continue
+        if item == "--":
+            options_done = True
+            index += 1
+            continue
+
+        name, equals, inline_value = item.partition("=")
+        if name in value_flags:
+            if name in seen:
+                return None
+            if equals:
+                value = inline_value
+            elif index + 1 < len(args):
+                index += 1
+                value = args[index]
+            else:
+                return None
+            if not _docker_option_value_safe(value):
+                return None
+            seen.add(name)
+            index += 1
+            continue
+        if item not in flags or item in seen:
+            # This also rejects all unrecognized Docker global options, such
+            # as --context/--host/--config/--tls*, before a subcommand.
+            return None
+        seen.add(item)
+        index += 1
+    return operands, seen
+
+
+def _docker_read_intent(
+    tokens: list[str], *, cwd: Path, workspace: Path,
+) -> dict[str, Any]:
+    """Recognize only bounded, one-shot Docker daemon reads."""
+    if len(tokens) < 2 or Path(tokens[0]).name != "docker":
+        return _unverified("unsupported terminal command")
+    subcommand = tokens[1]
+    if subcommand not in _DOCKER_READ_SUBCOMMANDS:
+        return _unverified(
+            f"unsupported or modifying Docker subcommand: {subcommand}")
+    parsed = _docker_read_args(subcommand, tokens[2:])
+    if parsed is None:
+        return _unverified(
+            f"Docker {subcommand} options or targets are not read-only")
+    operands, seen = parsed
+
+    # Keep the accepted argv shape explicit per command.  This avoids turning
+    # the operation into an arbitrary Docker passthrough while still covering
+    # the common discovery and log-reading requests.
+    if subcommand == "ps" and operands:
+        return _unverified("docker ps does not accept positional targets")
+    if subcommand == "inspect" and not operands:
+        return _unverified("docker inspect target is missing")
+    if subcommand == "logs" and len(operands) != 1:
+        return _unverified("docker logs requires exactly one container")
+    if subcommand == "stats" and "--no-stream" not in seen:
+        return _unverified("docker stats must use --no-stream")
+    if subcommand == "stats" and len(operands) > 100:
+        return _unverified("docker stats has too many targets")
+    if subcommand == "images" and len(operands) > 1:
+        return _unverified("docker images accepts at most one repository")
+    if subcommand == "version" and operands:
+        return _unverified("docker version does not accept positional targets")
+
+    intent = _verified(
+        "command.read", "read", [str(cwd)], workspace,
+        f"recognized bounded Docker {subcommand} inspection",
+    )
+    intent["targets"].update({
+        "cwd": str(cwd),
+        "command": "docker",
+        "args": tokens[1:],
+    })
+    return intent
+
+
 def _simple_terminal_intent(
     tokens: list[str], *, cwd: Path, workspace: Path,
 ) -> dict[str, Any]:
@@ -335,6 +476,9 @@ def _simple_terminal_intent(
     args = tokens[1:]
     if executable in {"sudo", "su", "env", "sh", "bash", "zsh", "fish"}:
         return _unverified("shell or privilege wrapper is unsupported")
+
+    if executable == "docker":
+        return _docker_read_intent(tokens, cwd=cwd, workspace=workspace)
 
     if executable == "git":
         if not args or args[0].startswith("-"):

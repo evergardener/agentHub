@@ -9,6 +9,8 @@ auto_approve:        # 明确命中的只读/查询类：hermes 直接批准
   - 总结
   - 列出
   - 状态
+  - 只读
+  - 检查
   - 调研
   - read-only
   - read only

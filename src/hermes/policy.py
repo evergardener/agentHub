@@ -26,6 +26,7 @@ DEFAULT_PERMISSIONS = Path(__file__).resolve().parents[2] / "config" / "permissi
 FALLBACK = {
     "auto_approve": [
         "查询", "读取", "分析", "检索", "总结", "列出", "状态",
+        "只读", "检查",
         "read-only", "read only", "inspect", "check", "report", "list",
         "status", "summarize", "analyse", "analyze", "query", "review",
     ],
@@ -43,16 +44,76 @@ _NEGATED_ENGLISH_WRITE = re.compile(
     r"deploy|deploying|restart|restarting|install|installing|pull|pulling|"
     r"commit|committing|push|pushing|publish|publishing)\b",
 )
-_NEGATED_CHINESE_WRITE = (
-    "不要修改", "不得修改", "禁止修改", "不写入", "不得写入", "禁止写入",
-    "不删除", "不得删除", "禁止删除",
-    "不创建", "不得创建", "禁止创建",
-)
 _NEGATED_CHINESE_RISK_PHRASES = (
-    "不得修改、创建、删除", "不得修改、创建或删除",
-    "禁止修改、创建、删除", "禁止修改、创建或删除",
     "是否发生写入", "是否有写入",
 )
+
+
+def _strip_negated_chinese_operations(
+        text: str, operation_terms: list[object]) -> tuple[str, bool]:
+    """Remove Chinese negated operation lists before keyword classification.
+
+    A statement such as ``不得重启、停止、删除容器`` describes constraints,
+    not requested operations.  Keep the parser deliberately narrow: only
+    configured Chinese write/critical terms (plus the common ``停止`` term)
+    can be removed, and only when they follow ``不``/``不得``/``不要``/``禁止``.
+    Unknown terms therefore remain fail-closed.
+    """
+    terms = {
+        str(term).casefold() for term in operation_terms
+        if any("\u4e00" <= char <= "\u9fff" for char in str(term))
+        and str(term) != "生产"
+    }
+    terms.update(("创建", "停止", "对外发布"))
+    ordered_terms = sorted(terms, key=len, reverse=True)
+    if not ordered_terms:
+        return text, False
+
+    operations = "|".join(re.escape(term) for term in ordered_terms)
+    # Support Chinese comma, ASCII comma, enumeration mark, slash, and
+    # conjunctions.  The optional ``或`` also handles ``、或``/``, 或`` forms.
+    separator = (
+        r"(?:\s*(?:、|，|,|/|和|以及)\s*(?:或\s*)?"
+        r"|\s*或\s*)"
+    )
+    # A target may appear after each operation in a list, e.g.
+    # ``不得重启容器、停止服务、删除容器``.  Keep this fragment narrow so a
+    # contrastive positive clause such as ``但必须删除`` is never swallowed.
+    object_fragment = (
+        r"(?:(?!(?:但|但是|必须|需要|需|然而|而且|"
+        r"[、，,/;；。！？\n]|或|和|以及))"
+        r"[\u4e00-\u9fffA-Za-z0-9_.:\- \t])*?"
+    )
+    pattern = re.compile(
+        rf"(?:不得|禁止|不要|不)\s*(?:{operations})"
+        rf"(?:{object_fragment}{separator}(?:{operations}))*"
+    )
+    matches = list(pattern.finditer(text))
+    effective = pattern.sub("", text)
+
+    # If a known negated operation is followed by a separator and an unknown
+    # item, the list was only partially parsed.  Mark it for fail-closed
+    # diagnostics instead of leaving a misleading critical classification.
+    known_prefix = re.compile(rf"(?:{operations})")
+    clause_boundary = re.compile(
+        r"(?:不得|禁止|不要|不|但|但是|必须|需要|需|然而|而且|"
+        r"仅|只|检查|读取|查看|报告)"
+    )
+    ambiguous = False
+    for match in matches:
+        suffix = text[match.end():]
+        following = re.match(
+            r"\s*(?:、|，|,|/|;|；)\s*(.*)", suffix, re.DOTALL)
+        if not following:
+            continue
+        tail = following.group(1)
+        if not tail or clause_boundary.match(tail):
+            continue
+        if known_prefix.match(tail) or any(
+                "\u4e00" <= char <= "\u9fff" for char in tail[:1]):
+            ambiguous = True
+            break
+    return effective, ambiguous
 
 
 @dataclass
@@ -74,24 +135,33 @@ class ApprovalPolicy:
         self.require_user = cfg.get("require_user") or FALLBACK["require_user"]
         self.never_grant = cfg.get("never_grant") or FALLBACK["never_grant"]
 
-    def classify(self, objective: str) -> str:
-        """按关键词粗分风险等级；未知操作 fail-closed。"""
+    def _classify(self, objective: str) -> tuple[str, bool]:
+        """返回风险等级及中文否定列表是否未完整解析。"""
         normalized = objective.casefold()
         effective = _NEGATED_ENGLISH_WRITE.sub("", normalized)
+        effective, negation_ambiguous = _strip_negated_chinese_operations(
+            effective, [*self.require_user, *self.never_grant])
         for phrase in _NEGATED_CHINESE_RISK_PHRASES:
             effective = effective.replace(phrase, "")
-        for phrase in _NEGATED_CHINESE_WRITE:
-            effective = effective.replace(phrase, "")
         if any(str(k).casefold() in effective for k in self.never_grant):
-            return "critical"
+            return "critical", negation_ambiguous
         if any(str(k).casefold() in effective for k in self.require_user):
-            return "write"
+            return "write", negation_ambiguous
         if any(str(k).casefold() in effective for k in self.auto_approve):
-            return "read"
-        return "unknown"
+            return "read", negation_ambiguous
+        return "unknown", negation_ambiguous
+
+    def classify(self, objective: str) -> str:
+        """按关键词粗分风险等级；未知操作 fail-closed。"""
+        risk, negation_ambiguous = self._classify(objective)
+        if negation_ambiguous:
+            return "unknown"
+        return risk
 
     def decide(self, conn: sqlite3.Connection, objective: str) -> Decision:
-        risk = self.classify(objective)
+        risk, negation_ambiguous = self._classify(objective)
+        if negation_ambiguous:
+            return Decision("ask", "unknown", "只读声明无法解析，按 fail-closed 原则等待用户批准")
         if risk == "read":
             return Decision("auto", risk, "只读/查询类，自动批准")
         grant = self._match_grant(conn, objective)

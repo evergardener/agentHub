@@ -135,6 +135,19 @@ def sync_watch(conn, watch_id: str, *, commit: bool = True) -> None:
         return
     task_id = task["id"]
     status = task["status"]
+    # A native interaction is itself a lifecycle edge.  Usually the worker
+    # emits ``task.input_required`` first (which moves the task to blocked),
+    # but a durable interaction record can also arrive independently.  Do not
+    # make Hermes wait for a later status poll in that case.
+    interaction_ids = _pending_interaction_ids(conn, task_id)
+    if interaction_ids and status in {"assigned", "working", "blocked"}:
+        digest = hashlib.sha256(
+            "\0".join(interaction_ids).encode("utf-8")).hexdigest()[:20]
+        _enqueue(
+            conn, watch_id=watch_id, task_id=task_id,
+            dedupe_key=f"interaction:{task['updated_at']}:{digest}",
+            event_type="agent.interaction.requested",
+            internal_status=status)
     if status in {"created", "queued"}:
         approval = _latest_delegation_approval(conn, task_id)
         if approval is not None and approval["event_type"] == \
@@ -145,14 +158,10 @@ def sync_watch(conn, watch_id: str, *, commit: bool = True) -> None:
                 event_type="task.approval_requested",
                 internal_status=status)
     elif status == "blocked":
-        interaction_ids = _pending_interaction_ids(conn, task_id)
-        digest = hashlib.sha256(
-            "\0".join(interaction_ids).encode("utf-8")).hexdigest()[:20]
         _enqueue(
             conn, watch_id=watch_id, task_id=task_id,
-            dedupe_key=f"blocked:{task['updated_at']}:{digest}",
-            event_type=("agent.interaction.requested" if interaction_ids
-                        else "task.blocked"),
+            dedupe_key=f"blocked:{task['updated_at']}",
+            event_type="task.blocked",
             internal_status=status)
     elif status in {"awaiting_acceptance", "completed", "reviewed"}:
         _enqueue(

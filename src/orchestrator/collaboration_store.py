@@ -638,6 +638,13 @@ def upsert_session_interaction(
                 "native_request_id": interaction.get("nativeRequestId"),
             },
         )
+        # Keep the lifecycle wakeup in the same transaction as the durable
+        # interaction record.  This also covers adapters or recovery paths
+        # that persist an interaction without a separate task.input_required
+        # event reaching StateWriter.
+        from orchestrator import supervision_store
+
+        supervision_store.sync_task(conn, task_id, commit=False)
         if commit:
             conn.commit()
     except Exception:
@@ -674,8 +681,9 @@ def pending_interaction_views(conn, task_id: str) -> list[dict]:
     """Return safe, structured interaction details for Hermes/UI routing."""
     rows = conn.execute(
         "SELECT i.id, i.agent_id, i.kind, i.status, i.payload_json,"
-        " a.operation, a.risk, a.policy_route,"
-        " a.status AS action_intent_status, a.policy_reason"
+        " i.action_intent_id, a.operation, a.risk, a.policy_route,"
+        " a.status AS action_intent_status, a.policy_reason,"
+        " a.targets_json, a.rollback_plan"
         " FROM agent_session_interactions i"
         " LEFT JOIN action_intents a ON a.id = i.action_intent_id"
         " WHERE i.task_id = ? AND i.status IN ('pending', 'failed')"
@@ -688,6 +696,17 @@ def pending_interaction_views(conn, task_id: str) -> list[dict]:
             payload = json.loads(row["payload_json"] or "{}")
         except (TypeError, ValueError):
             payload = {}
+        try:
+            targets = json.loads(row["targets_json"] or "null")
+        except (TypeError, ValueError):
+            targets = None
+        if row["kind"] == "approval":
+            allowed_responses = ["allowed-once", "rejected"]
+        else:
+            raw_options = payload.get("options")
+            allowed_responses = (
+                raw_options if isinstance(raw_options, list) else [])
+        action_status = row["action_intent_status"]
         pending.append({
             "interaction_id": row["id"],
             "agent_id": row["agent_id"],
@@ -697,11 +716,23 @@ def pending_interaction_views(conn, task_id: str) -> list[dict]:
             "tool_name": payload.get("toolName"),
             "reason": payload.get("reason"),
             "tool_view": payload.get("toolView"),
+            "action_intent_id": row["action_intent_id"],
             "operation": row["operation"],
             "risk": row["risk"],
             "policy_route": row["policy_route"],
-            "action_intent_status": row["action_intent_status"],
+            "action_intent_status": action_status,
             "policy_reason": row["policy_reason"],
+            "targets": targets,
+            "rollback": row["rollback_plan"],
+            "rollback_plan": row["rollback_plan"],
+            "allowed_responses": allowed_responses,
+            "awaiting": (
+                action_status if action_status in {
+                    "awaiting_hermes", "awaiting_user"
+                } else None
+            ),
+            "awaiting_hermes": action_status == "awaiting_hermes",
+            "awaiting_user": action_status == "awaiting_user",
         })
     return pending
 

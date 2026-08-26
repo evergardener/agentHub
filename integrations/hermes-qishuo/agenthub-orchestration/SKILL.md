@@ -1,7 +1,7 @@
 ---
 name: agenthub-orchestration
 description: Use when Hermes delegates production or test work to Codex, DSH, Kimi, Pi, or other workers through agentHub, including task creation, workspace selection, asynchronous supervision, approvals, acceptance, and cleanup.
-version: 1.4.0
+version: 1.5.0
 author: evergarden, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -144,6 +144,14 @@ enable and re-discover that Agent, or choose a currently enabled Agent.
   standing grant. `awaiting_user`, deletion, move, unknown or unverified
   operations, paths outside the task workspace, and missing rollback evidence
   require the user to decide in WebUI.
+- `command.read` is the sole exception to the rollback-evidence requirement:
+  when `risk=read`, the normalized command and argv are present in `targets`,
+  the policy route is `hermes`, and `rollback_plan=null`, null means that no
+  mutation occurred and rollback is not applicable. Hermes may issue exactly
+  one `allowed-once` response. This currently covers only the server-recognized
+  bounded Docker inspection commands. Never extend this rule to
+  `command.execute`, unknown commands, shell composition, remote daemon flags,
+  `docker exec`, lifecycle changes, or write/delete operations.
 - Poll with `tasks/get`; do not treat the initial `submitted` response as task
   completion.
 - Preserve the task ID and context ID in the conversation.

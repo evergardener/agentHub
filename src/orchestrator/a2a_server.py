@@ -184,6 +184,7 @@ def _to_a2a(conn, row, *, context_id: str | None = None) -> dict:
     task_id = row["id"]
     pending = _approval_pending(conn, task_id)
     input_required_kind = None
+    pending_interactions: list[dict] = []
     if pending:
         state = "input-required"
         message = (f"task_id={task_id}; 写操作需批准"
@@ -223,9 +224,37 @@ def _to_a2a(conn, row, *, context_id: str | None = None) -> dict:
         if input_required_kind == "blocked":
             from orchestrator import collaboration_store
 
-            metadata["pending_interactions"] = (
-                collaboration_store.pending_interaction_views(
-                    conn, task_id))
+            pending_interactions = collaboration_store.pending_interaction_views(
+                conn, task_id)
+        # Keep the field stable for every input-required task.  Delegation and
+        # acceptance gates have no native interaction records, but callers can
+        # safely consume one shape without guessing which gate is active.
+        metadata["pending_interactions"] = pending_interactions
+    if pending_interactions:
+        # Some Hermes renderers surface only status.message and hide metadata.
+        # Include a compact, bounded *summary* there while retaining the full
+        # structured records above.  Never copy tool payloads/worker output
+        # into the wakeup envelope or this summary.
+        summary = [{
+            "interaction_id": item.get("interaction_id"),
+            "operation": item.get("operation"),
+            "risk": item.get("risk"),
+            "policy_route": item.get("policy_route"),
+            "policy_reason": str(item.get("policy_reason") or "")[:240],
+            "action_intent_status": item.get("action_intent_status"),
+            "awaiting": item.get("awaiting"),
+        } for item in pending_interactions[:20]]
+        compact = json.dumps(summary, ensure_ascii=False,
+                             separators=(",", ":"))
+        if len(compact) > 1800:
+            compact = json.dumps([{
+                "interaction_id": item.get("interaction_id"),
+                "risk": item.get("risk"),
+                "policy_route": item.get("policy_route"),
+                "action_intent_status": item.get("action_intent_status"),
+            } for item in pending_interactions[:20]], ensure_ascii=False,
+                separators=(",", ":"))
+        message += f"; pending_interactions={compact}"
     return {
         "id": task_id,
         "status": {"state": state, "timestamp": row["updated_at"],

@@ -387,11 +387,23 @@ def test_tasks_get_exposes_safe_pending_native_interaction(env):
         "inspectable": True, "tool_name": "edit",
         "reason": "更新 Dockerfile",
         "tool_view": {"kind": "edit", "paths": ["/repo/Dockerfile"]},
+        "action_intent_id": intent["id"],
         "operation": "filesystem.write", "risk": "unknown",
         "policy_route": "hermes",
         "action_intent_status": "awaiting_hermes",
         "policy_reason": None,
+        "targets": {"paths": ["/repo/Dockerfile"]},
+        "rollback": "git restore Dockerfile",
+        "rollback_plan": "git restore Dockerfile",
+        "allowed_responses": ["allowed-once", "rejected"],
+        "awaiting": "awaiting_hermes",
+        "awaiting_hermes": True,
+        "awaiting_user": False,
     }]
+    status_text = task["status"]["message"]["parts"][0]["text"]
+    assert "pending_interactions=" in status_text
+    assert interaction["id"] in status_text
+    assert "awaiting_hermes" in status_text
     tm.conn.execute(
         "UPDATE action_intents SET status = 'awaiting_user',"
         " policy_route = 'user' WHERE id = ?;", (intent["id"],))

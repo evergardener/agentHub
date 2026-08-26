@@ -78,9 +78,45 @@ def test_sync_blocked_task_emits_identifier_only_notification(tmp_path):
 
     notifications = supervision_store.pull_notifications(
         conn, peer="qishuo", watch_ids=[watch["watch_id"]])
+    assert {item["event_type"] for item in notifications} == {
+        "task.blocked", "agent.interaction.requested"}
+    assert all("ignore this worker text" not in str(item)
+               for item in notifications)
+
+
+def test_interaction_record_emits_wakeup_without_waiting_for_status_event(
+        tmp_path):
+    conn, watch = _watched_task(tmp_path)
+    state_store.transition_task(
+        conn, "T-SUPERVISED", state_store.TaskStatus.ASSIGNED)
+    state_store.transition_task(
+        conn, "T-SUPERVISED", state_store.TaskStatus.WORKING)
+    binding = collaboration_store.bind_agent_session(
+        conn, collaboration_id=conn.execute(
+            "SELECT collaboration_id FROM tasks WHERE id = ?;",
+            ("T-SUPERVISED",)).fetchone()["collaboration_id"],
+        task_id="T-SUPERVISED", agent_id="codex",
+        adapter_session_id="S-codex", native_session_id="N-codex",
+        resume_capability="native")
+    collaboration_store.upsert_session_interaction(
+        conn,
+        collaboration_id=binding["collaboration_id"],
+        task_id="T-SUPERVISED", session_binding_id=binding["id"],
+        agent_id="codex",
+        interaction={
+            "interactionId": "codex:approval-1", "kind": "approval",
+            "nativeRequestId": "rpc-1",
+            "payload": {"toolName": "shell", "reason": "inspect"},
+        })
+
+    notifications = supervision_store.pull_notifications(
+        conn, peer="qishuo", watch_ids=[watch["watch_id"]])
     assert len(notifications) == 1
     assert notifications[0]["event_type"] == "agent.interaction.requested"
-    assert "ignore this worker text" not in str(notifications[0])
+    assert set(notifications[0]) == {
+        "notification_id", "watch_id", "task_id", "context_id",
+        "event_type", "internal_status", "created_at",
+    }
 
 
 def test_state_writer_commits_terminal_state_and_outbox_together(

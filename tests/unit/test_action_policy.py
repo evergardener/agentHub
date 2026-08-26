@@ -22,6 +22,23 @@ def test_explicit_read_is_auto(workspace):
     assert decision.risk == "read"
 
 
+def test_structured_command_read_awaits_hermes_for_one_shot_delivery(workspace):
+    decision = ActionPolicy(workspace=workspace).evaluate(
+        operation="command.read",
+        targets={"workspace": str(workspace), "paths": [str(workspace)],
+                 "command": "docker", "args": ["ps"]},
+        rollback_plan=None,
+        profile={
+            "status": "active",
+            "execution_mode": "read_only",
+            "allowed_operations": ["filesystem.read", "command.read"],
+            "denied_operations": ["command.execute"],
+        },
+    )
+    assert decision.route == "hermes"
+    assert decision.risk == "read"
+
+
 def test_read_outside_workspace_routes_to_user(workspace):
     decision = ActionPolicy(workspace=workspace).evaluate(
         operation="filesystem.read",

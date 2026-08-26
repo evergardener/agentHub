@@ -164,6 +164,13 @@ class ActionPolicy:
             in_scope, reason = self._within_workspace(targets)
             if not in_scope:
                 decision = ActionDecision("user", "critical", reason)
+            elif operation == "command.read":
+                # A structured read command still requires a one-shot native
+                # response.  Keep it on the Hermes route so the supervisor
+                # can inspect the durable interaction and sign that response;
+                # StateWriter has no authority to answer native RPCs itself.
+                decision = ActionDecision(
+                    "hermes", "read", "受限只读命令等待 Hermes 单次放行")
             elif not rollback_plan or not rollback_plan.strip():
                 decision = ActionDecision(
                     "user", "critical", "修改操作没有明确回滚方案")

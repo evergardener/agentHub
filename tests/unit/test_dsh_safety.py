@@ -128,11 +128,44 @@ def test_composed_write_execution_and_redirection_stay_fail_closed(
 
 @pytest.mark.parametrize("command", [
     "docker ps",
+    "docker ps --format '{{json .}}'",
+    "docker inspect grafana",
+    "docker inspect --format '{{json .State}}' grafana",
+    "docker logs --tail 100 --timestamps grafana",
+    "docker stats --no-stream",
+    "docker stats --no-stream --format '{{json .}}' grafana",
+    "docker images --format '{{json .}}'",
+    "docker version",
+])
+def test_bounded_docker_read_commands_are_structured_as_command_read(
+    tmp_path, command,
+):
+    intent = _terminal(command, tmp_path)["semanticIntent"]
+    assert intent["status"] == "verified"
+    assert intent["operation"] == "command.read"
+    assert intent["impact"] == "read"
+    assert intent["targets"]["paths"] == [str(tmp_path.resolve())]
+    assert intent["targets"]["command"] == "docker"
+
+
+@pytest.mark.parametrize("command", [
+    "docker exec grafana sh",
+    "docker restart grafana",
+    "docker stop grafana",
+    "docker rm grafana",
+    "docker compose up -d",
+    "docker compose down",
+    "docker build .",
+    "docker push agenthub:test",
+    "docker --context production ps",
+    "docker ps --host unix:///var/run/docker.sock",
+    "docker stats",
+    "docker logs --follow grafana",
     "curl https://example.test",
     "psql -c 'select 1'",
     "sqlite3 state.db '.tables'",
 ])
-def test_docker_network_and_database_commands_stay_fail_closed(
+def test_docker_mutation_remote_and_unbounded_commands_stay_fail_closed(
     tmp_path, command,
 ):
     view = _terminal(command, tmp_path)

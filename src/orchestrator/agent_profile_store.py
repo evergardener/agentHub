@@ -358,7 +358,51 @@ def seed_catalog(conn, config_path: str | Path = DEFAULT_CATALOG,
             **values,
         )
         created["profiles"].append(profile_id)
+    _apply_seed_profile_upgrades(conn, data, updated_by=created_by)
     return created
+
+
+def _apply_seed_profile_upgrades(conn, data: dict, *, updated_by: str) -> None:
+    """Apply additive upgrades only to untouched, versioned seed profiles.
+
+    Catalog defaults are normally create-only so operator changes remain
+    authoritative. Security capabilities occasionally need an explicit
+    rollout to already-installed stock profiles. Such upgrades must name the
+    exact source version, preserve every existing field, and only add values.
+    Any profile changed through the versioned API no longer matches and is
+    left untouched.
+    """
+    for spec in data.get("profile_upgrades") or []:
+        if not isinstance(spec, dict):
+            continue
+        profile_id = str(spec.get("profile_id") or "")
+        from_version = spec.get("from_version")
+        if not profile_id or not isinstance(from_version, int):
+            continue
+        row = get_profile(conn, profile_id)
+        if (row is None or row["version"] != from_version
+                or row["created_by"] != "system:catalog-seed"):
+            continue
+        current = _profile_snapshot(row)
+        changes: dict[str, list[str]] = {}
+        for field, additions_key in (
+                ("allowed_operations", "add_allowed_operations"),
+                ("allowed_tools", "add_allowed_tools")):
+            additions = spec.get(additions_key) or []
+            if (not isinstance(additions, list)
+                    or any(not isinstance(item, str) or not item
+                           for item in additions)):
+                raise ValueError(
+                    f"invalid catalog profile upgrade {profile_id}: "
+                    f"{additions_key}")
+            values = list(current.get(field) or [])
+            merged = values + [item for item in additions if item not in values]
+            if merged != values:
+                changes[field] = merged
+        if changes:
+            update_profile(
+                conn, profile_id, expected_version=from_version,
+                updated_by=updated_by, changes=changes)
 
 
 def assign_seed_profile(conn, agent_id: str,

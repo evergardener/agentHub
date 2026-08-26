@@ -114,6 +114,9 @@ allowlist、目标位于 workspace 且有可验证的回滚方案时，Hermes �
 原生 Agent 阻塞时，`tasks/get` 在 `metadata.pending_interactions` 返回可审查详情。
 只有 `inspectable=true` 且 `action_intent_status=awaiting_hermes` 的请求可由 Hermes
 回复；`awaiting_user` 必须交给 WebUI 用户。Hermes 回复格式：
+受限 Docker 只读发现会结构化为 `command.read` / `risk=read`，并且仍通过
+`awaiting_hermes` 签发一次性 receipt；这类操作的 `rollback_plan=null` 表示
+无变更、回滚不适用，不能扩展为任意 shell 自动放行。
 
 ```json
 {"agenthub":"v1","action":"interactions/respond","interaction_id":"INT-...","outcome":"allowed-once","note":"已核对目标、影响与回滚"}

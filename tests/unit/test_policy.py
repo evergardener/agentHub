@@ -49,6 +49,48 @@ def test_chinese_read_only_command_plan_with_negated_writes_is_auto_approved(
     assert d.action == "auto" and d.risk == "read"
 
 
+@pytest.mark.parametrize(
+    ("prefix", "separator"),
+    [("不", "、"), ("不得", "，"), ("禁止", ","), ("不得", "/"),
+     ("禁止", "或")],
+)
+def test_chinese_parallel_negation_does_not_trigger_high_risk(
+    policy, conn, prefix, separator,
+):
+    objective = (
+        f"严格只读检查容器状态；{prefix}重启{separator}停止{separator}删除"
+        "容器或服务；仅报告结果。"
+    )
+    d = policy.decide(conn, objective)
+    assert d.action == "auto" and d.risk == "read"
+
+
+def test_chinese_parallel_negation_allows_object_bearing_operations(
+    policy, conn,
+):
+    objective = "严格只读检查；不得重启容器、停止服务、删除容器；仅报告结果。"
+    d = policy.decide(conn, objective)
+    assert d.action == "auto" and d.risk == "read"
+
+
+def test_unparseable_chinese_negation_fails_closed_with_diagnostic(policy, conn):
+    d = policy.decide(conn, "严格只读检查；不得重启;停止;删除；仅报告结果。")
+    assert d.action == "ask" and d.risk == "unknown"
+    assert "只读声明无法解析" in d.reason
+
+
+def test_contrastive_positive_delete_remains_critical(policy, conn):
+    d = policy.decide(conn, "只读检查；不得重启，但必须删除容器。")
+    assert d.action == "ask" and d.risk == "critical"
+
+
+def test_chinese_parallel_non_negated_operations_still_require_approval(
+    policy, conn,
+):
+    d = policy.decide(conn, "检查容器状态后重启、停止或删除容器")
+    assert d.action == "ask" and d.risk == "critical"
+
+
 def test_chinese_non_negated_write_and_critical_terms_still_require_approval(
     policy, conn,
 ):

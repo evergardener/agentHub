@@ -50,11 +50,12 @@ profiles:
     execution_mode: execute
     allowed_operations:
       [filesystem.read, artifact.read, git.diff, git.status, test.run,
+       command.read,
        filesystem.create, filesystem.write, git.commit]
     denied_operations:
       [filesystem.delete, git.push, git.force_push, deployment.apply,
        database.write, secret.access, service.restart]
-    allowed_tools: [filesystem.read, filesystem.search, test.run]
+    allowed_tools: [filesystem.read, filesystem.search, command.read, test.run]
     task_types: [backend, testing, migration]
     allowed_models:
       [gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.4]
@@ -118,3 +119,12 @@ assignments:
   dsh:
     template_id: TPL-DSH
     profile_id: AP-DSH-REVIEW
+
+# Additive, version-gated upgrades for profiles that are still on their
+# untouched catalog-seed version. Operator-edited profiles have a newer
+# version and are never changed by this mechanism.
+profile_upgrades:
+  - profile_id: AP-CODEX-BACKEND
+    from_version: 1
+    add_allowed_operations: [command.read]
+    add_allowed_tools: [command.read]

@@ -125,6 +125,55 @@ def test_codex_login_shell_keeps_known_inner_command_policy(tmp_path):
         "-m", "pytest", "tests/unit/test_app.py"]
 
 
+@pytest.mark.parametrize("body", [
+    "docker ps --format '{{json .}}'",
+    "docker inspect grafana",
+    "docker logs --tail 50 grafana",
+    "docker stats --no-stream",
+])
+def test_codex_login_shell_structures_bounded_docker_reads_as_command_read(
+        tmp_path, body):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    view = normalize_tool_view({
+        "kind": "shell",
+        "command": f"/bin/zsh -lc {shlex.quote(body)}",
+        "cwd": str(workspace),
+    }, workspace=workspace)
+
+    intent = view["semanticIntent"]
+    assert tool_view_is_inspectable(view) is True
+    assert intent["status"] == "verified"
+    assert intent["operation"] == "command.read"
+    assert intent["impact"] == "read"
+    assert intent["targets"]["command"] == "docker"
+
+
+@pytest.mark.parametrize("body", [
+    "docker exec grafana sh",
+    "docker restart grafana",
+    "docker rm grafana",
+    "docker compose up -d",
+    "docker stats",
+    "docker logs --follow grafana",
+])
+def test_codex_login_shell_keeps_docker_writes_and_ambiguous_reads_critical(
+        tmp_path, body):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    view = normalize_tool_view({
+        "kind": "shell",
+        "command": f"/bin/zsh -lc {shlex.quote(body)}",
+        "cwd": str(workspace),
+    }, workspace=workspace)
+
+    intent = view["semanticIntent"]
+    assert tool_view_is_inspectable(view) is True
+    assert intent["status"] == "verified"
+    assert intent["operation"] == "command.execute"
+    assert intent["impact"] == "critical"
+
+
 @pytest.mark.parametrize("command", [
     "sudo /bin/zsh -lc 'docker build .'",
     "doas /bin/zsh -lc 'docker build .'",
