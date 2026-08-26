@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,195 @@ def _id(prefix: str) -> str:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+# A2A callers need enough detail to audit a native approval, but must not get
+# an unbounded adapter payload or accidentally receive credentials.  These
+# limits apply to the public interaction views only; the durable payload keeps
+# the adapter's bounded record for internal investigation.
+_A2A_DETAIL_TEXT_LIMIT = 4096
+_A2A_COMMAND_LIMIT = 256
+_A2A_ARG_LIMIT = 2048
+_A2A_MAX_ARGS = 64
+_A2A_MAX_PATHS = 100
+_A2A_TOOL_VIEW_LIMIT = 16 * 1024
+_A2A_SENSITIVE_KEY = re.compile(
+    r"(?:authorization|credential|password|secret|token|api[_-]?key)",
+    re.I,
+)
+_A2A_SECRET_TEXT = re.compile(
+    r"(?i)(?:bearer\s+|(?:api[_-]?key|token|password|secret)\s*[=:])"
+    r"[^\s,;]+"
+)
+
+
+def _safe_a2a_text(value: Any, *, limit: int) -> tuple[str | None, bool]:
+    """Return one bounded, non-secret string for an external A2A view."""
+    if not isinstance(value, str) or not value or len(value) > limit:
+        return None, False
+    if "\x00" in value or _A2A_SECRET_TEXT.search(value):
+        return None, False
+    return value, True
+
+
+def _safe_a2a_paths(value: Any) -> tuple[list[str], bool]:
+    if not isinstance(value, list) or len(value) > _A2A_MAX_PATHS:
+        return [], False
+    result: list[str] = []
+    for item in value:
+        safe, valid = _safe_a2a_text(item, limit=_A2A_DETAIL_TEXT_LIMIT)
+        if not valid:
+            return [], False
+        result.append(safe)
+    return result, True
+
+
+def _safe_a2a_args(value: Any) -> tuple[list[str], bool]:
+    if not isinstance(value, list) or len(value) > _A2A_MAX_ARGS:
+        return [], False
+    result: list[str] = []
+    for item in value:
+        safe, valid = _safe_a2a_text(item, limit=_A2A_ARG_LIMIT)
+        if not valid:
+            return [], False
+        result.append(safe)
+    return result, True
+
+
+def _contains_sensitive_key(value: Any) -> bool:
+    """Fail closed when an adapter view contains credential-like fields."""
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    while stack:
+        item, depth = stack.pop()
+        if depth > 8:
+            return True
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if _A2A_SENSITIVE_KEY.search(str(key)):
+                    return True
+                stack.append((child, depth + 1))
+        elif isinstance(item, list):
+            stack.extend((child, depth + 1) for child in item[:100])
+    return False
+
+
+def _safe_tool_view(value: Any) -> tuple[dict | None, bool]:
+    """Keep only bounded presentation fields; ignore opaque adapter extras."""
+    if not isinstance(value, dict):
+        return None, False
+    if _contains_sensitive_key(value):
+        return None, False
+    try:
+        if len(_json(value)) > _A2A_TOOL_VIEW_LIMIT:
+            return None, False
+    except (TypeError, ValueError):
+        return None, False
+
+    safe: dict[str, Any] = {}
+    for key in ("card", "kind", "title", "command", "cwd", "paths"):
+        if key not in value:
+            continue
+        item = value[key]
+        if key == "paths":
+            paths, valid = _safe_a2a_paths(item)
+            if not valid:
+                return None, False
+            safe[key] = paths
+            continue
+        text, valid = _safe_a2a_text(
+            item,
+            limit=_A2A_COMMAND_LIMIT if key == "command" else
+            _A2A_DETAIL_TEXT_LIMIT,
+        )
+        if not valid:
+            return None, False
+        safe[key] = text
+    return safe, True
+
+
+def _safe_interaction_details(
+    *, payload: dict, targets: Any, operation: str | None,
+    rollback_plan: Any, inspectable: bool,
+) -> dict[str, Any]:
+    """Build the bounded public fields shared by tasks/get and interactions/get."""
+    raw_targets = targets if isinstance(targets, dict) else {}
+    safe_targets: dict[str, Any] = {}
+    details_valid = isinstance(targets, dict)
+
+    raw_workspace = raw_targets.get("workspace")
+    workspace, workspace_valid = (
+        (None, True) if raw_workspace is None else _safe_a2a_text(
+            raw_workspace, limit=_A2A_DETAIL_TEXT_LIMIT)
+    )
+    if workspace is not None:
+        safe_targets["workspace"] = workspace
+    details_valid = details_valid and workspace_valid
+
+    raw_paths = raw_targets.get("paths")
+    paths, paths_valid = (
+        ([], True) if raw_paths is None else _safe_a2a_paths(raw_paths)
+    )
+    safe_targets["paths"] = paths
+    details_valid = details_valid and paths_valid
+
+    raw_cwd = raw_targets.get("cwd")
+    cwd, cwd_valid = (
+        (None, True) if raw_cwd is None else _safe_a2a_text(
+            raw_cwd, limit=_A2A_DETAIL_TEXT_LIMIT)
+    )
+    if cwd is not None:
+        safe_targets["cwd"] = cwd
+    details_valid = details_valid and cwd_valid
+
+    raw_command = raw_targets.get("command")
+    command, command_valid = (
+        (None, True) if raw_command is None else _safe_a2a_text(
+            raw_command, limit=_A2A_COMMAND_LIMIT)
+    )
+    raw_args = raw_targets.get("args")
+    args, args_valid = (
+        ([], True) if raw_args is None else _safe_a2a_args(raw_args)
+    )
+    if command is not None:
+        safe_targets["command"] = command
+    if raw_args is not None or operation == "command.read":
+        safe_targets["args"] = args
+    details_valid = details_valid and command_valid and args_valid
+
+    safe_rollback, rollback_valid = _safe_a2a_text(
+        rollback_plan, limit=_A2A_DETAIL_TEXT_LIMIT)
+    if rollback_plan is None:
+        rollback_valid = True
+    details_valid = details_valid and rollback_valid
+
+    raw_tool = payload.get("toolView")
+    safe_tool, tool_valid = (
+        (None, True) if raw_tool is None else _safe_tool_view(raw_tool)
+    )
+    # command.read is only allowed when its canonical argv and workspace
+    # fields are complete and safe.  Other interaction kinds retain the
+    # adapter's inspectable bit, while malformed command detail always fails
+    # closed.
+    command_read = operation == "command.read"
+    if command_read:
+        details_valid = (
+            details_valid and command is not None and bool(args) and bool(paths)
+            and cwd is not None and workspace is not None
+            and tool_valid
+        )
+    inspectable_value = bool(inspectable and details_valid)
+
+    return {
+        "inspectable": inspectable_value,
+        "tool_view": safe_tool if tool_valid else None,
+        "targets": safe_targets,
+        "command": command if command_read else None,
+        "args": args if command_read else [],
+        "cwd": cwd if command_read else None,
+        "workspace": workspace,
+        "rollback_plan": safe_rollback,
+        "details_valid": details_valid,
+    }
 
 
 def _audit(conn, event_type: str, *, task_id: str | None,
@@ -101,6 +291,47 @@ def a2a_context_ids(*, peer: str, context_id: str) -> dict[str, str]:
         "peer": peer,
         "context_id": context_id,
     }
+
+
+def require_a2a_task(conn, *, task_id: str, peer: str,
+                     context_id: str):
+    """Return a task only when it belongs to this authenticated A2A context."""
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise ValueError("task_id is required")
+    mapping = a2a_context_ids(peer=peer, context_id=context_id)
+    task = conn.execute(
+        "SELECT * FROM tasks WHERE id = ?;", (task_id.strip(),)
+    ).fetchone()
+    if task is None:
+        raise KeyError(f"task not found: {task_id}")
+    if task["collaboration_id"] != mapping["collaboration_id"]:
+        raise PermissionError("task does not belong to this peer/context")
+    collaboration = get_collaboration(conn, task["collaboration_id"])
+    conversation = (
+        get_conversation(conn, collaboration["conversation_id"])
+        if collaboration is not None else None
+    )
+    if (
+        collaboration is None
+        or collaboration["conversation_id"] != mapping["conversation_id"]
+        or conversation is None
+        or conversation["created_by"] != f"a2a:{mapping['peer']}"
+    ):
+        raise PermissionError("task does not belong to this peer/context")
+    return task
+
+
+def require_a2a_interaction(conn, *, interaction_id: str, peer: str,
+                            context_id: str):
+    """Return one interaction after enforcing peer/context/task ownership."""
+    if not isinstance(interaction_id, str) or not interaction_id.strip():
+        raise ValueError("interaction_id is required")
+    interaction = get_session_interaction(conn, interaction_id.strip())
+    if interaction is None:
+        raise KeyError(f"interaction not found: {interaction_id}")
+    require_a2a_task(
+        conn, task_id=interaction["task_id"], peer=peer, context_id=context_id)
+    return interaction
 
 
 def ensure_a2a_collaboration(
@@ -677,64 +908,116 @@ def list_session_interactions(conn, *, task_id: str | None = None,
     ).fetchall()
 
 
-def pending_interaction_views(conn, task_id: str) -> list[dict]:
-    """Return safe, structured interaction details for Hermes/UI routing."""
-    rows = conn.execute(
-        "SELECT i.id, i.agent_id, i.kind, i.status, i.payload_json,"
+def _interaction_view_from_row(row) -> dict:
+    try:
+        payload = json.loads(row["payload_json"] or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    try:
+        targets = json.loads(row["targets_json"] or "null")
+    except (TypeError, ValueError):
+        targets = None
+    details = _safe_interaction_details(
+        payload=payload,
+        targets=targets,
+        operation=row["operation"],
+        rollback_plan=row["rollback_plan"],
+        inspectable=payload.get("inspectable") is True,
+    )
+    if row["kind"] == "approval":
+        allowed_responses = ["allowed-once", "rejected"]
+    else:
+        raw_options = payload.get("options")
+        allowed_responses = []
+        if isinstance(raw_options, list) and len(raw_options) <= 32:
+            for option in raw_options:
+                safe_option, valid = _safe_a2a_text(option, limit=256)
+                if not valid:
+                    allowed_responses = []
+                    break
+                allowed_responses.append(safe_option)
+    action_status = row["action_intent_status"]
+    tool_name, tool_name_valid = _safe_a2a_text(
+        payload.get("toolName"), limit=256)
+    reason, reason_valid = _safe_a2a_text(
+        payload.get("reason"), limit=2000)
+    policy_reason, policy_reason_valid = _safe_a2a_text(
+        row["policy_reason"], limit=2000)
+    return {
+        "interaction_id": row["id"],
+        "task_id": row["task_id"],
+        "agent_id": row["agent_id"],
+        "kind": row["kind"],
+        "status": row["status"],
+        "inspectable": details["inspectable"],
+        "tool_name": tool_name if tool_name_valid else None,
+        "reason": reason if reason_valid else None,
+        "tool_view": details["tool_view"],
+        "action_intent_id": row["action_intent_id"],
+        "operation": row["operation"],
+        "risk": row["risk"],
+        "policy_route": row["policy_route"],
+        "action_intent_status": action_status,
+        "policy_reason": policy_reason if policy_reason_valid else None,
+        "targets": details["targets"],
+        "command": details["command"],
+        "args": details["args"],
+        "cwd": details["cwd"],
+        "workspace": details["workspace"],
+        "rollback": details["rollback_plan"],
+        "rollback_plan": details["rollback_plan"],
+        "allowed_responses": allowed_responses,
+        "awaiting": (
+            action_status if action_status in {
+                "awaiting_hermes", "awaiting_user"
+            } else None
+        ),
+        "awaiting_hermes": action_status == "awaiting_hermes",
+        "awaiting_user": action_status == "awaiting_user",
+    }
+
+
+def _interaction_view_rows(conn, *, interaction_id: str | None = None,
+                           task_id: str | None = None,
+                           pending_only: bool = False):
+    clauses = []
+    params: list[Any] = []
+    if interaction_id is not None:
+        clauses.append("i.id = ?")
+        params.append(interaction_id)
+    if task_id is not None:
+        clauses.append("i.task_id = ?")
+        params.append(task_id)
+    if pending_only:
+        clauses.append("i.status IN ('pending', 'failed')")
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    return conn.execute(
+        "SELECT i.id, i.task_id, i.agent_id, i.kind, i.status, i.payload_json,"
         " i.action_intent_id, a.operation, a.risk, a.policy_route,"
         " a.status AS action_intent_status, a.policy_reason,"
         " a.targets_json, a.rollback_plan"
         " FROM agent_session_interactions i"
         " LEFT JOIN action_intents a ON a.id = i.action_intent_id"
-        " WHERE i.task_id = ? AND i.status IN ('pending', 'failed')"
-        " ORDER BY i.requested_at, i.id;",
-        (task_id,),
+        + where + " ORDER BY i.requested_at, i.id;",
+        params,
     ).fetchall()
-    pending = []
-    for row in rows:
-        try:
-            payload = json.loads(row["payload_json"] or "{}")
-        except (TypeError, ValueError):
-            payload = {}
-        try:
-            targets = json.loads(row["targets_json"] or "null")
-        except (TypeError, ValueError):
-            targets = None
-        if row["kind"] == "approval":
-            allowed_responses = ["allowed-once", "rejected"]
-        else:
-            raw_options = payload.get("options")
-            allowed_responses = (
-                raw_options if isinstance(raw_options, list) else [])
-        action_status = row["action_intent_status"]
-        pending.append({
-            "interaction_id": row["id"],
-            "agent_id": row["agent_id"],
-            "kind": row["kind"],
-            "status": row["status"],
-            "inspectable": payload.get("inspectable") is True,
-            "tool_name": payload.get("toolName"),
-            "reason": payload.get("reason"),
-            "tool_view": payload.get("toolView"),
-            "action_intent_id": row["action_intent_id"],
-            "operation": row["operation"],
-            "risk": row["risk"],
-            "policy_route": row["policy_route"],
-            "action_intent_status": action_status,
-            "policy_reason": row["policy_reason"],
-            "targets": targets,
-            "rollback": row["rollback_plan"],
-            "rollback_plan": row["rollback_plan"],
-            "allowed_responses": allowed_responses,
-            "awaiting": (
-                action_status if action_status in {
-                    "awaiting_hermes", "awaiting_user"
-                } else None
-            ),
-            "awaiting_hermes": action_status == "awaiting_hermes",
-            "awaiting_user": action_status == "awaiting_user",
-        })
-    return pending
+
+
+def get_session_interaction_view(conn, interaction_id: str) -> dict | None:
+    """Return one bounded interaction view, including resolved records."""
+    rows = _interaction_view_rows(conn, interaction_id=interaction_id)
+    return _interaction_view_from_row(rows[0]) if rows else None
+
+
+def pending_interaction_views(conn, task_id: str) -> list[dict]:
+    """Return safe, structured pending interaction details for Hermes/UI."""
+    return [
+        _interaction_view_from_row(row)
+        for row in _interaction_view_rows(conn, task_id=task_id,
+                                          pending_only=True)
+    ]
 
 
 def attach_action_intent(conn, interaction_id: str,

@@ -66,11 +66,64 @@ def test_chinese_parallel_negation_does_not_trigger_high_risk(
 
 
 def test_chinese_parallel_negation_allows_object_bearing_operations(
-    policy, conn,
+        policy, conn,
 ):
     objective = "严格只读检查；不得重启容器、停止服务、删除容器；仅报告结果。"
     d = policy.decide(conn, objective)
     assert d.action == "auto" and d.risk == "read"
+
+
+def test_chinese_negation_strips_english_docker_operation_list(
+        policy, conn,
+):
+    objective = (
+        "严格只读检查容器状态；不得执行 "
+        "docker restart/start/stop/rm/kill/compose up/down；"
+        "仅执行 docker ps 并报告结果。"
+    )
+    d = policy.decide(conn, objective)
+    assert d.action == "auto" and d.risk == "read"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "docker restart grafana",
+        "docker start grafana",
+        "docker stop grafana",
+        "docker rm grafana",
+        "docker compose up",
+        "docker compose down",
+    ],
+)
+def test_positive_docker_lifecycle_commands_remain_critical(
+        policy, conn, command,
+):
+    d = policy.decide(conn, f"执行 {command}")
+    assert d.action == "ask" and d.risk == "critical"
+
+
+def test_unparseable_english_docker_negation_fails_closed_with_diagnostic(
+        policy, conn,
+):
+    d = policy.decide(
+        conn,
+        "严格只读检查；不得执行 docker restart/unknown-operation；"
+        "仅报告结果。",
+    )
+    assert d.action == "ask" and d.risk == "unknown"
+    assert "只读声明无法解析" in d.reason
+
+
+def test_positive_docker_command_after_negation_remains_critical(
+        policy, conn,
+):
+    d = policy.decide(
+        conn,
+        "只读检查；不得执行 docker restart/start/stop，"
+        "但必须执行 docker stop。",
+    )
+    assert d.action == "ask" and d.risk == "critical"
 
 
 def test_unparseable_chinese_negation_fails_closed_with_diagnostic(policy, conn):

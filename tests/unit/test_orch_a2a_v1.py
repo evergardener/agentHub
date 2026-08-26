@@ -306,7 +306,46 @@ def test_tasks_create_rejects_runtime_override_for_unsupported_adapter(env):
 
 def test_hub_can_respond_to_hermes_routed_native_interaction(
         env, monkeypatch):
-    _, client, _ = env
+    tm, client, _ = env
+    collaboration_id = collaboration_store.ensure_a2a_collaboration(
+        tm.conn, peer="qishuo", context_id="ctx-live", objective="修复",
+    )["collaboration_id"]
+    task_id = tm.create_task("修复问题", collaboration_id=collaboration_id)
+    for status in (
+        state_store.TaskStatus.ASSIGNED,
+        state_store.TaskStatus.WORKING,
+        state_store.TaskStatus.BLOCKED,
+    ):
+        state_store.transition_task(tm.conn, task_id, status)
+    binding = collaboration_store.bind_agent_session(
+        tm.conn, collaboration_id=collaboration_id, task_id=task_id,
+        agent_id="codex", adapter_session_id="S-codex",
+        native_session_id="native-codex", resume_capability="native")
+    interaction = collaboration_store.upsert_session_interaction(
+        tm.conn, collaboration_id=collaboration_id, task_id=task_id,
+        session_binding_id=binding["id"], agent_id="codex",
+        interaction={
+            "interactionId": "codex:respond-1", "kind": "approval",
+            "nativeRequestId": "rpc-1",
+            "payload": {
+                "toolName": "edit", "inspectable": True,
+                "reason": "更新 Dockerfile",
+                "toolView": {"kind": "edit", "paths": ["/repo/Dockerfile"]},
+            },
+        })
+    intent = collaboration_store.create_action_intent(
+        tm.conn, collaboration_id=collaboration_id, task_id=task_id,
+        session_binding_id=binding["id"], requested_by_agent_id="codex",
+        operation="filesystem.write",
+        targets={"paths": ["/repo/Dockerfile"]},
+        purpose="更新 Dockerfile", expected_effects={"toolName": "edit"},
+        rollback_plan="git restore Dockerfile", based_on_revision=1)
+    tm.conn.execute(
+        "UPDATE action_intents SET status = 'awaiting_hermes',"
+        " policy_route = 'hermes' WHERE id = ?;", (intent["id"],))
+    tm.conn.commit()
+    collaboration_store.attach_action_intent(
+        tm.conn, interaction["id"], intent["id"])
     captured = {}
 
     async def fake_respond(self, interaction_id, *, response,
@@ -321,14 +360,14 @@ def test_hub_can_respond_to_hermes_routed_native_interaction(
     monkeypatch.setattr(TaskManager, "respond_agent_interaction", fake_respond)
     response = client.post(
         "/a2a", json=_control(
-            "interactions/respond", interaction_id="INT-1",
+            "interactions/respond", interaction_id=interaction["id"],
             outcome="allowed-once", note="已核对可回滚变更"),
         headers=_bearer()).json()
 
     payload = json.loads(response["result"]["message"]["parts"][0]["text"])
     assert payload["status"] == "responded"
     assert captured == {
-        "interaction_id": "INT-1",
+        "interaction_id": interaction["id"],
         "response": {"outcome": "allowed-once", "note": "已核对可回滚变更"},
         "requested_by": "hermes",
     }
@@ -336,9 +375,9 @@ def test_hub_can_respond_to_hermes_routed_native_interaction(
 
 def test_tasks_get_exposes_safe_pending_native_interaction(env):
     tm, client, _ = env
-    conversation_id = collaboration_store.create_conversation(tm.conn)
-    collaboration_id = collaboration_store.create_collaboration(
-        tm.conn, conversation_id=conversation_id, objective="修复")
+    collaboration_id = collaboration_store.ensure_a2a_collaboration(
+        tm.conn, peer="qishuo", context_id="ctx-live", objective="修复",
+    )["collaboration_id"]
     task_id = tm.create_task(
         "修复问题", collaboration_id=collaboration_id)
     for status in (
@@ -383,6 +422,7 @@ def test_tasks_get_exposes_safe_pending_native_interaction(env):
     pending = task["metadata"]["pending_interactions"]
     assert pending == [{
         "interaction_id": interaction["id"],
+        "task_id": task_id,
         "agent_id": "codex", "kind": "approval", "status": "pending",
         "inspectable": True, "tool_name": "edit",
         "reason": "更新 Dockerfile",
@@ -393,6 +433,7 @@ def test_tasks_get_exposes_safe_pending_native_interaction(env):
         "action_intent_status": "awaiting_hermes",
         "policy_reason": None,
         "targets": {"paths": ["/repo/Dockerfile"]},
+        "command": None, "args": [], "cwd": None, "workspace": None,
         "rollback": "git restore Dockerfile",
         "rollback_plan": "git restore Dockerfile",
         "allowed_responses": ["allowed-once", "rejected"],
@@ -415,6 +456,162 @@ def test_tasks_get_exposes_safe_pending_native_interaction(env):
         headers=_bearer()).json()
     assert denied["error"]["code"] == -32003
     assert "requires user approval" in denied["error"]["message"]
+
+
+def _command_read_interaction(tm, *, command="docker", args=None,
+                              context_id="ctx-live"):
+    collaboration_id = collaboration_store.ensure_a2a_collaboration(
+        tm.conn, peer="qishuo", context_id=context_id, objective="诊断",
+    )["collaboration_id"]
+    task_id = tm.create_task("只读诊断", collaboration_id=collaboration_id)
+    for status in (
+        state_store.TaskStatus.ASSIGNED,
+        state_store.TaskStatus.WORKING,
+        state_store.TaskStatus.BLOCKED,
+    ):
+        state_store.transition_task(tm.conn, task_id, status)
+    binding = collaboration_store.bind_agent_session(
+        tm.conn, collaboration_id=collaboration_id, task_id=task_id,
+        agent_id="codex", adapter_session_id="S-codex",
+        native_session_id="native-codex", resume_capability="native")
+    args = ["ps"] if args is None else args
+    interaction = collaboration_store.upsert_session_interaction(
+        tm.conn, collaboration_id=collaboration_id, task_id=task_id,
+        session_binding_id=binding["id"], agent_id="codex",
+        interaction={
+            "interactionId": "codex:docker-read-1", "kind": "approval",
+            "nativeRequestId": "rpc-docker-read",
+            "payload": {
+                "toolName": "shell", "inspectable": True,
+                "reason": "读取 Docker 状态",
+                "toolView": {
+                    "kind": "shell", "command": "docker ps",
+                    "cwd": "/repo",
+                },
+            },
+        })
+    intent = collaboration_store.create_action_intent(
+        tm.conn, collaboration_id=collaboration_id, task_id=task_id,
+        session_binding_id=binding["id"], requested_by_agent_id="codex",
+        operation="command.read",
+        targets={
+            "workspace": "/repo", "paths": ["/repo"], "cwd": "/repo",
+            "command": command, "args": args,
+        },
+        purpose="读取 Docker 状态", expected_effects={"read": True},
+        rollback_plan=None, based_on_revision=1)
+    tm.conn.execute(
+        "UPDATE action_intents SET status = 'awaiting_hermes',"
+        " policy_route = 'hermes', risk = 'read' WHERE id = ?;",
+        (intent["id"],))
+    tm.conn.commit()
+    collaboration_store.attach_action_intent(
+        tm.conn, interaction["id"], intent["id"])
+    return task_id, interaction, intent
+
+
+def test_command_read_details_are_context_scoped_and_not_delegation_approval(
+        env):
+    tm, client, _ = env
+    task_id, interaction, _ = _command_read_interaction(tm)
+
+    task = client.post(
+        "/a2a", json=_control("tasks/get", task_id=task_id),
+        headers=_bearer()).json()["result"]["task"]
+    pending = task["metadata"]["pending_interactions"][0]
+    assert pending["inspectable"] is True
+    assert pending["command"] == "docker"
+    assert pending["args"] == ["ps"]
+    assert pending["cwd"] == "/repo"
+    assert pending["workspace"] == "/repo"
+    assert pending["rollback_plan"] is None
+    assert pending["allowed_responses"] == ["allowed-once", "rejected"]
+    status_text = task["status"]["message"]["parts"][0]["text"]
+    assert '"command":"docker"' in status_text
+    assert '"args":["ps"]' in status_text
+    assert '"allowed_responses":["allowed-once","rejected"]' in status_text
+
+    detail_response = client.post(
+        "/a2a", json=_control(
+            "interactions/get", interaction_id=interaction["id"]),
+        headers=_bearer()).json()
+    detail = json.loads(
+        detail_response["result"]["message"]["parts"][0]["text"]
+    )["interaction"]
+    assert detail["interaction_id"] == interaction["id"]
+    assert detail["command"] == "docker"
+    assert detail["args"] == ["ps"]
+    assert detail["awaiting_hermes"] is True
+
+    direct = client.post(
+        "/a2a",
+        json={
+            "jsonrpc": "2.0", "id": "direct-get",
+            "method": "interactions/get",
+            "params": {"id": interaction["id"], "contextId": "ctx-live"},
+        },
+        headers=_bearer(),
+    ).json()
+    assert direct["result"]["interaction"]["interaction_id"] == \
+        interaction["id"]
+    missing_direct_context = client.post(
+        "/a2a",
+        json={
+            "jsonrpc": "2.0", "id": "direct-get-missing-context",
+            "method": "interactions/get",
+            "params": {"id": interaction["id"]},
+        },
+        headers=_bearer(),
+    ).json()
+    assert missing_direct_context["error"]["code"] == -32602
+
+    wrong_context = client.post(
+        "/a2a", json=_control(
+            "interactions/get", context_id="ctx-other",
+            interaction_id=interaction["id"]),
+        headers=_bearer()).json()
+    assert wrong_context["error"]["code"] == -32003
+
+    wrong_peer = client.post(
+        "/a2a", json=_control(
+            "interactions/get", interaction_id=interaction["id"]),
+        headers=_bearer(OTHER_HUB_TOKEN)).json()
+    assert wrong_peer["error"]["code"] == -32003
+
+    # tasks/approve is only the delegation gate.  It cannot replace the
+    # native interaction's allowed-once receipt.
+    delegation_approval = client.post(
+        "/a2a", json=_control("tasks/approve", task_id=task_id),
+        headers=_bearer()).json()
+    assert delegation_approval["error"]["code"] == -32602
+    assert "不在待批准状态" in delegation_approval["error"]["message"]
+
+
+def test_command_read_sensitive_or_unbounded_details_fail_closed(env):
+    tm, client, _ = env
+    task_id, interaction, _ = _command_read_interaction(
+        tm, args=["--format", "token=not-for-display"])
+    detail = client.post(
+        "/a2a", json=_control(
+            "interactions/get", interaction_id=interaction["id"]),
+        headers=_bearer()).json()
+    view = json.loads(
+        detail["result"]["message"]["parts"][0]["text"]
+    )["interaction"]
+    assert view["inspectable"] is False
+    assert view["args"] == []
+
+    _, long_interaction, _ = _command_read_interaction(
+        tm, args=["x" * 2049])
+    long_detail = client.post(
+        "/a2a", json=_control(
+            "interactions/get", interaction_id=long_interaction["id"]),
+        headers=_bearer()).json()
+    long_view = json.loads(
+        long_detail["result"]["message"]["parts"][0]["text"]
+    )["interaction"]
+    assert long_view["inspectable"] is False
+    assert long_view["args"] == []
 
 
 def test_same_peer_context_reuses_collaboration_for_multiple_tasks(env):
@@ -495,7 +692,11 @@ def test_approval_and_get_work_through_same_peer(env):
 
 def test_acceptance_is_distinct_input_required_and_explicit_user_action(env):
     tm, client, _ = env
-    task_id = tm.create_task("完成后等待用户验收")
+    collaboration_id = collaboration_store.ensure_a2a_collaboration(
+        tm.conn, peer="qishuo", context_id="ctx-live", objective="验收",
+    )["collaboration_id"]
+    task_id = tm.create_task("完成后等待用户验收",
+                             collaboration_id=collaboration_id)
     for status in (
         state_store.TaskStatus.ASSIGNED,
         state_store.TaskStatus.WORKING,
@@ -518,7 +719,11 @@ def test_acceptance_is_distinct_input_required_and_explicit_user_action(env):
 
 def test_a2a_rework_requires_feedback_and_does_not_reopen_completed(env):
     tm, client, _ = env
-    task_id = tm.create_task("等待验收后返工")
+    collaboration_id = collaboration_store.ensure_a2a_collaboration(
+        tm.conn, peer="qishuo", context_id="ctx-live", objective="返工",
+    )["collaboration_id"]
+    task_id = tm.create_task("等待验收后返工",
+                             collaboration_id=collaboration_id)
     for status in (
         state_store.TaskStatus.ASSIGNED,
         state_store.TaskStatus.WORKING,

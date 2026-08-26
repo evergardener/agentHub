@@ -21,7 +21,9 @@
     tasks/accept  params.id → 对待验收任务执行正式验收通过
     tasks/request-rework params.id, feedback → 对待验收任务提报反馈返工
                   （精确动作；重复/晚到/终态返回稳定错误，不重复委派）
-    supervision/register|pull|ack|stop → qishuo 原会话的持久异步监督；
+    interactions/get params.interaction_id → pending native interaction detail
+    interactions/respond params.interaction_id, outcome → one-time response
+                  supervision/register|pull|ack|stop → qishuo 原会话的持久异步监督；
                   仅返回任务/事件标识，不返回 worker 内容
 
 鉴权（/health 外全路径）：
@@ -142,6 +144,7 @@ def _hub_command(text: str) -> tuple[dict | None, str | None]:
             "agents/list", "tasks/create", "tasks/get",
             "tasks/approve", "tasks/reject", "tasks/accept",
             "tasks/request-rework", "interactions/respond",
+            "interactions/get",
             "supervision/register", "supervision/pull",
             "supervision/ack", "supervision/stop"}:
         return None, f"未知 agentHub action: {action}"
@@ -237,18 +240,36 @@ def _to_a2a(conn, row, *, context_id: str | None = None) -> dict:
         # into the wakeup envelope or this summary.
         summary = [{
             "interaction_id": item.get("interaction_id"),
+            "inspectable": item.get("inspectable") is True,
             "operation": item.get("operation"),
             "risk": item.get("risk"),
             "policy_route": item.get("policy_route"),
             "policy_reason": str(item.get("policy_reason") or "")[:240],
             "action_intent_status": item.get("action_intent_status"),
             "awaiting": item.get("awaiting"),
+            "command": item.get("command"),
+            "args": [str(arg)[:256]
+                     for arg in (item.get("args") or [])[:16]],
+            "cwd": str(item.get("cwd") or "")[:512] or None,
+            "workspace": str(item.get("workspace") or "")[:512] or None,
+            "rollback_plan": str(item.get("rollback_plan") or "")[:512]
+            or None,
+            "allowed_responses": item.get("allowed_responses") or [],
         } for item in pending_interactions[:20]]
         compact = json.dumps(summary, ensure_ascii=False,
                              separators=(",", ":"))
         if len(compact) > 1800:
             compact = json.dumps([{
                 "interaction_id": item.get("interaction_id"),
+                "inspectable": item.get("inspectable") is True,
+                "command": item.get("command"),
+                "args": [str(arg)[:128]
+                         for arg in (item.get("args") or [])[:8]],
+                "cwd": str(item.get("cwd") or "")[:256] or None,
+                "workspace": str(item.get("workspace") or "")[:256] or None,
+                "rollback_plan": str(item.get("rollback_plan") or "")[:256]
+                or None,
+                "allowed_responses": item.get("allowed_responses") or [],
                 "risk": item.get("risk"),
                 "policy_route": item.get("policy_route"),
                 "action_intent_status": item.get("action_intent_status"),
@@ -415,22 +436,40 @@ def create_app(tm: TaskManager | None = None,
             return await _message_send(params, rpc_id, identity,
                                        v1=(method == "SendMessage"))
         if method == "tasks/get":
-            return _tasks_get(params, rpc_id)
+            return _tasks_get(
+                params, rpc_id, identity=identity,
+                context_id=(params.get("contextId") or
+                            params.get("context_id")))
         if method == "tasks/approve":
             return await _tasks_approval(params, rpc_id, identity,
-                                         approve=True)
+                                         approve=True,
+                                         context_id=(params.get("contextId") or
+                                                     params.get("context_id")))
         if method == "tasks/reject":
             return await _tasks_approval(params, rpc_id, identity,
-                                         approve=False)
+                                         approve=False,
+                                         context_id=(params.get("contextId") or
+                                                     params.get("context_id")))
         if method == "tasks/accept":
             return await _tasks_acceptance(
-                params, rpc_id, identity, approve=True)
+                params, rpc_id, identity, approve=True,
+                context_id=(params.get("contextId") or
+                            params.get("context_id")))
         if method == "tasks/request-rework":
             return await _tasks_acceptance(
-                params, rpc_id, identity, approve=False)
+                params, rpc_id, identity, approve=False,
+                context_id=(params.get("contextId") or
+                            params.get("context_id")))
         if method == "interactions/respond":
             return await _interaction_response(
-                params, rpc_id, identity, wrapped=False)
+                params, rpc_id, identity,
+                context_id=(params.get("contextId") or
+                            params.get("context_id")), wrapped=False)
+        if method == "interactions/get":
+            return _interaction_get(
+                params, rpc_id, identity,
+                context_id=(params.get("contextId") or
+                            params.get("context_id")), wrapped=False)
         return _error(rpc_id, -32601, f"method not found: {method}")
 
     @app.api_route("/worker-proxy/{agent_id}/{path:path}",
@@ -521,8 +560,9 @@ def create_app(tm: TaskManager | None = None,
                     {"agents": public}, ensure_ascii=False), context_id)
                 return _result(rpc_id, {"message": message})
             if action == "tasks/get":
-                return _tasks_get({"id": command.get("task_id")}, rpc_id,
-                                  context_id=context_id, wrapped=True)
+                return _tasks_get(
+                    {"id": command.get("task_id")}, rpc_id,
+                    identity=identity, context_id=context_id, wrapped=True)
             if action in {"tasks/approve", "tasks/reject"}:
                 return await _tasks_approval(
                     {"id": command.get("task_id")}, rpc_id, identity,
@@ -548,6 +588,14 @@ def create_app(tm: TaskManager | None = None,
                         "outcome": command.get("outcome"),
                         "note": command.get("note"),
                     },
+                    rpc_id,
+                    identity,
+                    context_id=context_id,
+                    wrapped=True,
+                )
+            if action == "interactions/get":
+                return _interaction_get(
+                    {"interaction_id": command.get("interaction_id")},
                     rpc_id,
                     identity,
                     context_id=context_id,
@@ -788,6 +836,19 @@ def create_app(tm: TaskManager | None = None,
         task_id = params.get("id")
         if not task_id:
             return _error(rpc_id, -32602, "params.id 必填（任务 ID）")
+        if identity.get("kind") == "hub":
+            if not isinstance(context_id, str) or not context_id.strip():
+                return _error(rpc_id, -32602,
+                              "tasks/approve 或 tasks/reject 必须携带 contextId")
+            from orchestrator import collaboration_store
+            try:
+                collaboration_store.require_a2a_task(
+                    tm.conn, task_id=task_id, peer=identity["peer"],
+                    context_id=context_id)
+            except PermissionError as exc:
+                return _error(rpc_id, -32003, str(exc))
+            except (KeyError, TypeError, ValueError) as exc:
+                return _error(rpc_id, -32602, str(exc))
         pending = _approval_pending(tm.conn, task_id)
         if pending is None:
             row = state_store.get_task(tm.conn, task_id)
@@ -813,6 +874,19 @@ def create_app(tm: TaskManager | None = None,
         task_id = params.get("id")
         if not task_id:
             return _error(rpc_id, -32602, "params.id 必填（任务 ID）")
+        if identity.get("kind") == "hub":
+            if not isinstance(context_id, str) or not context_id.strip():
+                return _error(rpc_id, -32602,
+                              "tasks/accept 或 tasks/request-rework 必须携带 contextId")
+            from orchestrator import collaboration_store
+            try:
+                collaboration_store.require_a2a_task(
+                    tm.conn, task_id=task_id, peer=identity["peer"],
+                    context_id=context_id)
+            except PermissionError as exc:
+                return _error(rpc_id, -32003, str(exc))
+            except (KeyError, TypeError, ValueError) as exc:
+                return _error(rpc_id, -32602, str(exc))
         try:
             if approve:
                 tm.accept_result(
@@ -864,9 +938,24 @@ def create_app(tm: TaskManager | None = None,
         if not isinstance(note, str) or len(note) > 2000:
             return _error(
                 rpc_id, -32602, "note 必须是至多 2000 字符的字符串")
+        if not isinstance(context_id, str) or not context_id.strip():
+            return _error(rpc_id, -32602,
+                          "interactions/respond 必须携带 contextId")
+        from orchestrator import collaboration_store
+        try:
+            collaboration_store.require_a2a_interaction(
+                tm.conn,
+                interaction_id=interaction_id.strip(),
+                peer=identity["peer"],
+                context_id=context_id,
+            )
+        except PermissionError as exc:
+            return _error(rpc_id, -32003, str(exc))
+        except (KeyError, TypeError, ValueError) as exc:
+            return _error(rpc_id, -32602, str(exc))
         try:
             native_result = await tm.respond_agent_interaction(
-                interaction_id,
+                interaction_id.strip(),
                 response={"outcome": outcome, "note": note.strip()},
                 requested_by="hermes",
             )
@@ -885,10 +974,70 @@ def create_app(tm: TaskManager | None = None,
                 json.dumps(result, ensure_ascii=False), context_id)})
         return _result(rpc_id, result)
 
-    def _tasks_get(params: dict, rpc_id, *, context_id: str | None = None,
+    def _interaction_get(params: dict, rpc_id, identity: dict, *,
+                         context_id: str | None = None,
+                         wrapped: bool = False) -> JSONResponse:
+        """Return one bounded native interaction after A2A ownership checks."""
+        if identity.get("kind") != "hub":
+            return _error(
+                rpc_id, -32003,
+                "原生 Agent 交互只能由已认证 Hermes peer 或用户 WebUI 读取")
+        interaction_id = params.get("interaction_id") or params.get("id")
+        if (not isinstance(interaction_id, str)
+                or not interaction_id.strip() or len(interaction_id) > 128):
+            return _error(rpc_id, -32602, "interaction_id 必填")
+        if not isinstance(context_id, str) or not context_id.strip():
+            return _error(rpc_id, -32602,
+                          "interactions/get 必须携带 contextId")
+
+        from orchestrator import collaboration_store
+
+        try:
+            collaboration_store.require_a2a_interaction(
+                tm.conn,
+                interaction_id=interaction_id.strip(),
+                peer=identity["peer"],
+                context_id=context_id,
+            )
+        except PermissionError as exc:
+            return _error(rpc_id, -32003, str(exc))
+        except (KeyError, TypeError, ValueError) as exc:
+            return _error(rpc_id, -32602, str(exc))
+        detail = collaboration_store.get_session_interaction_view(
+            tm.conn, interaction_id.strip())
+        if detail is None:
+            return _error(rpc_id, -32602,
+                          f"interaction not found: {interaction_id}")
+        result = {"interaction": detail}
+        if wrapped:
+            return _result(rpc_id, {"message": _text_message(
+                json.dumps(result, ensure_ascii=False), context_id)})
+        return _result(rpc_id, result)
+
+    def _tasks_get(params: dict, rpc_id, *, identity: dict | None = None,
+                   context_id: str | None = None,
                    wrapped: bool = False) -> JSONResponse:
         task_id = params.get("id")
-        row = state_store.get_task(tm.conn, task_id) if task_id else None
+        row = None
+        if identity and identity.get("kind") == "hub":
+            if not isinstance(context_id, str) or not context_id.strip():
+                return _error(rpc_id, -32602,
+                              "tasks/get 必须携带 contextId")
+            from orchestrator import collaboration_store
+
+            try:
+                row = collaboration_store.require_a2a_task(
+                    tm.conn,
+                    task_id=task_id,
+                    peer=identity["peer"],
+                    context_id=context_id,
+                )
+            except PermissionError as exc:
+                return _error(rpc_id, -32003, str(exc))
+            except (KeyError, TypeError, ValueError) as exc:
+                return _error(rpc_id, -32602, str(exc))
+        elif task_id:
+            row = state_store.get_task(tm.conn, task_id)
         if row is None:
             return _error(rpc_id, -32602, f"task not found: {task_id}")
         task = _to_a2a(tm.conn, row, context_id=context_id)

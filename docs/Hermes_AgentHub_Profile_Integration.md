@@ -61,8 +61,9 @@ qishuo 原生 `a2a_call` 不提供自定义 `metadata.agent`，因此 agentHub
    `task.id`）；
 5. `input-required` 时向用户请求批准，也可在 WebUI 审批中心处理；
 6. 使用同一 `context_id` 调用 `tasks/get/approve/reject`；
-7. `agenthub-supervisor` 持久轮询 agentHub outbox；发生审批、阻塞、失败或等待验收
-   时，以只含 ID/状态的可信 envelope 唤醒原 gateway session；
+7. `agenthub-supervisor` 轮询 agentHub outbox；canonical Gateway route 可持久恢复
+   watch，CLI/TUI route 仅在当前 Hermes 进程存活时轮询/注入，发生审批、阻塞、失败
+   或等待验收时，以只含 ID/状态的可信 envelope 唤醒可用 surface；
 8. Hermes 使用 envelope 中原 `context_id` 调用 `tasks/get`，处理并向用户汇报后
    ACK；未 ACK 会按租约重投，重启后从 profile state 恢复；
 9. 核对终态、产物和审计记录后汇报，只有用户显式接受才能 `tasks/accept`。
@@ -105,10 +106,13 @@ Kimi 停用时，`agents/list` 会标记 `enabled=false`；如用户仍指定 Ki
 - 对同一 task/context 继续两轮，不生成重复任务。
 - qishuo plugin doctor 通过，配置中仅该 profile 对 supervisor 开启
   `allow_gateway_injection`；全局 Hermes 配置未修改。
-- 创建任务后工具结果出现 `agentHub supervision active`；让任务进入批准、阻塞或
-  等待验收，原 Hermes session 在一个轮询周期内被唤醒并先调用 `tasks/get`。
+- Gateway 创建任务后工具结果出现 `agentHub supervision active` 且
+  `delivery=gateway-durable`；CLI/TUI 只能出现 `process-only`，进程退出后不保证
+  唤醒。让任务进入批准、阻塞或等待验收时，可用的原 Hermes surface 在一个轮询
+  周期内被唤醒并先调用 `tasks/get`。
 - 暂停 Hermes 超过一个租约周期后恢复，收到同一个 `notification_id`；ACK 后不再
-  重投。Hermes/profile 重启后 watch 仍存在并继续监督。
+  重投。Hermes/profile 重启后只有 Gateway-durable watch 仍存在并继续监督；
+  process-only watch 必须重新注册。
 - 通知 envelope 不含 objective、worker 回复、tool args 或 approval payload；
   `awaiting_user` 不会被 Hermes 自批，等待验收也不会自动 `tasks/accept`。
 

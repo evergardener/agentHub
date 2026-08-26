@@ -10,6 +10,7 @@ import threading
 import urllib.error
 import urllib.request
 from typing import Any
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +22,42 @@ _ctx = None
 _poll_thread = None
 _poll_stop = threading.Event()
 _poll_lock = threading.Lock()
+_poll_surface = ""
+_last_poll_skip_signature = None
+
+# A watch registered from a CLI/TUI process has no durable Gateway route.  It
+# may still be useful while that process is alive (PluginContext can enqueue a
+# local input), but another process must never adopt it from the shared plugin
+# state file.  A random process token is stronger than a PID, which can be
+# reused after a CLI exits.
+_PROCESS_OWNER_ID = f"pid-{os.getpid()}-{uuid4().hex[:16]}"
+_CLI_SOURCES = frozenset({
+    "cli", "tui", "desktop",
+})
+_NON_DELIVERING_SURFACES = frozenset({
+    "api_server", "webhook", "msgraph_webhook", "kanban", "local", "codex",
+    "tool",
+})
 
 
 def _set_context_for_tests(ctx) -> None:
-    global _ctx, _poll_thread, _poll_stop
+    global _ctx, _poll_thread, _poll_stop, _poll_surface
+    global _last_poll_skip_signature
     _ctx = ctx
     _poll_thread = None
     _poll_stop = threading.Event()
+    _poll_surface = ""
+    _last_poll_skip_signature = None
+
+
+def _session_env(name: str) -> str:
+    """Read the session context without making the plugin depend on Hermes."""
+    try:
+        from gateway.session_context import get_session_env
+
+        return str(get_session_env(name, "") or "").strip().lower()
+    except Exception:
+        return str(os.getenv(name, "") or "").strip().lower()
 
 
 def _current_session_key() -> str:
@@ -37,6 +67,123 @@ def _current_session_key() -> str:
         return get_current_session_key(default="") or ""
     except Exception:
         return ""
+
+
+def _cli_ref_available() -> bool | None:
+    """Return whether this PluginContext can enqueue an in-process CLI turn.
+
+    Real PluginContext instances always have a manager.  Returning ``None``
+    for a small test/stub context keeps unit tests independent of Hermes while
+    production remains fail-closed when the manager explicitly has no CLI ref.
+    """
+    manager = getattr(_ctx, "_manager", None) if _ctx is not None else None
+    if manager is None:
+        return None
+    return getattr(manager, "_cli_ref", None) is not None
+
+
+def _session_surface(session_key: str = "") -> str:
+    """Classify the current execution surface as gateway, CLI, or unsupported."""
+    key = session_key or _current_session_key()
+    platform = _session_env("HERMES_SESSION_PLATFORM")
+    source = _session_env("HERMES_SESSION_SOURCE")
+    if source in _CLI_SOURCES or platform in _CLI_SOURCES:
+        return "cli"
+    if source in _NON_DELIVERING_SURFACES or \
+            platform in _NON_DELIVERING_SURFACES:
+        return "unsupported"
+    if _cli_ref_available() is True:
+        return "cli"
+    # Hermes Gateway routing keys are build_session_key() values with the
+    # ``agent:`` namespace.  Bare CLI/worker keys (for example ``mt...``) are
+    # process-local and must not be advertised as durable supervision.
+    if key and key.startswith("agent:"):
+        return "gateway"
+    if key and not platform and not source:
+        return "cli"
+    if platform or source:
+        return "gateway"
+    return "unknown"
+
+
+def _is_durable_route(surface: str, session_key: str) -> bool:
+    """Only canonical Gateway routes can survive the originating process."""
+    return surface == "gateway" and session_key.startswith("agent:")
+
+
+def _watch_record(*, task_id: str, context_id: str, session_key: str,
+                  surface: str) -> dict:
+    durable = _is_durable_route(surface, session_key)
+    return {
+        "task_id": task_id,
+        "context_id": context_id,
+        "session_key": session_key,
+        "owner_mode": surface,
+        "owner_instance_id": "" if durable else _PROCESS_OWNER_ID,
+        "durable": durable,
+    }
+
+
+def _watch_surface(watch: dict) -> str:
+    value = str(watch.get("owner_mode") or "").strip().lower()
+    if value in {"gateway", "cli"}:
+        return value
+    # Legacy state had no ownership metadata.  Derive only enough information
+    # to keep a Gateway poller from consuming an old CLI watch; legacy CLI
+    # watches still require a fresh in-process owner token before polling.
+    return _session_surface(str(watch.get("session_key") or ""))
+
+
+def _watch_is_durable(watch: dict) -> bool:
+    value = watch.get("durable")
+    if isinstance(value, bool):
+        return value
+    return _is_durable_route(
+        _watch_surface(watch), str(watch.get("session_key") or ""))
+
+
+def _owned_watches(surface: str | None = None) -> dict[str, dict]:
+    """Return only watches this process is allowed to pull."""
+    selected_surface = surface or _poll_surface
+    if selected_surface not in {"gateway", "cli"}:
+        return {}
+    result = {}
+    for watch_id, watch in _watches().items():
+        if not isinstance(watch, dict) or _watch_surface(watch) != selected_surface:
+            continue
+        if _watch_is_durable(watch):
+            result[watch_id] = watch
+            continue
+        if watch.get("owner_instance_id") == _PROCESS_OWNER_ID:
+            result[watch_id] = watch
+    return result
+
+
+def _delivery_surface_available(watch: dict) -> bool:
+    """Preflight delivery before pulling, so a failed route keeps its row pending."""
+    surface = _watch_surface(watch)
+    manager = getattr(_ctx, "_manager", None) if _ctx is not None else None
+    if manager is None:
+        # Test contexts provide inject_message directly.  Hermes PluginContext
+        # always has a manager, so this does not weaken production fail-closed
+        # behavior.
+        return _ctx is not None
+    if surface == "cli":
+        return getattr(manager, "_cli_ref", None) is not None
+    if surface == "gateway":
+        return bool(getattr(manager, "has_gateway_message_injector", False))
+    return False
+
+
+def _delivery_label(watch: dict) -> str:
+    surface = _watch_surface(watch)
+    if _watch_is_durable(watch):
+        return "gateway-durable"
+    if surface == "cli":
+        return "cli-process"
+    if surface == "gateway":
+        return "gateway-process"
+    return "unavailable"
 
 
 def _poll_seconds() -> float:
@@ -163,6 +310,11 @@ def _transform_tool_result(tool_name: str = "", args: Any = None,
         return result + (
             "\n\n[agentHub supervision unavailable: originating gateway "
             "session is unknown; do not describe this task as supervised]")
+    surface = _session_surface(session_key)
+    if surface == "unsupported":
+        return result + (
+            "\n\n[agentHub supervision unavailable: this session surface "
+            "cannot receive a later wake; use bounded tasks/get polling]")
     try:
         registered = _call_agenthub(
             "supervision/register", context_id=context_id, task_id=task_id)
@@ -170,19 +322,33 @@ def _transform_tool_result(tool_name: str = "", args: Any = None,
         if not isinstance(watch_id, str):
             raise RuntimeError("agentHub returned invalid watch_id")
         watches = _watches()
-        watches[watch_id] = {
-            "task_id": task_id,
-            "context_id": context_id,
-            "session_key": session_key,
-        }
+        watch = _watch_record(
+            task_id=task_id, context_id=context_id,
+            session_key=session_key, surface=surface)
+        watches[watch_id] = watch
         _save_watches(watches)
+        global _poll_surface
+        _poll_surface = surface
         _ensure_polling()
     except Exception as exc:
         logger.warning("agentHub supervision registration failed: %s", exc)
         return result + (
             "\n\n[agentHub supervision unavailable: registration failed; "
             "do not describe this task as supervised]")
-    return result + f"\n\n[agentHub supervision active: watch_id={watch_id}]"
+    if _watch_is_durable(watch):
+        marker = (
+            f"[agentHub supervision active: watch_id={watch_id}; "
+            "delivery=gateway-durable]")
+    elif _delivery_surface_available(watch):
+        marker = (
+            f"[agentHub supervision process-only: watch_id={watch_id}; "
+            f"delivery={_delivery_label(watch)}; "
+            "the wake cannot survive this Hermes process]")
+    else:
+        marker = (
+            f"[agentHub supervision unavailable: watch_id={watch_id}; "
+            f"delivery={_delivery_label(watch)}; use bounded tasks/get polling]")
+    return result + "\n\n" + marker
 
 
 def _safe_notification_message(notification: dict) -> str:
@@ -209,43 +375,114 @@ def _safe_notification_message(notification: dict) -> str:
 
 
 def _inject_notification(notification: dict) -> bool:
-    if _ctx is None:
-        return False
+    notification_id = notification.get("notification_id")
     watch_id = notification.get("watch_id")
+    if _ctx is None:
+        logger.warning(
+            "agentHub supervision injection failed: notification_id=%s "
+            "watch_id=%s reason=no_plugin_context",
+            notification_id, watch_id)
+        return False
     watch = _watches().get(watch_id)
     if not isinstance(watch, dict):
+        logger.warning(
+            "agentHub supervision injection failed: notification_id=%s "
+            "watch_id=%s reason=unknown_watch",
+            notification_id, watch_id)
         return False
     if notification.get("task_id") != watch.get("task_id") or \
             notification.get("context_id") != watch.get("context_id"):
-        logger.warning("Rejected mismatched agentHub supervision envelope")
+        logger.warning(
+            "agentHub supervision injection failed: notification_id=%s "
+            "watch_id=%s task_id=%s context_id=%s session_key=%s surface=%s "
+            "reason=mismatched_envelope",
+            notification_id, watch_id, notification.get("task_id"),
+            notification.get("context_id"), watch.get("session_key"),
+            _watch_surface(watch))
         return False
-    return bool(_ctx.inject_message(
-        _safe_notification_message(notification),
-        role="user",
-        session_key=watch.get("session_key"),
-    ))
+    if not _delivery_surface_available(watch):
+        logger.warning(
+            "agentHub supervision injection failed: notification_id=%s "
+            "watch_id=%s task_id=%s context_id=%s session_key=%s surface=%s "
+            "reason=delivery_surface_unavailable",
+            notification_id, watch_id, watch.get("task_id"),
+            watch.get("context_id"), watch.get("session_key"),
+            _watch_surface(watch))
+        return False
+    try:
+        accepted = bool(_ctx.inject_message(
+            _safe_notification_message(notification),
+            role="user",
+            session_key=watch.get("session_key"),
+        ))
+    except Exception as exc:
+        logger.warning(
+            "agentHub supervision injection failed: notification_id=%s "
+            "watch_id=%s task_id=%s context_id=%s session_key=%s surface=%s "
+            "reason=inject_exception error_type=%s",
+            notification_id, watch_id, watch.get("task_id"),
+            watch.get("context_id"), watch.get("session_key"),
+            _watch_surface(watch), type(exc).__name__)
+        return False
+    if not accepted:
+        logger.warning(
+            "agentHub supervision injection failed: notification_id=%s "
+            "watch_id=%s task_id=%s context_id=%s session_key=%s surface=%s "
+            "reason=inject_rejected",
+            notification_id, watch_id, watch.get("task_id"),
+            watch.get("context_id"), watch.get("session_key"),
+            _watch_surface(watch))
+    return accepted
 
 
 def _poll_loop() -> None:
+    global _last_poll_skip_signature
     while not _poll_stop.is_set():
         try:
-            watches = _watches()
+            watches = _owned_watches()
             watch_ids = sorted(watches)
             if watch_ids:
+                eligible_ids = [
+                    watch_id for watch_id in watch_ids
+                    if _delivery_surface_available(watches[watch_id])
+                ]
+                skipped_ids = [
+                    watch_id for watch_id in watch_ids
+                    if watch_id not in eligible_ids
+                ]
+                if skipped_ids:
+                    signature = (_poll_surface, tuple(skipped_ids))
+                    if signature != _last_poll_skip_signature:
+                        logger.warning(
+                            "agentHub supervision poll skipped watches: "
+                            "surface=%s watch_ids=%s reason="
+                            "delivery_surface_unavailable",
+                            _poll_surface, skipped_ids)
+                        _last_poll_skip_signature = signature
+                if not eligible_ids:
+                    _poll_stop.wait(_poll_seconds())
+                    continue
+                _last_poll_skip_signature = None
                 payload = _call_agenthub(
                     "supervision/pull",
-                    watch_ids=watch_ids, limit=20)
+                    watch_ids=eligible_ids, limit=20)
                 for notification in payload.get("notifications") or []:
                     if isinstance(notification, dict):
                         _inject_notification(notification)
         except Exception as exc:
-            logger.warning("agentHub supervision poll failed: %s", exc)
+            logger.warning(
+                "agentHub supervision poll failed: surface=%s watch_ids=%s: %s",
+                _poll_surface, sorted(_owned_watches()), exc)
         _poll_stop.wait(_poll_seconds())
 
 
-def _ensure_polling(**_: Any) -> None:
-    global _poll_thread
-    if _ctx is None or not _watches():
+def _ensure_polling(surface: str | None = None, **_: Any) -> None:
+    global _poll_thread, _poll_surface
+    resolved_surface = surface or _poll_surface or _session_surface()
+    if resolved_surface not in {"gateway", "cli"}:
+        return
+    _poll_surface = resolved_surface
+    if _ctx is None or not _owned_watches(resolved_surface):
         return
     with _poll_lock:
         if _poll_thread is not None and _poll_thread.is_alive():
@@ -261,6 +498,47 @@ def _ensure_polling(**_: Any) -> None:
 
 def _stop_polling() -> None:
     _poll_stop.set()
+    if _ctx is None:
+        return
+    try:
+        watches = _watches()
+        ephemeral = {
+            key: value for key, value in watches.items()
+            if isinstance(value, dict)
+            and not _watch_is_durable(value)
+            and value.get("owner_instance_id") == _PROCESS_OWNER_ID
+        }
+        if ephemeral:
+            logger.warning(
+                "agentHub supervision process-only watches expired with "
+                "Hermes process: watch_ids=%s",
+                sorted(ephemeral),
+            )
+            stopped = set()
+            for task_id in sorted({
+                    str(value.get("task_id") or "")
+                    for value in ephemeral.values()
+                    if value.get("task_id")
+            }):
+                try:
+                    _call_agenthub("supervision/stop", task_id=task_id)
+                    stopped.add(task_id)
+                except Exception as exc:
+                    logger.warning(
+                        "agentHub supervision process-only watch stop failed: "
+                        "task_id=%s reason=%s",
+                        task_id, type(exc).__name__,
+                    )
+            _save_watches({
+                key: value for key, value in watches.items()
+                if key not in ephemeral
+                or str(value.get("task_id") or "") not in stopped
+            })
+    except Exception as exc:
+        logger.warning(
+            "agentHub supervision process-only watch cleanup failed: %s",
+            type(exc).__name__,
+        )
 
 
 def _ack(args: dict, **_: Any) -> str:
@@ -280,26 +558,51 @@ def _register(args: dict, **_: Any) -> str:
     context_id = str(args.get("context_id") or "").strip()
     session_key = _current_session_key()
     if not task_id or not context_id or not session_key:
-        return "Error: task_id, context_id, and a gateway session are required."
+        return "Error: task_id, context_id, and a session are required."
+    surface = _session_surface(session_key)
+    if surface == "unsupported":
+        return "Error: this session surface cannot receive a supervision wake."
     try:
         payload = _call_agenthub(
             "supervision/register", context_id=context_id, task_id=task_id)
+        watch_id = payload.get("watch_id")
+        if not isinstance(watch_id, str) or not watch_id:
+            raise RuntimeError("agentHub returned invalid watch_id")
         watches = _watches()
-        watches[payload["watch_id"]] = {
-            "task_id": task_id, "context_id": context_id,
-            "session_key": session_key,
-        }
+        watch = _watch_record(
+            task_id=task_id, context_id=context_id,
+            session_key=session_key, surface=surface)
+        watches[watch_id] = watch
         _save_watches(watches)
+        global _poll_surface
+        _poll_surface = surface
         _ensure_polling()
-        return json.dumps(payload, ensure_ascii=False)
+        return json.dumps({
+            **payload,
+            "delivery": _delivery_label(watch),
+            "durable": _watch_is_durable(watch),
+        }, ensure_ascii=False)
     except Exception as exc:
         return f"Error: supervision registration failed — {exc}"
 
 
 def _status(args: dict | None = None, **_: Any) -> str:
-    public = [{"watch_id": key, "task_id": value.get("task_id"),
-               "context_id": value.get("context_id")}
-              for key, value in sorted(_watches().items())]
+    public = []
+    for key, value in sorted(_watches().items()):
+        if not isinstance(value, dict):
+            continue
+        surface = _watch_surface(value)
+        durable = _watch_is_durable(value)
+        owned_here = durable or value.get("owner_instance_id") == _PROCESS_OWNER_ID
+        public.append({
+            "watch_id": key,
+            "task_id": value.get("task_id"),
+            "context_id": value.get("context_id"),
+            "owner_mode": surface,
+            "delivery": _delivery_label(value),
+            "durable": durable,
+            "owned_by_current_process": owned_here,
+        })
     return json.dumps({"watches": public}, ensure_ascii=False)
 
 
@@ -326,7 +629,8 @@ _TOOLS = {
          "required": ["notification_id"]}),
     "agenthub_supervision_register": (
         _register,
-        "Manually register the current gateway session to supervise a task.",
+        "Register the current Hermes session to supervise a task while its "
+        "delivery surface remains available.",
         {"type": "object", "properties": {
             "task_id": {"type": "string"},
             "context_id": {"type": "string"}},

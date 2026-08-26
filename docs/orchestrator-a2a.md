@@ -103,6 +103,26 @@ allowlist、目标位于 workspace 且有可验证的回滚方案时，Hermes �
 {"agenthub":"v1","action":"tasks/get","task_id":"T-..."}
 ```
 
+`tasks/get` 和原生 interaction 控制包必须沿用创建任务时的同一个
+`contextId`；服务端同时校验已认证 peer、context 对应的 Collaboration 与
+task 所属关系。跨 peer/context 的查询或响应会 fail closed。
+对 wrapped `SendMessage`，`contextId` 在 message 上；对直接 JSON-RPC 方法，
+`params.contextId`（兼容 `context_id`）必填。legacy `message/send` 不属于这条
+Hermes control-plane 路径。
+
+需要单独查看某个原生交互时：
+
+```json
+{"agenthub":"v1","action":"interactions/get","interaction_id":"INT-..."}
+```
+
+`interactions/get` 返回与 `tasks/get.metadata.pending_interactions` 相同的
+有界审计视图。对 `command.read`，视图至少包含 `inspectable`、规范化的
+`command`/`args`、`cwd`、`workspace`、`rollback_plan`、`allowed_responses`、
+`risk`、`policy_route` 和 `awaiting_hermes`/`awaiting_user`。命令参数超过边界、
+含凭据模式或无法结构化识别时，命令细节不会被当作可批准内容，`inspectable`
+为 `false`；不会把原始 adapter payload 透传给 Hermes。
+
 ```json
 {"agenthub":"v1","action":"tasks/approve","task_id":"T-..."}
 ```
@@ -122,6 +142,11 @@ allowlist、目标位于 workspace 且有可验证的回滚方案时，Hermes �
 {"agenthub":"v1","action":"interactions/respond","interaction_id":"INT-...","outcome":"allowed-once","note":"已核对目标、影响与回滚"}
 ```
 
+`tasks/approve` / `tasks/reject` 只处理任务委派前的 delegation gate，不能替代
+原生 interaction 的 `interactions/respond`，也不能为 `awaiting_user` 的 ActionIntent
+提供 Hermes 批准。`allowed-once` 会绑定 task、interaction、native request/session
+和 context revision 的一次性 receipt；重复、晚到或跨 context 的响应稳定失败。
+
 重复、晚到或终态审批稳定失败，不重复委派。A2A Task 的
 `status.message` 是标准 Message 对象，并始终显式包含 `task_id=T-...`。
 这是 Hermes 原生 renderer 不展示结构化 `task.id` 时的稳定续接标识。
@@ -129,8 +154,10 @@ allowlist、目标位于 workspace 且有可验证的回滚方案时，Hermes �
 ### 异步监督与原会话唤醒
 
 qishuo profile-local `agenthub-supervisor` plugin 会在成功的 `tasks/create` 工具
-结果后自动登记 watch，并把 `watch_id` 与发起任务的 gateway session、A2A
-`context_id` 绑定。agentHub 对以下状态写入持久 outbox：委派审批、worker 原生
+结果后自动登记 watch。canonical `agent:` Gateway route 会把 `watch_id` 与
+发起任务的 Gateway session、A2A `context_id` 持久绑定；CLI/TUI route 只在当前
+Hermes 进程内轮询和注入，进程退出后明确不可恢复，不得宣称 durable supervision。
+agentHub 对以下状态写入持久 outbox：委派审批、worker 原生
 交互、blocked、failed/cancelled，以及等待用户验收。Task 状态、告警和 outbox
 在 State Writer 的同一事务提交；写 outbox 失败时不会留下已前进却无人通知的状态。
 

@@ -44,9 +44,104 @@ _NEGATED_ENGLISH_WRITE = re.compile(
     r"deploy|deploying|restart|restarting|install|installing|pull|pulling|"
     r"commit|committing|push|pushing|publish|publishing)\b",
 )
+# A Chinese objective commonly puts the command language after the negation,
+# for example ``不得执行 docker restart/start/stop``.  Keep this parser
+# deliberately bounded: it only removes an allow-listed Docker lifecycle or
+# write term when it is inside a Chinese negated list.  A positive command is
+# therefore left in the effective objective for the risk classifier below.
+_CHINESE_NEGATED_ENGLISH_OPERATIONS = (
+    "docker compose up", "docker compose down",
+    "docker restart", "docker start", "docker stop", "docker rm",
+    "docker kill", "docker run", "docker exec", "docker pause",
+    "docker unpause", "docker build", "docker pull",
+    "compose up", "compose down", "up", "down",
+    "restart", "restarting", "start", "starting", "stop", "stopping",
+    "rm", "kill", "run", "exec", "pause", "unpause",
+    "modify", "modifying", "write", "writing", "create", "creating",
+    "delete", "deleting", "remove", "removing", "deploy", "deploying",
+    "install", "installing", "pull", "pulling", "commit", "committing",
+    "push", "pushing", "publish", "publishing",
+)
+_CHINESE_NEGATED_ENGLISH_OPERATION_PATTERN = re.compile(
+    r"(?:" + "|".join(
+        re.escape(term) for term in sorted(
+            _CHINESE_NEGATED_ENGLISH_OPERATIONS, key=len, reverse=True)
+    ) + r")\b",
+    re.IGNORECASE,
+)
+_CHINESE_NEGATED_ENGLISH_SEPARATOR = re.compile(
+    r"(?:\s*(?:、|，|,|/)\s*(?:或|or|and)?\s*"
+    r"|\s+(?:或|or|and)\s+)",
+    re.IGNORECASE,
+)
+_DOCKER_MUTATING_COMMAND = re.compile(
+    r"\bdocker\s+(?:"
+    r"(?:compose\s+)?(?:restart|start|stop|rm|kill|run|exec|pause|"
+    r"unpause|up|down)\b|"
+    r"(?:container|image|volume|network)\s+rm\b|"
+    r"system\s+prune\b)",
+    re.IGNORECASE,
+)
 _NEGATED_CHINESE_RISK_PHRASES = (
     "是否发生写入", "是否有写入",
 )
+
+
+def _strip_negated_chinese_english_operations(text: str) -> tuple[str, bool]:
+    """Strip bounded English/Docker operations under Chinese negation.
+
+    This handles both repeated command names and compact lists such as
+    ``不得执行 docker restart/start/stop``.  It intentionally reports a
+    partially parsed list as ambiguous so an unknown English term cannot be
+    silently treated as a read-only constraint.
+    """
+    operations = _CHINESE_NEGATED_ENGLISH_OPERATION_PATTERN.pattern
+    prefix = r"(?:不得|禁止|不要|不)\s*(?:(?:执行|运行|调用)\s*)?"
+    # Targets/options after an operation are retained as ordinary objective
+    # text, but bounded so contrastive clauses and list separators terminate
+    # the match.  This supports e.g. ``docker restart 容器/docker stop 服务``.
+    object_fragment = (
+        r"(?:(?!(?:但|但是|必须|需要|需|然而|而且|"
+        r"[、，,/;；。！？\n]|或|和|以及))"
+        r"[A-Za-z0-9_.:/@+\-=\u4e00-\u9fff \t])*?"
+    )
+    pattern = re.compile(
+        prefix + operations + object_fragment +
+        rf"(?:{_CHINESE_NEGATED_ENGLISH_SEPARATOR.pattern}"
+        + operations + object_fragment + r")*",
+        re.IGNORECASE,
+    )
+    matches = list(pattern.finditer(text))
+    effective = pattern.sub("", text)
+    if not matches:
+        return text, False
+
+    # A separator followed by an unrecognised item means that the list was
+    # only partially parsed.  Fail closed with a diagnostic instead of
+    # claiming that the objective requested a high-risk operation.
+    clause_boundary = re.compile(
+        r"(?:不得|禁止|不要|不|但|但是|必须|需要|需|然而|而且|"
+        r"仅|只|检查|读取|查看|报告|也|并|同时|并且|以及)",
+    )
+    ambiguous = False
+    for match in matches:
+        suffix = text[match.end():]
+        following = re.match(
+            r"\s*(?:、|，|,|/|;|；)\s*(.*)", suffix, re.DOTALL)
+        if not following:
+            continue
+        tail = following.group(1)
+        if not tail or clause_boundary.match(tail):
+            continue
+        if _CHINESE_NEGATED_ENGLISH_OPERATION_PATTERN.match(tail):
+            ambiguous = True
+            break
+        # An ASCII/Chinese word immediately after a list separator is most
+        # likely an unrecognised operation; punctuation-only tails are safe.
+        if re.match(r"[A-Za-z\u4e00-\u9fff]", tail):
+            ambiguous = True
+            break
+    return effective, ambiguous
 
 
 def _strip_negated_chinese_operations(
@@ -85,7 +180,8 @@ def _strip_negated_chinese_operations(
         r"[\u4e00-\u9fffA-Za-z0-9_.:\- \t])*?"
     )
     pattern = re.compile(
-        rf"(?:不得|禁止|不要|不)\s*(?:{operations})"
+        rf"(?:不得|禁止|不要|不)\s*(?:(?:执行|运行|调用)\s*)?"
+        rf"(?:{operations})"
         rf"(?:{object_fragment}{separator}(?:{operations}))*"
     )
     matches = list(pattern.finditer(text))
@@ -139,10 +235,16 @@ class ApprovalPolicy:
         """返回风险等级及中文否定列表是否未完整解析。"""
         normalized = objective.casefold()
         effective = _NEGATED_ENGLISH_WRITE.sub("", normalized)
+        effective, english_negation_ambiguous = (
+            _strip_negated_chinese_english_operations(effective))
         effective, negation_ambiguous = _strip_negated_chinese_operations(
             effective, [*self.require_user, *self.never_grant])
+        negation_ambiguous = (
+            english_negation_ambiguous or negation_ambiguous)
         for phrase in _NEGATED_CHINESE_RISK_PHRASES:
             effective = effective.replace(phrase, "")
+        if _DOCKER_MUTATING_COMMAND.search(effective):
+            return "critical", negation_ambiguous
         if any(str(k).casefold() in effective for k in self.never_grant):
             return "critical", negation_ambiguous
         if any(str(k).casefold() in effective for k in self.require_user):
