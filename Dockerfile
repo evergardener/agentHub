@@ -37,6 +37,9 @@ FROM ${REGISTRY}/python:${PYTHON_TAG}@${PYTHON_DIGEST}
 ARG UTIL_LINUX_VERSION=2.41.5-0+deb13u1
 ARG BSDUTILS_VERSION=1:2.41.5-0+deb13u1
 ARG LOGIN_VERSION=1:4.16.0-2+really2.41.5-0+deb13u1
+# Debian OpenSSL security update for CVE-2026-14456.  Pin the three runtime
+# packages together so a repository snapshot cannot leave a mixed ABI set.
+ARG OPENSSL_VERSION=3.5.7-1~deb13u2
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       bsdutils="${BSDUTILS_VERSION}" \
@@ -48,6 +51,9 @@ RUN apt-get update \
       login="${LOGIN_VERSION}" \
       mount="${UTIL_LINUX_VERSION}" \
       util-linux="${UTIL_LINUX_VERSION}" \
+      libssl3t64="${OPENSSL_VERSION}" \
+      openssl="${OPENSSL_VERSION}" \
+      openssl-provider-legacy="${OPENSSL_VERSION}" \
  && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONUNBUFFERED=1 \

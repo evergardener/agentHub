@@ -101,6 +101,13 @@ def test_container_dependencies_are_exactly_locked_and_cached_before_source():
     assert "pip install --no-cache-dir" in dockerfile
 
 
+def test_runtime_security_updates_pin_complete_package_families():
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    assert "ARG OPENSSL_VERSION=3.5.7-1~deb13u2" in dockerfile
+    for package in ("libssl3t64", "openssl", "openssl-provider-legacy"):
+        assert f'{package}="${{OPENSSL_VERSION}}"' in dockerfile
+
+
 def test_release_workflow_pins_actions_and_enforces_attest_scan_sign():
     workflow = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "docker.yml").read_text()
