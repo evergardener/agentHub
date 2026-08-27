@@ -15,7 +15,7 @@ from uuid import uuid4
 
 import yaml
 
-from hermes.policy import ApprovalPolicy
+from hermes.policy import ApprovalPolicy, normalize_access_mode
 from orchestrator.task_manager import TaskManager, require_structured_workspace
 
 DEFAULT_AGENTS = Path(__file__).resolve().parents[2] / "config" / "agents.yaml"
@@ -54,6 +54,9 @@ TOOL_SCHEMAS: list[dict] = [
                                         "description": "现有代码仓库任务必须填写的绝对"
                                                        "工作区路径；不得只写在 objective；"
                                                        "写操作仍需 ActionIntent 审批"},
+                          "access_mode": {"type": "string", "enum": ["read"],
+                                           "description": "明确声明只读初始委派；"
+                                                          "运行时写入仍须 ActionIntent 审批"},
                           "depends_on": {"type": "array",
                                          "items": {"type": "string"}},
                           "expected_operations": {"type": "array",
@@ -87,6 +90,9 @@ TOOL_SCHEMAS: list[dict] = [
             "workspace": {"type": "string",
                           "description": "现有代码仓库任务必须填写的绝对工作区路径；"
                                          "不得只写在 objective，否则原生工具请求无法批准"},
+            "access_mode": {"type": "string", "enum": ["read"],
+                            "description": "明确声明只读初始委派；运行时写入仍须"
+                                           " ActionIntent 审批"},
             "depends_on": {"type": "array", "items": {"type": "string"},
                            "description": "依赖的 task_id 列表"},
         }, "required": ["objective"]}}},
@@ -282,6 +288,7 @@ class HermesTools:
         task_plan_store.validate_steps(steps)
         prepared: list[dict] = []
         for step in steps:
+            access_mode = normalize_access_mode(step.get("access_mode"))
             require_structured_workspace(
                 step["objective"], step.get("workspace"))
             for key, value, maximum in (
@@ -333,6 +340,8 @@ class HermesTools:
                 "responsibilities": profile.get("responsibilities") or [],
                 "timeout_seconds": profile["timeout_seconds"],
                 "runtime_config": runtime_config,
+                **({"access_mode": access_mode}
+                   if access_mode else {}),
             })
 
         resolved: list[dict] = []
@@ -360,6 +369,8 @@ class HermesTools:
                    if step.get("workspace") else {}),
                 **({"runtime_config": step["runtime_config"]}
                    if step.get("runtime_config") else {}),
+                **({"access_mode": step["access_mode"]}
+                   if step.get("access_mode") else {}),
             }
             task_id = self.tm.create_task(
                 step["objective"], project=project,
@@ -396,7 +407,9 @@ class HermesTools:
                                 summary: str | None = None,
                                 agent_id: str | None = None,
                                 model: str | None = None,
-                                reasoning_effort: str | None = None) -> dict:
+                                reasoning_effort: str | None = None,
+                                access_mode: str | None = None) -> dict:
+        access_mode = normalize_access_mode(access_mode)
         require_structured_workspace(objective, workspace)
         for key, value, maximum in (
                 ("title", title, 100), ("summary", summary, 500)):
@@ -435,10 +448,15 @@ class HermesTools:
                                              if runtime_config else {}),
                                           **({"runtime_config": runtime_config}
                                              if runtime_config else {}),
+                                          **({"access_mode": access_mode}
+                                             if access_mode else {}),
                                       } or None,
                                       execution_workspace=workspace)
         return {"task_id": task_id, "status": "created",
-                "risk": self.policy.classify(objective)}
+                "risk": self.policy.classify(
+                    objective, access_mode=access_mode),
+                **({"access_mode": access_mode}
+                   if access_mode else {})}
 
     async def _tool_delegate_task(self, task_id: str, agent_id: str) -> dict:
         row = self._task_or_error(task_id)
@@ -451,7 +469,15 @@ class HermesTools:
         agent = self._agent_or_error(agent_id)
         if "error" in agent:
             return agent
-        decision = self.policy.decide(self.tm.conn, row["objective"])
+        access_mode = None
+        try:
+            context = json.loads(row["plan_context_json"] or "null")
+        except (TypeError, ValueError):
+            context = None
+        if isinstance(context, dict):
+            access_mode = context.get("access_mode")
+        decision = self.policy.decide(
+            self.tm.conn, row["objective"], access_mode=access_mode)
         if decision.action == "ask":
             return {"status": "needs_approval", "task_id": task_id,
                     "risk": decision.risk, "reason": decision.reason,

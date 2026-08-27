@@ -63,13 +63,19 @@ Hermes v0.20.4 的 `a2a_call` 不允许添加自定义 `metadata.agent`，因此
 ### 创建任务
 
 ```json
-{"agenthub":"v1","action":"tasks/create","agent":"dsh","title":"简洁任务标题","summary":"面向用户的简要说明","objective":"完整未总结指令","project":"optional","workspace":"/absolute/project/path"}
+{"agenthub":"v1","action":"tasks/create","agent":"dsh","access_mode":"read","title":"核验容器状态","summary":"只读获取状态并返回简洁报告。","objective":"完整未总结指令","project":"optional","workspace":"/absolute/project/path"}
 ```
+
+只读调查或状态查询应显式传入 `access_mode: "read"`。该字段只声明创建阶段
+的 read dispatch，不授予原生写权限；运行时仍必须由结构化 ActionIntent 严格
+门控，真实写入、删除、重启以及未知/无法结构化审计的命令继续走既有审批流。
+为兼容旧调用方，省略该字段时服务端保留受限的只读语义推断；可能写入的任务
+应省略 `access_mode`。
 
 Codex 任务可选指定 Profile 允许的模型与推理强度：
 
 ```json
-{"agenthub":"v1","action":"tasks/create","agent":"codex","model":"gpt-5.6-luna","reasoning_effort":"max","title":"实现指定变更","summary":"按高推理强度执行并验证。","objective":"完整未总结指令","workspace":"/absolute/project/path"}
+{"agenthub":"v1","action":"tasks/create","agent":"codex","model":"gpt-5.6-luna","reasoning_effort":"max","access_mode":"read","title":"核验项目状态","summary":"按高推理强度执行只读检查。","objective":"完整未总结指令","workspace":"/absolute/project/path"}
 ```
 
 `model` 和 `reasoning_effort` 会进入任务 `runtime_config`、协作消息、审计事件及
@@ -106,6 +112,15 @@ allowlist、目标位于 workspace 且有可验证的回滚方案时，Hermes �
 `tasks/get` 和原生 interaction 控制包必须沿用创建任务时的同一个
 `contextId`；服务端同时校验已认证 peer、context 对应的 Collaboration 与
 task 所属关系。跨 peer/context 的查询或响应会 fail closed。
+
+A2A 1.0 没有独立的待验收 TaskState，因此 `awaiting_acceptance` 在协议线上仍
+复用 `input-required`。调用方必须结合 `metadata.internal_status`、
+`input_required_kind`、`state_detail`、`required_action` 和
+`available_actions` 分流：待验收会返回
+`input_required_kind=acceptance`、`required_action=explicit_user_acceptance`、
+完整 `artifacts`，且只提供 `tasks/accept` / `tasks/request-rework`；它不是委派
+审批或运行时 ActionIntent 审批。只有用户明确验收后，任务才对外成为
+`completed`。
 对 wrapped `SendMessage`，`contextId` 在 message 上；对直接 JSON-RPC 方法，
 `params.contextId`（兼容 `context_id`）必填。legacy `message/send` 不属于这条
 Hermes control-plane 路径。

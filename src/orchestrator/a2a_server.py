@@ -53,7 +53,7 @@ from fastapi.responses import JSONResponse, Response
 
 from common import config as cfg
 from common.models import A2A_STATE_MAP, TaskStatus
-from hermes.policy import ApprovalPolicy
+from hermes.policy import ApprovalPolicy, normalize_access_mode
 from orchestrator import state_store
 from orchestrator.task_manager import (
     TaskManager,
@@ -182,34 +182,103 @@ def _infer_input_required_kind(conn, row, *, pending: dict | None) -> str:
     return "input-required"
 
 
+def _input_required_actions(
+        input_required_kind: str | None,
+        pending_interactions: list[dict]) -> tuple[str, str, list[str]]:
+    """Describe the next gate without overloading A2A's state enum.
+
+    A2A 1.0 has no ``awaiting-acceptance`` TaskState.  Keep the wire state at
+    ``input-required`` for protocol compatibility, but expose a stable,
+    machine-readable detail and the exact actions that can advance that gate.
+    In particular, an acceptance gate must never advertise the approval
+    action used by the pre-dispatch delegation gate.
+    """
+    if input_required_kind == "delegation":
+        return (
+            "awaiting_delegation_approval",
+            "hermes_approval",
+            ["tasks/approve", "tasks/reject"],
+        )
+    if input_required_kind in {"acceptance", "review"}:
+        return (
+            "awaiting_acceptance",
+            "explicit_user_acceptance",
+            ["tasks/accept", "tasks/request-rework"],
+        )
+    if input_required_kind == "blocked":
+        hermes_interaction = any(
+            item.get("inspectable") is True
+            and item.get("action_intent_status") == "awaiting_hermes"
+            for item in pending_interactions
+        )
+        if hermes_interaction:
+            return (
+                "awaiting_hermes_interaction",
+                "interaction_response",
+                ["interactions/respond"],
+            )
+        return (
+            "awaiting_user_interaction",
+            "user_interaction",
+            [],
+        )
+    return (input_required_kind or "input-required", "input", [])
+
+
 def _to_a2a(conn, row, *, context_id: str | None = None) -> dict:
     """内部任务行 → A2A Task；created/queued + 待批准 → input-required。"""
     task_id = row["id"]
     pending = _approval_pending(conn, task_id)
     input_required_kind = None
     pending_interactions: list[dict] = []
+    detail = row["error_message"] or row["result_summary"] or ""
     if pending:
         state = "input-required"
         message = (f"task_id={task_id}; 写操作需批准"
                    f"（risk={pending.get('risk')}）："
-                   f"{pending.get('reason')}。拟委派 {pending.get('agent_id')}。"
-                   "以 tasks/approve 放行或 tasks/reject 取消。")
+                   f"{pending.get('reason')}。拟委派 {pending.get('agent_id')}。")
         input_required_kind = "delegation"
     else:
         state = A2A_STATE_MAP[TaskStatus(row["status"])]
-        detail = row["error_message"] or row["result_summary"] or ""
         message = f"task_id={task_id}; status={state}"
-        if detail:
-            message += f"; {detail}"
         if state == "input-required":
             input_required_kind = _infer_input_required_kind(
                 conn, row, pending=None)
+    if state == "input-required":
+        if input_required_kind == "blocked":
+            from orchestrator import collaboration_store
+
+            pending_interactions = collaboration_store.pending_interaction_views(
+                conn, task_id)
+        state_detail, required_action, available_actions = (
+            _input_required_actions(input_required_kind, pending_interactions))
+        message += (
+            f"; input_required_kind={input_required_kind}"
+            f"; internal_status={row['status']}"
+            f"; state_detail={state_detail}"
+            f"; required_action={required_action}"
+            f"; available_actions={','.join(available_actions) or 'none'}")
+        if input_required_kind == "acceptance":
+            message += "；等待用户验收，不是委派审批或运行时审批"
+        elif input_required_kind == "delegation":
+            message += "；等待 Hermes 处理委派审批"
+        elif input_required_kind == "blocked":
+            message += "；等待原生交互处理"
+    else:
+        state_detail, required_action, available_actions = (
+            state, "none", [])
+    if detail:
+        message += f"; {detail}"
     artifacts = [
-        {"name": a["name"], "type": a["type"], "path": a["path"]}
+        {"name": a["name"], "type": a["type"], "path": a["path"],
+         **({"sha256": a["sha256"]} if a["sha256"] else {})}
         for a in state_store.list_artifacts(conn, task_id)
     ]
     metadata = {"assigned_to": row["assigned_to"],
-                "internal_status": row["status"]}
+                "internal_status": row["status"],
+                "state_detail": state_detail,
+                "required_action": required_action,
+                "available_actions": available_actions}
     try:
         plan_context = json.loads(row["plan_context_json"] or "null")
     except (TypeError, ValueError):
@@ -222,13 +291,10 @@ def _to_a2a(conn, row, *, context_id: str | None = None) -> dict:
                 ("runtime_config", "runtime_config")):
             if plan_context.get(source_key):
                 metadata[target_key] = plan_context[source_key]
+        if plan_context.get("access_mode"):
+            metadata["access_mode"] = plan_context["access_mode"]
     if state == "input-required" and input_required_kind is not None:
         metadata["input_required_kind"] = input_required_kind
-        if input_required_kind == "blocked":
-            from orchestrator import collaboration_store
-
-            pending_interactions = collaboration_store.pending_interaction_views(
-                conn, task_id)
         # Keep the field stable for every input-required task.  Delegation and
         # acceptance gates have no native interaction records, but callers can
         # safely consume one shape without guessing which gate is active.
@@ -662,6 +728,7 @@ def create_app(tm: TaskManager | None = None,
                 "summary": command.get("summary"),
                 "model": command.get("model"),
                 "reasoning_effort": command.get("reasoning_effort"),
+                "access_mode": command.get("access_mode"),
             }
         else:
             claimed = (metadata.get("agent") or "").strip()
@@ -673,6 +740,10 @@ def create_app(tm: TaskManager | None = None,
         agent, err = _resolve_agent(tm.conn, agent_id)
         if err:
             return _error(rpc_id, -32602, err)
+        try:
+            access_mode = normalize_access_mode(metadata.get("access_mode"))
+        except (TypeError, ValueError) as exc:
+            return _error(rpc_id, -32602, str(exc))
         from orchestrator.runtime_config import (
             normalize_runtime_config,
             resolve_runtime_config,
@@ -739,6 +810,8 @@ def create_app(tm: TaskManager | None = None,
                    if objective_summary else {}),
                 **({"runtime_config": runtime_config}
                    if runtime_config else {}),
+                **({"access_mode": access_mode}
+                   if access_mode else {}),
             } or None,
             execution_workspace=execution_workspace,
         )
@@ -767,6 +840,8 @@ def create_app(tm: TaskManager | None = None,
                        if objective_summary else {}),
                     **({"runtime_config": runtime_config}
                        if runtime_config else {}),
+                    **({"access_mode": access_mode}
+                       if access_mode else {}),
                 },
                 based_on_revision=1,
                 idempotency_key=f"a2a-task-request:{tid}",
@@ -787,7 +862,13 @@ def create_app(tm: TaskManager | None = None,
                 tid,
                 {"agent_id": agent_id, "runtime_config": runtime_config},
             )
-        decision = policy.decide(tm.conn, text)
+        if access_mode:
+            _record(
+                "task.access_mode.selected",
+                tid,
+                {"agent_id": agent_id, "access_mode": access_mode},
+            )
+        decision = policy.decide(tm.conn, text, access_mode=access_mode)
         if decision.action == "ask":
             _record("task.approval_requested", tid,
                     {"agent_id": agent_id, "endpoint": agent["endpoint"],

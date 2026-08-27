@@ -1,7 +1,7 @@
 ---
 name: agenthub-orchestration
 description: Use when Hermes delegates production or test work to Codex, DSH, Kimi, Pi, or other workers through agentHub, including task creation, workspace selection, asynchronous supervision, approvals, acceptance, and cleanup.
-version: 1.6.0
+version: 1.7.0
 author: evergarden, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -44,6 +44,20 @@ online:
 
 ```json
 {"agenthub":"v1","action":"tasks/create","agent":"codex","title":"concise outcome","summary":"short user-facing explanation","objective":"full unsummarized instruction","project":"optional project","workspace":"/absolute/project/path"}
+```
+
+For a read-only investigation or status query, set the structured
+`access_mode` to `read`. This is the creation-time dispatch intent and avoids
+depending on keyword order in the natural-language objective. Keep the full
+objective and its explicit constraints: `access_mode=read` never authorizes a
+write. Native commands and filesystem changes remain subject to structured
+ActionIntent checks at runtime, and writes, deletes, restarts, or
+unknown/unparseable commands still require their existing approval path. Omit
+`access_mode` for tasks that may write; agentHub retains bounded compatibility
+inference for older callers.
+
+```json
+{"agenthub":"v1","action":"tasks/create","agent":"codex","access_mode":"read","title":"inspect container state","summary":"read-only status report","objective":"full read-only instruction and constraints","workspace":"/absolute/project/path"}
 ```
 
 When the user explicitly requests a Codex model or reasoning strength, first
@@ -185,8 +199,29 @@ enable and re-discover that Agent, or choose a currently enabled Agent.
 
 ## Approval and completion
 
-- `input-required` means no worker execution has begun. Explain the operation,
-  target, risk, and rollback, then ask one clear approval question.
+- A2A 1.0 has no separate `awaiting-acceptance` TaskState, so agentHub may use
+  the wire state `input-required` for more than one lifecycle gate. Always
+  inspect `metadata.internal_status`, `metadata.input_required_kind`,
+  `metadata.state_detail`, `metadata.required_action`, and
+  `metadata.available_actions` before choosing an action. The visible
+  `status.message` repeats these fields for renderers that hide metadata.
+  In particular:
+  - `input_required_kind=delegation` / `state_detail=awaiting_delegation_approval`
+    means no worker execution has begun. Explain the operation, target, risk,
+    and rollback, then ask one clear approval question; only
+    `tasks/approve`/`tasks/reject` apply.
+  - `input_required_kind=acceptance` / `internal_status=awaiting_acceptance`
+    (`state_detail=awaiting_acceptance`,
+    `required_action=explicit_user_acceptance`)
+    means the worker has returned a result and the task is waiting for an
+    explicit user acceptance decision, not delegation approval or a runtime
+    interaction. Inspect `artifacts` and the audit record, report the result,
+    and wait for the user; only `tasks/accept` or `tasks/request-rework` apply.
+    Never call `tasks/approve` for this state and never self-accept.
+  - `input_required_kind=blocked` means a worker is paused at a runtime
+    interaction. Use `metadata.pending_interactions` and its ActionIntent
+    fields to determine whether Hermes may respond or the WebUI user must
+    decide.
 - Native edit and command requests must remain visible in agentHub WebUI and its
   interaction audit record. Never bypass the native approval flow or downgrade
   security, scan, test, or release gates to make a task pass.

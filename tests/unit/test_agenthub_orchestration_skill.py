@@ -31,3 +31,12 @@ def test_skill_keeps_task_approval_separate_from_native_interactions():
     assert "Do not use `tasks/approve` or `tasks/reject` for a native" in text
     assert "`input_required_kind=delegation`" in text
     assert "exactly one" in text and "`interactions/respond`" in text
+
+
+def test_skill_requires_explicit_read_capability_for_read_dispatch():
+    text = SKILL.read_text(encoding="utf-8")
+
+    assert '"access_mode":"read"' in text
+    assert "creation-time dispatch intent" in text
+    assert "never authorizes" in text and "write" in text
+    assert "unknown/unparseable commands" in text

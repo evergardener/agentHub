@@ -25,8 +25,11 @@ def test_hermes_requires_structured_workspace_for_repository_work():
     assert "不得只写在 objective" in workspace["description"]
     assert {"title", "summary"}.issubset(
         schema["parameters"]["properties"])
+    assert schema["parameters"]["properties"]["access_mode"]["enum"] == [
+        "read"]
     assert "代码仓库" in SYSTEM_PROMPT
     assert "workspace" in SYSTEM_PROMPT
+    assert 'access_mode="read"' in SYSTEM_PROMPT
     interaction_schema = next(
         item["function"] for item in TOOL_SCHEMAS
         if item["function"]["name"] == "respond_agent_interaction"

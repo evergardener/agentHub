@@ -38,7 +38,7 @@ def test_english_read_only_objective_is_auto_approved(policy, conn):
 
 
 def test_chinese_read_only_command_plan_with_negated_writes_is_auto_approved(
-    policy, conn,
+        policy, conn,
 ):
     objective = (
         "只读检查任务工作区：执行 pwd；执行 git status --short；"
@@ -47,6 +47,66 @@ def test_chinese_read_only_command_plan_with_negated_writes_is_auto_approved(
     )
     d = policy.decide(conn, objective)
     assert d.action == "auto" and d.risk == "read"
+
+
+def test_chinese_docker_status_report_does_not_treat_status_labels_as_writes(
+        policy, conn,
+):
+    objective = (
+        "只读获取当前 Docker 容器状态。核验 Docker 引擎可用性，列出容器名称、"
+        "镜像、运行状态和健康状态，并标注停止、重启或不健康容器。"
+        "不得修改配置、数据、容器或服务状态。输出简洁中文报告。"
+    )
+    d = policy.decide(conn, objective)
+    assert d.action == "auto" and d.risk == "read"
+
+
+def test_read_capability_is_explicit_but_does_not_bypass_write_intent(
+        policy, conn,
+):
+    d = policy.decide(
+        conn, "只读检查后重启容器", access_mode="read")
+    assert d.action == "ask" and d.risk == "write"
+
+
+def test_read_capability_dispatches_safe_objective_without_keyword_match(
+        policy, conn,
+):
+    assert policy.classify("核验 TLS 证书有效期") == "unknown"
+
+    d = policy.decide(
+        conn, "核验 TLS 证书有效期", access_mode="read")
+
+    assert d.action == "auto" and d.risk == "read"
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["git checkout -- app.py", "touch marker", "mkdir reports", "sed -i old new"],
+)
+def test_read_capability_allows_known_commands_only_when_chinese_negated(
+        policy, conn, command):
+    d = policy.decide(
+        conn, f"核验证书有效期；不得执行 {command}", access_mode="read")
+    assert d.action == "auto" and d.risk == "read"
+
+
+@pytest.mark.parametrize(
+    ("objective", "risk"),
+    [("只读检查，但执行 rm -rf /tmp/cache", "critical"),
+     ("只读检查，但执行 docker build .", "write"),
+     ("只读检查，但执行 git commit -am fix", "write")],
+)
+def test_read_capability_does_not_bypass_known_mutating_commands(
+        policy, conn, objective, risk):
+    d = policy.decide(conn, objective, access_mode="read")
+    assert d.action == "ask" and d.risk == risk
+
+
+@pytest.mark.parametrize("access_mode", ["write", "readonly", ""])
+def test_unknown_access_mode_fails_closed(policy, conn, access_mode):
+    with pytest.raises(ValueError, match="access_mode"):
+        policy.decide(conn, "查询容器状态", access_mode=access_mode)
 
 
 @pytest.mark.parametrize(

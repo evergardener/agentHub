@@ -54,6 +54,8 @@ _CHINESE_NEGATED_ENGLISH_OPERATIONS = (
     "docker restart", "docker start", "docker stop", "docker rm",
     "docker kill", "docker run", "docker exec", "docker pause",
     "docker unpause", "docker build", "docker pull",
+    "git reset", "git checkout", "git commit", "git push",
+    "sed -i", "touch", "mkdir", "mv", "cp", "tee", "chmod", "chown",
     "compose up", "compose down", "up", "down",
     "restart", "restarting", "start", "starting", "stop", "stopping",
     "rm", "kill", "run", "exec", "pause", "unpause",
@@ -82,9 +84,66 @@ _DOCKER_MUTATING_COMMAND = re.compile(
     r"system\s+prune\b)",
     re.IGNORECASE,
 )
+_MUTATING_DELETE_COMMAND = re.compile(
+    r"(?<![\w-])(?:rm|rmdir|unlink|git\s+(?:reset|checkout)|"
+    r"docker\s+(?:container\s+)?(?:rm|kill)|docker\s+system\s+prune)\b",
+    re.IGNORECASE,
+)
+_MUTATING_WRITE_COMMAND = re.compile(
+    r"(?<![\w-])(?:touch|mkdir|mv|cp|tee|chmod|chown|"
+    r"sed\s+-i|git\s+(?:commit|push)|docker\s+(?:build|pull|run))\b",
+    re.IGNORECASE,
+)
 _NEGATED_CHINESE_RISK_PHRASES = (
     "是否发生写入", "是否有写入",
 )
+
+_ACCESS_MODES = frozenset({"read"})
+
+
+def normalize_access_mode(value: str | None) -> str | None:
+    """Validate the optional creation-time capability declaration.
+
+    ``read`` is an intent hint for the initial dispatch only.  It never
+    grants runtime authority: native ActionIntent policy still decides every
+    command or filesystem operation.  Unknown modes are rejected rather than
+    interpreted permissively.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("access_mode must be 'read' when provided")
+    mode = value.strip().casefold()
+    if mode not in _ACCESS_MODES:
+        raise ValueError(
+            "unsupported access_mode; only 'read' is supported")
+    return mode
+
+
+# Lifecycle words can describe the state being reported rather than an
+# operation requested from the worker.  For example, ``标注停止、重启或不健康
+# 容器`` is a read-only Docker inventory, not a request to stop or restart a
+# container.  Keep this contextual exception narrow: it only removes a
+# bounded, enumerated status list following a reporting verb and only when the
+# list ends at a known resource noun.  A command such as ``检查后重启容器``
+# therefore remains a write/critical request.
+_READONLY_STATUS_CONTEXT = re.compile(
+    r"(?P<verb>标注|标记|区分|分类|筛选|过滤|统计|汇总|显示|列出|报告|识别|"
+    r"检测|发现|记录|指出|说明)\s*"
+    r"(?:已|当前|正在)?"
+    r"(?:停止|重启|启动|暂停|运行|退出|不健康|健康|异常)"
+    r"(?:\s*(?:、|，|,|/|或|和|以及)\s*"
+    r"(?:已|当前|正在)?"
+    r"(?:停止|重启|启动|暂停|运行|退出|不健康|健康|异常))*"
+    r"\s*(?:容器|服务|实例|进程|节点|主机|状态)",
+    re.IGNORECASE,
+)
+
+
+def _strip_readonly_status_descriptors(text: str) -> str:
+    """Remove lifecycle terms used solely as read-only report labels."""
+    return _READONLY_STATUS_CONTEXT.sub(
+        lambda match: match.group("verb"), text)
 
 
 def _strip_negated_chinese_english_operations(text: str) -> tuple[str, bool]:
@@ -236,8 +295,10 @@ class ApprovalPolicy:
         self.require_user = cfg.get("require_user") or FALLBACK["require_user"]
         self.never_grant = cfg.get("never_grant") or FALLBACK["never_grant"]
 
-    def _classify(self, objective: str) -> tuple[str, bool]:
+    def _classify(self, objective: str,
+                  access_mode: str | None = None) -> tuple[str, bool]:
         """返回风险等级及中文否定列表是否未完整解析。"""
+        access_mode = normalize_access_mode(access_mode)
         normalized = objective.casefold()
         effective = _NEGATED_ENGLISH_WRITE.sub("", normalized)
         effective, english_negation_ambiguous = (
@@ -248,29 +309,47 @@ class ApprovalPolicy:
             english_negation_ambiguous or negation_ambiguous)
         for phrase in _NEGATED_CHINESE_RISK_PHRASES:
             effective = effective.replace(phrase, "")
+        effective = _strip_readonly_status_descriptors(effective)
         if _DOCKER_MUTATING_COMMAND.search(effective):
             return "critical", negation_ambiguous
+        if _MUTATING_DELETE_COMMAND.search(effective):
+            return "critical", negation_ambiguous
+        if _MUTATING_WRITE_COMMAND.search(effective):
+            return "write", negation_ambiguous
         if any(str(k).casefold() in effective for k in self.never_grant):
             return "critical", negation_ambiguous
         if any(str(k).casefold() in effective for k in self.require_user):
             return "write", negation_ambiguous
         if any(str(k).casefold() in effective for k in self.auto_approve):
             return "read", negation_ambiguous
+        # An explicit read capability is authoritative for creation-time
+        # dispatch only when no known mutating intent was found above.  The
+        # worker's concrete native commands and filesystem operations still
+        # pass through ActionIntent policy independently at runtime.
+        if access_mode == "read":
+            return "read", negation_ambiguous
         return "unknown", negation_ambiguous
 
-    def classify(self, objective: str) -> str:
+    def classify(self, objective: str, *, access_mode: str | None = None) -> str:
         """按关键词粗分风险等级；未知操作 fail-closed。"""
-        risk, negation_ambiguous = self._classify(objective)
+        risk, negation_ambiguous = self._classify(
+            objective, access_mode=access_mode)
         if negation_ambiguous:
             return "unknown"
         return risk
 
-    def decide(self, conn: sqlite3.Connection, objective: str) -> Decision:
-        risk, negation_ambiguous = self._classify(objective)
+    def decide(self, conn: sqlite3.Connection, objective: str, *,
+               access_mode: str | None = None) -> Decision:
+        access_mode = normalize_access_mode(access_mode)
+        risk, negation_ambiguous = self._classify(
+            objective, access_mode=access_mode)
         if negation_ambiguous:
             return Decision("ask", "unknown", "只读声明无法解析，按 fail-closed 原则等待用户批准")
         if risk == "read":
-            return Decision("auto", risk, "只读/查询类，自动批准")
+            reason = "只读/查询类，自动批准"
+            if access_mode == "read":
+                reason = "显式 read capability 且未发现写入意图，自动批准初始委派"
+            return Decision("auto", risk, reason)
         grant = self._match_grant(conn, objective)
         if grant and risk != "critical":
             return Decision("granted", risk,
@@ -280,6 +359,11 @@ class ApprovalPolicy:
             return Decision("ask", risk,
                             "高危操作（never_grant），必须用户逐次批准")
         if risk == "unknown":
+            if access_mode == "read":
+                return Decision(
+                    "ask", risk,
+                    "显式 read capability 但目标含未知操作，按 fail-closed 原则等待用户批准",
+                )
             return Decision("ask", risk,
                             "未识别操作，按 fail-closed 原则等待用户批准")
         return Decision("ask", risk, "写操作，等待用户批准")

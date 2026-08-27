@@ -186,6 +186,119 @@ def test_tasks_create_persists_explicit_execution_workspace(env, tmp_path):
     assert delegated == [(task["id"], "codex")]
 
 
+def test_tasks_create_readonly_docker_status_dispatches_without_approval(
+        env, tmp_path):
+    tm, client, delegated = env
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    objective = (
+        "只读获取当前 Docker 容器状态。核验 Docker 引擎可用性，列出容器名称、"
+        "镜像、运行状态和健康状态，并标注停止、重启或不健康容器。"
+        "不得修改配置、数据、容器或服务状态。输出简洁中文报告。"
+    )
+    response = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="codex", objective=objective,
+            access_mode="read", workspace=str(execution_workspace)),
+        headers=_bearer()).json()
+
+    task = response["result"]["task"]
+    assert task["status"]["state"] == "submitted"
+    assert task["metadata"]["internal_status"] == "assigned"
+    assert task["metadata"]["access_mode"] == "read"
+    assert delegated == [(task["id"], "codex")]
+    approval = tm.conn.execute(
+        "SELECT 1 FROM events WHERE task_id = ?"
+        " AND event_type = 'task.approval_requested';", (task["id"],)
+    ).fetchone()
+    assert approval is None
+    selected = tm.conn.execute(
+        "SELECT payload_json FROM events WHERE task_id = ?"
+        " AND event_type = 'task.access_mode.selected';", (task["id"],)
+    ).fetchone()
+    assert json.loads(selected["payload_json"])["access_mode"] == "read"
+
+
+def test_tasks_create_explicit_read_dispatches_without_keyword_inference(
+        env, tmp_path):
+    tm, client, delegated = env
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    response = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="codex",
+            objective="核验 TLS 证书有效期并返回结果",
+            access_mode="read", workspace=str(execution_workspace)),
+        headers=_bearer()).json()
+
+    task = response["result"]["task"]
+    assert task["status"]["state"] == "submitted"
+    assert task["metadata"]["internal_status"] == "assigned"
+    assert task["metadata"]["access_mode"] == "read"
+    assert delegated == [(task["id"], "codex")]
+
+
+def test_tasks_create_readonly_docker_status_legacy_inference(
+        env, tmp_path):
+    tm, client, delegated = env
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    objective = (
+        "只读获取当前 Docker 容器状态。核验 Docker 引擎可用性，列出容器名称、"
+        "镜像、运行状态和健康状态，并标注停止、重启或不健康容器。"
+        "不得修改配置、数据、容器或服务状态。输出简洁中文报告。"
+    )
+    response = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="codex", objective=objective,
+            workspace=str(execution_workspace)),
+        headers=_bearer()).json()
+
+    task = response["result"]["task"]
+    assert task["status"]["state"] == "submitted"
+    assert task["metadata"].get("access_mode") is None
+    assert delegated == [(task["id"], "codex")]
+
+
+def test_tasks_create_readonly_capability_does_not_bypass_restart(
+        env, tmp_path):
+    tm, client, delegated = env
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    response = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="codex",
+            objective="只读检查后重启容器", access_mode="read",
+            workspace=str(execution_workspace)),
+        headers=_bearer()).json()
+
+    task = response["result"]["task"]
+    assert task["status"]["state"] == "input-required"
+    assert task["metadata"]["internal_status"] == "queued"
+    assert delegated == []
+    approval = tm.conn.execute(
+        "SELECT payload_json FROM events WHERE task_id = ?"
+        " AND event_type = 'task.approval_requested';", (task["id"],)
+    ).fetchone()
+    assert json.loads(approval["payload_json"])["risk"] == "write"
+
+
+def test_tasks_create_rejects_unknown_access_mode(env, tmp_path):
+    tm, client, delegated = env
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    response = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="codex", objective="查询容器状态",
+            access_mode="write", workspace=str(execution_workspace)),
+        headers=_bearer()).json()
+
+    assert response["error"]["code"] == -32602
+    assert "access_mode" in response["error"]["message"]
+    assert delegated == []
+    assert tm.conn.execute("SELECT COUNT(*) FROM tasks;").fetchone()[0] == 0
+
+
 def test_tasks_create_rejects_relative_execution_workspace(env):
     tm, client, delegated = env
     response = client.post(
@@ -419,6 +532,12 @@ def test_tasks_get_exposes_safe_pending_native_interaction(env):
     task = client.post(
         "/a2a", json=_control("tasks/get", task_id=task_id),
         headers=_bearer()).json()["result"]["task"]
+    assert task["metadata"]["input_required_kind"] == "blocked"
+    assert task["metadata"]["state_detail"] == \
+        "awaiting_hermes_interaction"
+    assert task["metadata"]["required_action"] == "interaction_response"
+    assert task["metadata"]["available_actions"] == [
+        "interactions/respond"]
     pending = task["metadata"]["pending_interactions"]
     assert pending == [{
         "interaction_id": interaction["id"],
@@ -676,6 +795,12 @@ def test_approval_and_get_work_through_same_peer(env):
     assert created["status"]["state"] == "input-required"
     text = created["status"]["message"]["parts"][0]["text"]
     assert f"task_id={created['id']}" in text
+    assert created["metadata"]["input_required_kind"] == "delegation"
+    assert created["metadata"]["state_detail"] == \
+        "awaiting_delegation_approval"
+    assert created["metadata"]["required_action"] == "hermes_approval"
+    assert created["metadata"]["available_actions"] == [
+        "tasks/approve", "tasks/reject"]
     assert not delegated
 
     approved = client.post(
@@ -703,12 +828,30 @@ def test_acceptance_is_distinct_input_required_and_explicit_user_action(env):
         state_store.TaskStatus.AWAITING_ACCEPTANCE,
     ):
         state_store.transition_task(tm.conn, task_id, status)
+    state_store.add_artifact(
+        tm.conn, task_id=task_id, agent_id="codex",
+        name="last-message.md", path="/workspace/last-message.md",
+        sha256="a" * 64)
 
     pending = client.post(
         "/a2a", json=_control("tasks/get", task_id=task_id),
         headers=_bearer()).json()["result"]["task"]
     assert pending["status"]["state"] == "input-required"
     assert pending["metadata"]["input_required_kind"] == "acceptance"
+    assert pending["metadata"]["internal_status"] == "awaiting_acceptance"
+    assert pending["metadata"]["state_detail"] == "awaiting_acceptance"
+    assert pending["metadata"]["required_action"] == \
+        "explicit_user_acceptance"
+    assert pending["metadata"]["available_actions"] == [
+        "tasks/accept", "tasks/request-rework"]
+    assert pending["artifacts"] == [{
+        "name": "last-message.md", "type": "file",
+        "path": "/workspace/last-message.md", "sha256": "a" * 64,
+    }]
+    status_message = pending["status"]["message"]["parts"][0]["text"]
+    assert "等待用户验收，不是委派审批或运行时审批" in status_message
+    assert "available_actions=tasks/accept,tasks/request-rework" in \
+        status_message
 
     accepted = client.post(
         "/a2a", json=_control("tasks/accept", task_id=task_id),
