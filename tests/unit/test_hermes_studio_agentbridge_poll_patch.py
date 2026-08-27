@@ -29,8 +29,12 @@ def _fake_package(tmp_path: Path, module) -> tuple[Path, bytes]:
         b"prefix;" + module.ORIGINAL_TIMER + b";middle;" +
         module.ORIGINAL_GATE + b";schedule;" +
         module.ORIGINAL_SCHEDULE + b";propagation;" +
-        module.ORIGINAL_PROPAGATION + b";guard;" +
-        module.ORIGINAL_CONTEXT_GUARD + b"suffix\n"
+        module.ORIGINAL_PROPAGATION + b";handle-signature;" +
+        module.ORIGINAL_HANDLE_RUN_SIGNATURE + b";bridge-signature;" +
+        module.ORIGINAL_BRIDGE_RUN_SIGNATURE + b";bridge-call;" +
+        module.ORIGINAL_BRIDGE_RUN_CALL + b";guard;" +
+        module.ORIGINAL_CONTEXT_GUARD + b";failure;" +
+        module.ORIGINAL_CONTEXT_FAILURE + b"suffix\n"
     )
     runtime.write_bytes(original)
     (root / "package.json").write_text(
@@ -55,12 +59,20 @@ def test_patch_makes_idle_bridge_poll_and_is_idempotent(tmp_path):
     assert module.PATCHED_GATE in runtime
     assert module.PATCHED_SCHEDULE in runtime
     assert module.PATCHED_PROPAGATION in runtime
+    assert module.PATCHED_HANDLE_RUN_SIGNATURE in runtime
+    assert module.PATCHED_BRIDGE_RUN_SIGNATURE in runtime
+    assert module.PATCHED_BRIDGE_RUN_CALL in runtime
     assert module.PATCHED_CONTEXT_GUARD in runtime
+    assert module.PATCHED_CONTEXT_FAILURE in runtime
     assert module.ORIGINAL_TIMER not in runtime
     assert module.ORIGINAL_GATE not in runtime
     assert module.ORIGINAL_SCHEDULE not in runtime
     assert module.ORIGINAL_PROPAGATION not in runtime
+    assert module.ORIGINAL_HANDLE_RUN_SIGNATURE not in runtime
+    assert module.ORIGINAL_BRIDGE_RUN_SIGNATURE not in runtime
+    assert module.ORIGINAL_BRIDGE_RUN_CALL not in runtime
     assert module.ORIGINAL_CONTEXT_GUARD not in runtime
+    assert module.ORIGINAL_CONTEXT_FAILURE not in runtime
     assert Path(applied["backup_path"]).read_bytes() == original
 
     again = module.apply_package_patch(
@@ -106,7 +118,7 @@ def test_patch_upgrades_the_pinned_poll_only_runtime(tmp_path, monkeypatch):
     assert module.inspect_package(root)["state"] == "patched"
 
 
-def test_claimed_recovery_marker_is_internal_only(tmp_path):
+def test_claimed_recovery_marker_is_passed_out_of_band(tmp_path):
     module = _load_patch_module()
     root, original = _fake_package(tmp_path, module)
     expected = hashlib.sha256(original).hexdigest()
@@ -117,9 +129,23 @@ def test_claimed_recovery_marker_is_internal_only(tmp_path):
     runtime = (root / "dist" / "server" / "index.js").read_bytes()
 
     assert b"trustedBackgroundRecovery:!0" in runtime
-    assert b"trusted_background_recovery:" \
-        b"a.trustedBackgroundRecovery===!0" in runtime
-    assert b"I.trusted_background_recovery!==!0" in runtime
+    assert b"trusted_background_recovery" not in runtime
+    assert b"a.trustedBackgroundRecovery===!0" in runtime
+    assert b",c,o,u=!1){" in runtime
+    assert b"I.background_delegation_id&&!N&&!u" in runtime
+
+
+def test_missing_untrusted_context_releases_instead_of_completes(tmp_path):
+    module = _load_patch_module()
+    root, original = _fake_package(tmp_path, module)
+
+    module.apply_package_patch(
+        root, backup_root=tmp_path / "backups",
+        expected_original_sha256=hashlib.sha256(original).hexdigest())
+    runtime = (root / "dist" / "server" / "index.js").read_bytes()
+
+    assert module.PATCHED_CONTEXT_FAILURE in runtime
+    assert module.ORIGINAL_CONTEXT_FAILURE not in runtime
 
 
 def test_patch_fails_closed_on_unknown_runtime(tmp_path):

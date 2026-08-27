@@ -64,13 +64,41 @@ ORIGINAL_PROPAGATION = (
     b"background_claim_id:a.backgroundClaimId,autonomous:a.autonomous},c,s,n)"
 )
 PATCHED_PROPAGATION = (
-    b"background_claim_id:a.backgroundClaimId,autonomous:a.autonomous,"
-    b"trusted_background_recovery:a.trustedBackgroundRecovery===!0},c,s,n)"
+    b"background_claim_id:a.backgroundClaimId,autonomous:a.autonomous},"
+    b"c,s,n,a.trustedBackgroundRecovery===!0)"
+)
+ORIGINAL_HANDLE_RUN_SIGNATURE = b"async handleRun(e,I,a,r=!1,l){"
+PATCHED_HANDLE_RUN_SIGNATURE = (
+    b"async handleRun(e,I,a,r=!1,l,trustedRecovery=!1){"
+)
+ORIGINAL_BRIDGE_RUN_SIGNATURE = (
+    b"async function sje(t,e,I,a,r,l,s=!1,n,c,o){"
+)
+PATCHED_BRIDGE_RUN_SIGNATURE = (
+    b"async function sje(t,e,I,a,r,l,s=!1,n,c,o,u=!1){"
+)
+ORIGINAL_BRIDGE_RUN_CALL = (
+    b"this.dequeueNextQueuedRun.bind(this),l);return}"
+)
+PATCHED_BRIDGE_RUN_CALL = (
+    b"this.dequeueNextQueuedRun.bind(this),l,trustedRecovery);return}"
 )
 ORIGINAL_CONTEXT_GUARD = b",I.background_delegation_id&&!N){"
 PATCHED_CONTEXT_GUARD = (
     b",I.background_delegation_id&&!N&&"
-    b"I.trusted_background_recovery!==!0){"
+    b"!u){"
+)
+ORIGINAL_CONTEXT_FAILURE = (
+    b"await l.completeBackgroundNotification(i,a,I.background_delegation_id,"
+    b"I.background_claim_id)}catch(We){Jt.warn(We,"
+    b'"[chat-run-socket] failed to acknowledge background callback with '
+    b'missing context")}'
+)
+PATCHED_CONTEXT_FAILURE = (
+    b"await l.releaseBackgroundNotification(i,a,I.background_delegation_id,"
+    b"I.background_claim_id)}catch(We){Jt.warn(We,"
+    b'"[chat-run-socket] failed to release background callback with missing '
+    b'context")}'
 )
 
 
@@ -105,24 +133,32 @@ def _runtime_state(data: bytes) -> str:
     original_recovery = (
         data.count(ORIGINAL_SCHEDULE),
         data.count(ORIGINAL_PROPAGATION),
+        data.count(ORIGINAL_HANDLE_RUN_SIGNATURE),
+        data.count(ORIGINAL_BRIDGE_RUN_SIGNATURE),
+        data.count(ORIGINAL_BRIDGE_RUN_CALL),
         data.count(ORIGINAL_CONTEXT_GUARD),
+        data.count(ORIGINAL_CONTEXT_FAILURE),
     )
     patched_recovery = (
         data.count(PATCHED_SCHEDULE),
         data.count(PATCHED_PROPAGATION),
+        data.count(PATCHED_HANDLE_RUN_SIGNATURE),
+        data.count(PATCHED_BRIDGE_RUN_SIGNATURE),
+        data.count(PATCHED_BRIDGE_RUN_CALL),
         data.count(PATCHED_CONTEXT_GUARD),
+        data.count(PATCHED_CONTEXT_FAILURE),
     )
     if (original_poll == (1, 1) and patched_poll == (0, 0)
-            and original_recovery == (1, 1, 1)
-            and patched_recovery == (0, 0, 0)):
+            and original_recovery == (1, 1, 1, 1, 1, 1, 1)
+            and patched_recovery == (0, 0, 0, 0, 0, 0, 0)):
         return "compatible_unpatched"
     if (original_poll == (0, 0) and patched_poll == (1, 1)
-            and original_recovery == (1, 1, 1)
-            and patched_recovery == (0, 0, 0)):
+            and original_recovery == (1, 1, 1, 1, 1, 1, 1)
+            and patched_recovery == (0, 0, 0, 0, 0, 0, 0)):
         return "poll_only_patched"
     if (original_poll == (0, 0) and patched_poll == (1, 1)
-            and original_recovery == (0, 0, 0)
-            and patched_recovery == (1, 1, 1)):
+            and original_recovery == (0, 0, 0, 0, 0, 0, 0)
+            and patched_recovery == (1, 1, 1, 1, 1, 1, 1)):
         return "patched"
     raise PatchError(
         "Hermes Studio runtime has an unknown or partial agent-bridge poll "
@@ -191,7 +227,11 @@ def apply_package_patch(
         ORIGINAL_GATE, PATCHED_GATE).replace(
         ORIGINAL_SCHEDULE, PATCHED_SCHEDULE).replace(
         ORIGINAL_PROPAGATION, PATCHED_PROPAGATION).replace(
-        ORIGINAL_CONTEXT_GUARD, PATCHED_CONTEXT_GUARD)
+        ORIGINAL_HANDLE_RUN_SIGNATURE, PATCHED_HANDLE_RUN_SIGNATURE).replace(
+        ORIGINAL_BRIDGE_RUN_SIGNATURE, PATCHED_BRIDGE_RUN_SIGNATURE).replace(
+        ORIGINAL_BRIDGE_RUN_CALL, PATCHED_BRIDGE_RUN_CALL).replace(
+        ORIGINAL_CONTEXT_GUARD, PATCHED_CONTEXT_GUARD).replace(
+        ORIGINAL_CONTEXT_FAILURE, PATCHED_CONTEXT_FAILURE)
     if _runtime_state(patched) != "patched":
         raise PatchError("post-patch runtime verification failed")
 

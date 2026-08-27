@@ -89,7 +89,8 @@ native completion 会停在 Hermes durable queue，不能自动回到原 `mt...`
 版本锁定兼容补丁。补丁只接受 npm 发布版 0.6.47 的精确 SHA-256 和精确 runtime
 片段，把空闲 IPC poll 调整为每 2 秒一次，并且仅对 Studio 内部 poll 已取得 claim
 的 callback 允许从持久化 session history 重建上下文。WebSocket 客户端不能设置该
-内部信任标记；无 claim 或普通客户端伪造的 background callback 仍 fail-closed。
+内部信任标记；它仅作为服务端调用参数传递，不进入公开 payload。无 claim 或普通
+客户端伪造的 background callback 会释放 claim 以便安全重试，不会错误标记 delivered。
 原有 claim、session ownership、重试和 ACK 逻辑保持不变。未知版本、未知 hash 或
 部分补丁全部 fail-closed：
 
