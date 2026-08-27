@@ -470,9 +470,12 @@ runtime 的精确版本/hash，先备份再原子替换，未知构建 fail-clos
 .venv/bin/python scripts/patch-hermes-studio-agentbridge-poll.py --check
 ```
 
-该补丁只增加每 2 秒一次的本机 bridge IPC poll，不改变任务审批、通知 payload、
-session ownership 或 ACK 语义。升级 Hermes Studio 前先按安装输出的备份路径恢复，
-不得对未知版本强行应用。
+该补丁增加每 2 秒一次的本机 bridge IPC poll，并允许仅由内部 poll 取得有效 claim
+的 callback 在 Studio 重启后从持久化 session history 重建 continuation context；
+普通 WebSocket 请求无法设置该内部信任标记。补丁不改变任务审批、通知 payload、
+session ownership 或 ACK 语义。验收必须覆盖重启后实际执行 `tasks/get`、向原会话
+汇报并 ACK，不能只检查 notification 被 poll/claim。升级 Hermes Studio 前先按安装
+输出的备份路径恢复，不得对未知版本强行应用。
 
 只有 qishuo profile 的 `plugins.entries.agenthub-supervisor` 可设置
 `allow_gateway_injection: true`。该授权仅允许投递到已有 gateway session，不授予

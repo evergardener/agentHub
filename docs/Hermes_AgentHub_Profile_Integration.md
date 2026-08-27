@@ -81,12 +81,17 @@ WebUI 审批中心同时列出委派前的 queued/input-required 门禁与 worke
 Hermes Studio 0.6.47 在初始恢复完成后，如果 Node 侧尚不知道存在 background
 delegation，会停止调用 bridge 的 `background_poll`。profile plugin 此后创建的合法
 native completion 会停在 Hermes durable queue，不能自动回到原 `mt...` session。
-agentHub 插件不能通过伪造 WebUI 状态或改写 session 数据规避这个边界。
+另外，Studio 重启会清空进程内 continuation context；若只恢复 poll，合法 claim
+仍会因 `origin context is unavailable` 被错误完成而不执行。agentHub 插件不能通过
+伪造 WebUI 状态或改写 session 数据规避这些边界。
 
 在上游提供正式 external-background-activity 信号前，生产机必须安装仓库内的
 版本锁定兼容补丁。补丁只接受 npm 发布版 0.6.47 的精确 SHA-256 和精确 runtime
-片段，把空闲 IPC poll 调整为每 2 秒一次；原有 claim、session ownership、重试和
-ACK 逻辑保持不变。未知版本、未知 hash 或部分补丁全部 fail-closed：
+片段，把空闲 IPC poll 调整为每 2 秒一次，并且仅对 Studio 内部 poll 已取得 claim
+的 callback 允许从持久化 session history 重建上下文。WebSocket 客户端不能设置该
+内部信任标记；无 claim 或普通客户端伪造的 background callback 仍 fail-closed。
+原有 claim、session ownership、重试和 ACK 逻辑保持不变。未知版本、未知 hash 或
+部分补丁全部 fail-closed：
 
 ```bash
 .venv/bin/python scripts/patch-hermes-studio-agentbridge-poll.py --apply
@@ -103,7 +108,9 @@ hermes-web-ui-0.6.47-.../index.js
 
 升级 Hermes Studio 前必须先恢复原 runtime；新版本未经重新审计不得强行套用旧
 补丁。Hermes Studio 重启后还要在真实 WebUI 会话验证：原 turn 已结束、session
-空闲、任务随后完成时，2 秒级自动唤醒、`tasks/get`、汇报和 ACK 均发生。
+空闲、任务随后完成时，2 秒级自动唤醒、`tasks/get`、汇报和 ACK 均发生。验收还
+必须包含“delegation 已完成但 Studio 随后重启”的恢复路径，不能仅断言 poll 找到
+notification 或 delivery_state 变化。
 
 Kimi 停用时，`agents/list` 会标记 `enabled=false`；如用户仍指定 Kimi，
 `tasks/create` 稳定返回 `agent disabled` 与需用户确认的说明，不探测、

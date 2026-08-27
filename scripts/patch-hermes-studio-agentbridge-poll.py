@@ -4,9 +4,12 @@
 Hermes Studio 0.6.47 stops polling its bridge after the initial recovery when
 the Node process does not already know about a background delegation.  A
 profile plugin can create a valid native completion after that point, but the
-completion remains pending forever.  This shim makes the existing local IPC
-poll run every two seconds, preserving all existing claim, routing, retry and
-completion behavior.
+completion remains pending forever.  After a Studio restart, the corresponding
+process-local continuation context is also absent even though the bridge claim
+is valid.  This shim makes the existing local IPC poll run every two seconds
+and permits only internally scheduled, claimed callbacks to rebuild context
+from the persisted session history.  Existing claim, routing, retry and
+completion behavior remains authoritative.
 
 The installer is deliberately fail-closed: it only patches the exact published
 0.6.47 runtime hash and exact minified snippets.  It creates a byte-for-byte
@@ -30,6 +33,9 @@ RUNTIME_RELATIVE_PATH = Path("dist/server/index.js")
 PUBLISHED_RUNTIME_SHA256 = (
     "e734a572c3ea1a080f32ae34f57eac402d45cd90b8a838526636aacf3b54bfbe"
 )
+POLL_ONLY_RUNTIME_SHA256 = (
+    "8ee81bd61c67c6b5bc6712391a3a8cade0a44b1ddc07c7eb574e6b87e72b3db0"
+)
 
 ORIGINAL_TIMER = (
     b"this.backgroundPollTimer=setInterval(()=>{this.pollBackgroundWork()},500)"
@@ -47,6 +53,25 @@ ORIGINAL_GATE = (
     b'return!0;return!1}'
 )
 PATCHED_GATE = b"needsBackgroundPoll(){return!this.closing}"
+ORIGINAL_SCHEDULE = (
+    b"backgroundClaimId:r,autonomous:!0};if(n.isWorking)"
+)
+PATCHED_SCHEDULE = (
+    b"backgroundClaimId:r,autonomous:!0,trustedBackgroundRecovery:!0};"
+    b"if(n.isWorking)"
+)
+ORIGINAL_PROPAGATION = (
+    b"background_claim_id:a.backgroundClaimId,autonomous:a.autonomous},c,s,n)"
+)
+PATCHED_PROPAGATION = (
+    b"background_claim_id:a.backgroundClaimId,autonomous:a.autonomous,"
+    b"trusted_background_recovery:a.trustedBackgroundRecovery===!0},c,s,n)"
+)
+ORIGINAL_CONTEXT_GUARD = b",I.background_delegation_id&&!N){"
+PATCHED_CONTEXT_GUARD = (
+    b",I.background_delegation_id&&!N&&"
+    b"I.trusted_background_recovery!==!0){"
+)
 
 
 class PatchError(RuntimeError):
@@ -75,15 +100,36 @@ def _package_version(package_root: Path) -> str:
 
 
 def _runtime_state(data: bytes) -> str:
-    original = (data.count(ORIGINAL_TIMER), data.count(ORIGINAL_GATE))
-    patched = (data.count(PATCHED_TIMER), data.count(PATCHED_GATE))
-    if original == (1, 1) and patched == (0, 0):
+    original_poll = (data.count(ORIGINAL_TIMER), data.count(ORIGINAL_GATE))
+    patched_poll = (data.count(PATCHED_TIMER), data.count(PATCHED_GATE))
+    original_recovery = (
+        data.count(ORIGINAL_SCHEDULE),
+        data.count(ORIGINAL_PROPAGATION),
+        data.count(ORIGINAL_CONTEXT_GUARD),
+    )
+    patched_recovery = (
+        data.count(PATCHED_SCHEDULE),
+        data.count(PATCHED_PROPAGATION),
+        data.count(PATCHED_CONTEXT_GUARD),
+    )
+    if (original_poll == (1, 1) and patched_poll == (0, 0)
+            and original_recovery == (1, 1, 1)
+            and patched_recovery == (0, 0, 0)):
         return "compatible_unpatched"
-    if original == (0, 0) and patched == (1, 1):
+    if (original_poll == (0, 0) and patched_poll == (1, 1)
+            and original_recovery == (1, 1, 1)
+            and patched_recovery == (0, 0, 0)):
+        return "poll_only_patched"
+    if (original_poll == (0, 0) and patched_poll == (1, 1)
+            and original_recovery == (0, 0, 0)
+            and patched_recovery == (1, 1, 1)):
         return "patched"
     raise PatchError(
         "Hermes Studio runtime has an unknown or partial agent-bridge poll "
-        f"layout: original={original}, patched={patched}")
+        "layout: "
+        f"original_poll={original_poll}, patched_poll={patched_poll}, "
+        f"original_recovery={original_recovery}, "
+        f"patched_recovery={patched_recovery}")
 
 
 def inspect_package(package_root: Path) -> dict[str, str]:
@@ -128,16 +174,24 @@ def apply_package_patch(
     inspection = inspect_package(package_root)
     if inspection["state"] == "patched":
         return {**inspection, "status": "already_applied"}
-    if inspection["runtime_sha256"] != expected_original_sha256:
+    expected_sha256 = (
+        expected_original_sha256
+        if inspection["state"] == "compatible_unpatched"
+        else POLL_ONLY_RUNTIME_SHA256
+    )
+    if inspection["runtime_sha256"] != expected_sha256:
         raise PatchError(
             "Hermes Studio runtime SHA-256 does not match the supported "
             f"published build: got {inspection['runtime_sha256']}, expected "
-            f"{expected_original_sha256}")
+            f"{expected_sha256}")
 
     runtime_path = Path(inspection["runtime_path"])
     original = runtime_path.read_bytes()
     patched = original.replace(ORIGINAL_TIMER, PATCHED_TIMER).replace(
-        ORIGINAL_GATE, PATCHED_GATE)
+        ORIGINAL_GATE, PATCHED_GATE).replace(
+        ORIGINAL_SCHEDULE, PATCHED_SCHEDULE).replace(
+        ORIGINAL_PROPAGATION, PATCHED_PROPAGATION).replace(
+        ORIGINAL_CONTEXT_GUARD, PATCHED_CONTEXT_GUARD)
     if _runtime_state(patched) != "patched":
         raise PatchError("post-patch runtime verification failed")
 
@@ -167,8 +221,9 @@ def restore_package_patch(package_root: Path, backup_path: Path) -> dict[str, st
         original = backup_path.resolve(strict=True).read_bytes()
     except OSError as exc:
         raise PatchError(f"cannot read runtime backup: {exc}") from exc
-    if _runtime_state(original) != "compatible_unpatched":
-        raise PatchError("backup is not the supported unpatched runtime")
+    if _runtime_state(original) not in {
+            "compatible_unpatched", "poll_only_patched"}:
+        raise PatchError("backup is not a supported pre-patch runtime")
     _atomic_write(runtime_path, original, runtime_path.stat().st_mode)
     after = inspect_package(package_root)
     return {**after, "status": "restored"}

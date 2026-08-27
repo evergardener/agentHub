@@ -27,7 +27,10 @@ def _fake_package(tmp_path: Path, module) -> tuple[Path, bytes]:
     runtime.parent.mkdir(parents=True)
     original = (
         b"prefix;" + module.ORIGINAL_TIMER + b";middle;" +
-        module.ORIGINAL_GATE + b";suffix\n"
+        module.ORIGINAL_GATE + b";schedule;" +
+        module.ORIGINAL_SCHEDULE + b";propagation;" +
+        module.ORIGINAL_PROPAGATION + b";guard;" +
+        module.ORIGINAL_CONTEXT_GUARD + b"suffix\n"
     )
     runtime.write_bytes(original)
     (root / "package.json").write_text(
@@ -50,8 +53,14 @@ def test_patch_makes_idle_bridge_poll_and_is_idempotent(tmp_path):
     runtime = (root / "dist" / "server" / "index.js").read_bytes()
     assert module.PATCHED_TIMER in runtime
     assert module.PATCHED_GATE in runtime
+    assert module.PATCHED_SCHEDULE in runtime
+    assert module.PATCHED_PROPAGATION in runtime
+    assert module.PATCHED_CONTEXT_GUARD in runtime
     assert module.ORIGINAL_TIMER not in runtime
     assert module.ORIGINAL_GATE not in runtime
+    assert module.ORIGINAL_SCHEDULE not in runtime
+    assert module.ORIGINAL_PROPAGATION not in runtime
+    assert module.ORIGINAL_CONTEXT_GUARD not in runtime
     assert Path(applied["backup_path"]).read_bytes() == original
 
     again = module.apply_package_patch(
@@ -72,6 +81,45 @@ def test_patch_restore_round_trip_is_exact(tmp_path):
 
     assert restored["status"] == "restored"
     assert (root / "dist" / "server" / "index.js").read_bytes() == original
+
+
+def test_patch_upgrades_the_pinned_poll_only_runtime(tmp_path, monkeypatch):
+    module = _load_patch_module()
+    root, original = _fake_package(tmp_path, module)
+    poll_only = original.replace(
+        module.ORIGINAL_TIMER, module.PATCHED_TIMER).replace(
+        module.ORIGINAL_GATE, module.PATCHED_GATE)
+    runtime_path = root / "dist" / "server" / "index.js"
+    runtime_path.write_bytes(poll_only)
+    monkeypatch.setattr(
+        module, "POLL_ONLY_RUNTIME_SHA256",
+        hashlib.sha256(poll_only).hexdigest())
+
+    applied = module.apply_package_patch(
+        root,
+        backup_root=tmp_path / "backups",
+        expected_original_sha256=hashlib.sha256(original).hexdigest(),
+    )
+
+    assert applied["status"] == "applied"
+    assert Path(applied["backup_path"]).read_bytes() == poll_only
+    assert module.inspect_package(root)["state"] == "patched"
+
+
+def test_claimed_recovery_marker_is_internal_only(tmp_path):
+    module = _load_patch_module()
+    root, original = _fake_package(tmp_path, module)
+    expected = hashlib.sha256(original).hexdigest()
+
+    module.apply_package_patch(
+        root, backup_root=tmp_path / "backups",
+        expected_original_sha256=expected)
+    runtime = (root / "dist" / "server" / "index.js").read_bytes()
+
+    assert b"trustedBackgroundRecovery:!0" in runtime
+    assert b"trusted_background_recovery:" \
+        b"a.trustedBackgroundRecovery===!0" in runtime
+    assert b"I.trusted_background_recovery!==!0" in runtime
 
 
 def test_patch_fails_closed_on_unknown_runtime(tmp_path):
