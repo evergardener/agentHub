@@ -96,7 +96,11 @@ def _strip_negated_chinese_english_operations(text: str) -> tuple[str, bool]:
     silently treated as a read-only constraint.
     """
     operations = _CHINESE_NEGATED_ENGLISH_OPERATION_PATTERN.pattern
-    prefix = r"(?:不得|禁止|不要|不)\s*(?:(?:执行|运行|调用)\s*)?"
+    scope = r"(?:(?:任何|任意)\s*)?"
+    prefix = (
+        r"(?:不得|禁止|不要|不)\s*" + scope +
+        r"(?:(?:执行|运行|调用)\s*)?" + scope
+    )
     # Targets/options after an operation are retained as ordinary objective
     # text, but bounded so contrastive clauses and list separators terminate
     # the match.  This supports e.g. ``docker restart 容器/docker stop 服务``.
@@ -180,7 +184,8 @@ def _strip_negated_chinese_operations(
         r"[\u4e00-\u9fffA-Za-z0-9_.:\- \t])*?"
     )
     pattern = re.compile(
-        rf"(?:不得|禁止|不要|不)\s*(?:(?:执行|运行|调用)\s*)?"
+        rf"(?:不得|禁止|不要|不)\s*(?:(?:任何|任意)\s*)?"
+        rf"(?:(?:执行|运行|调用)\s*)?(?:(?:任何|任意)\s*)?"
         rf"(?:{operations})"
         rf"(?:{object_fragment}{separator}(?:{operations}))*"
     )

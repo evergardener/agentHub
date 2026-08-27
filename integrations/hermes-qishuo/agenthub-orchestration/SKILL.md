@@ -205,6 +205,10 @@ enable and re-discover that Agent, or choose a currently enabled Agent.
   `docker exec`, lifecycle changes, or write/delete operations.
 - Poll with `tasks/get`; do not treat the initial `submitted` response as task
   completion.
+- `delivery=agent-bridge-durable` is only production-ready when the installed
+  Hermes Studio runtime passes the repository compatibility check. A native
+  completion that is merely pending in the durable queue is not evidence that
+  the original WebUI session was awakened.
 - Preserve the task ID and context ID in the conversation.
 - Review reported artifacts and the agentHub task record before telling the
   user that work completed.
@@ -236,3 +240,7 @@ enable and re-discover that Agent, or choose a currently enabled Agent.
   unavailable and ask for a decision.
 - If context is lost, use the known task ID with `tasks/get`; do not create a
   duplicate task.
+- If an agent-bridge notification remains pending, keep the agentHub outbox
+  unacknowledged and report the runtime delivery failure. Never forge WebUI
+  session state, inject through a different user's session, or mark the task
+  accepted to clear the notification.

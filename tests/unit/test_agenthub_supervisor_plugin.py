@@ -207,6 +207,20 @@ def test_delivered_native_wake_is_retried_until_agenthub_ack(monkeypatch):
     assert ctx.injected == []
 
 
+def test_completed_but_unconsumed_native_wake_remains_pending(monkeypatch):
+    plugin = _load_plugin()
+    tools_module = types.ModuleType("tools")
+    async_module = types.ModuleType("tools.async_delegation")
+    async_module.get_durable_delegation = lambda _delegation_id: {
+        "state": "completed",
+        "delivery_state": "pending",
+    }
+    monkeypatch.setitem(sys.modules, "tools", tools_module)
+    monkeypatch.setitem(sys.modules, "tools.async_delegation", async_module)
+
+    assert plugin._native_delivery_is_pending("deleg-waiting-for-webui") is True
+
+
 def test_agent_bridge_native_dispatch_is_bound_to_originating_webui_session(
         monkeypatch):
     plugin = _load_plugin()

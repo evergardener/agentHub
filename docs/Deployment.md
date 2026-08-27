@@ -461,6 +461,19 @@ profile 前，使用 `scripts/install-qishuo-agenthub.py` 创建 profile 备份�
 并同步安装 `agenthub-orchestration` skill、prompt appendix 与 supervisor plugin；
 完整命令和真实验收矩阵见 `docs/Hermes_AgentHub_Profile_Integration.md`。
 
+Hermes Studio 0.6.47 还必须通过 agent bridge 空闲唤醒兼容 Gate；否则 plugin 写入
+的 native completion 可能在原 WebUI session 空闲后无人消费。安装器只接受发布版
+runtime 的精确版本/hash，先备份再原子替换，未知构建 fail-closed：
+
+```bash
+.venv/bin/python scripts/patch-hermes-studio-agentbridge-poll.py --apply
+.venv/bin/python scripts/patch-hermes-studio-agentbridge-poll.py --check
+```
+
+该补丁只增加每 2 秒一次的本机 bridge IPC poll，不改变任务审批、通知 payload、
+session ownership 或 ACK 语义。升级 Hermes Studio 前先按安装输出的备份路径恢复，
+不得对未知版本强行应用。
+
 只有 qishuo profile 的 `plugins.entries.agenthub-supervisor` 可设置
 `allow_gateway_injection: true`。该授权仅允许投递到已有 gateway session，不授予
 任务审批或验收权限。通知 ACK 之前按租约重试；服务或 Hermes 重启不丢 watch。

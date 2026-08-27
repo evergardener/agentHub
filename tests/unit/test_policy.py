@@ -73,6 +73,17 @@ def test_chinese_parallel_negation_allows_object_bearing_operations(
     assert d.action == "auto" and d.risk == "read"
 
 
+def test_chinese_parallel_negation_allows_explicit_any_scope(policy, conn):
+    objective = (
+        "只读任务。运行一次可审计的 docker ps，仅返回当前正在运行的容器"
+        "名称列表及其数量。明确禁止任何写入、重启、停止、删除容器，"
+        "禁止任何 docker exec，禁止任何任务验收（tasks/accept）或状态"
+        "变更操作。任务约束：只读、无副作用、无状态改变。"
+    )
+    d = policy.decide(conn, objective)
+    assert d.action == "auto" and d.risk == "read"
+
+
 def test_chinese_negation_strips_english_docker_operation_list(
         policy, conn,
 ):

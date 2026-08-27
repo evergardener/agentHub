@@ -76,6 +76,35 @@ qishuo 原生 `a2a_call` 不提供自定义 `metadata.agent`，因此 agentHub
 WebUI 审批中心同时列出委派前的 queued/input-required 门禁与 worker 已运行后
 产生的 blocked 原生审批；两者使用同一批准/拒绝按钮，但审计事件保留来源。
 
+### Hermes Studio 0.6.47 agent bridge 兼容 Gate
+
+Hermes Studio 0.6.47 在初始恢复完成后，如果 Node 侧尚不知道存在 background
+delegation，会停止调用 bridge 的 `background_poll`。profile plugin 此后创建的合法
+native completion 会停在 Hermes durable queue，不能自动回到原 `mt...` session。
+agentHub 插件不能通过伪造 WebUI 状态或改写 session 数据规避这个边界。
+
+在上游提供正式 external-background-activity 信号前，生产机必须安装仓库内的
+版本锁定兼容补丁。补丁只接受 npm 发布版 0.6.47 的精确 SHA-256 和精确 runtime
+片段，把空闲 IPC poll 调整为每 2 秒一次；原有 claim、session ownership、重试和
+ACK 逻辑保持不变。未知版本、未知 hash 或部分补丁全部 fail-closed：
+
+```bash
+.venv/bin/python scripts/patch-hermes-studio-agentbridge-poll.py --apply
+.venv/bin/python scripts/patch-hermes-studio-agentbridge-poll.py --check
+```
+
+安装会输出 byte-for-byte backup 路径。回退时先停止 Hermes Studio，再使用该路径：
+
+```bash
+.venv/bin/python scripts/patch-hermes-studio-agentbridge-poll.py \
+  --restore /Users/evergarden/.hermes-web-ui/backups/agenthub-agentbridge-poll/\
+hermes-web-ui-0.6.47-.../index.js
+```
+
+升级 Hermes Studio 前必须先恢复原 runtime；新版本未经重新审计不得强行套用旧
+补丁。Hermes Studio 重启后还要在真实 WebUI 会话验证：原 turn 已结束、session
+空闲、任务随后完成时，2 秒级自动唤醒、`tasks/get`、汇报和 ACK 均发生。
+
 Kimi 停用时，`agents/list` 会标记 `enabled=false`；如用户仍指定 Kimi，
 `tasks/create` 稳定返回 `agent disabled` 与需用户确认的说明，不探测、
 不创建任务、不委派、不静默改派。
@@ -106,6 +135,8 @@ Kimi 停用时，`agents/list` 会标记 `enabled=false`；如用户仍指定 Ki
 - 对同一 task/context 继续两轮，不生成重复任务。
 - qishuo plugin doctor 通过，配置中仅该 profile 对 supervisor 开启
   `allow_gateway_injection`；全局 Hermes 配置未修改。
+- Hermes Studio 0.6.47 compatibility check 返回 `state=patched`；未命中精确
+  版本/hash 时发布 Gate 失败，不能把 durable queue 入队当作已唤醒。
 - Gateway 创建任务后工具结果出现 `agentHub supervision active` 且
   `delivery=gateway-durable`；WebUI agent bridge 创建任务后出现
   `delivery=agent-bridge-durable`，并通过 Hermes 原生 async-completion queue 回到
