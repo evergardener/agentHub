@@ -36,6 +36,32 @@ MARKDOWN = MarkdownIt(
     {"html": False, "linkify": False, "typographer": False},
 ).enable(["strikethrough", "table"])
 
+# Adapter-side records needed for audit/result recovery, but not user-facing
+# deliverables.  Keep these rows in the artifact manifest: deleting them would
+# remove the DSH history and canonical assistant response that back the audit
+# trail and task result summary.
+_NON_DELIVERABLE_ARTIFACT_NAMES = frozenset({
+    "codex.log",
+    "codex.jsonl",
+    "codex-app-server.jsonl",
+    "dsh-history.json",
+    "kimi.jsonl",
+    "kimi-acp.jsonl",
+    "kimi-stderr.log",
+    "last-message.md",
+})
+
+
+def _is_deliverable_artifact(artifact: dict) -> bool:
+    """Return whether an artifact is a user-facing task deliverable.
+
+    Classification is based on reserved adapter artifact names only.  A
+    project file with the same basename under ``workspace/`` remains a real
+    deliverable, while the adapter's top-level canonical files stay available
+    to audit/result code but are not presented as output files.
+    """
+    return artifact.get("name") not in _NON_DELIVERABLE_ARTIFACT_NAMES
+
 
 def _b64encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -142,6 +168,7 @@ def _artifact_availability(artifact: dict, roots: list[Path]) -> dict:
     allowed = any(_is_under(path, root) for root in roots)
     return {
         **artifact,
+        "is_deliverable": _is_deliverable_artifact(artifact),
         "available": allowed and path.is_file(),
         "availability_reason": (
             None if allowed and path.is_file()

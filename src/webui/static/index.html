@@ -332,7 +332,7 @@
                          background: var(--card); color: var(--fg); font: inherit;
                          font-size: 12px; }
   .chat-context { padding: 11px 18px; border-bottom: 1px solid var(--line-soft);
-                  background: #fafbfc; }
+                  background: transparent; }
   .chat-objective { font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
   .chat-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px;
                color: var(--faint); font-size: 11px; }
@@ -340,8 +340,8 @@
                       cursor: pointer; font: inherit; font-size: 11px; }
   .chat-transcript { flex: 1; min-height: 0; overflow-y: auto;
                      padding: 20px clamp(18px, 4vw, 54px); }
-  .chat-transcript .message-list { gap: 14px; }
-  .chat-transcript .message { max-width: 88%; padding: 12px 14px; }
+  .chat-transcript .message-list { gap: 9px; }
+  .chat-transcript .message { width: min(96%, 980px); max-width: none; padding: 12px 14px; }
   .chat-transcript .message.user { margin-left: auto; }
   .chat-transcript .message.hermes,
   .chat-transcript .message.tool { margin-right: auto; }
@@ -349,7 +349,7 @@
   .chat-empty { height: 100%; display: grid; place-items: center; text-align: center;
                 color: var(--faint); padding: 30px; }
   .chat-foot { border-top: 1px solid var(--line); padding: 10px 18px;
-               background: #fafbfc; color: var(--mut); font-size: 11.5px;
+               background: transparent; color: var(--mut); font-size: 11.5px;
                display: flex; align-items: center; gap: 8px; }
   .chat-foot strong { color: var(--fg); }
   .chat-foot .spacer { flex: 1; }
@@ -623,15 +623,6 @@
   .conversation.active { background: rgba(220,243,240,.68); border-left-color: var(--acc); }
   .workspace-card {
     flex: 1; height: 100%; min-height: 0; gap: 12px; overflow: hidden;
-    background: transparent; border: 0; border-radius: 0;
-    box-shadow: none; backdrop-filter: none;
-  }
-  .workspace-card > .chat-head,
-  .workspace-card > .chat-transcript,
-  .workspace-card > .chat-composer {
-    background: rgba(255,255,255,.48); border: 1px solid rgba(255,255,255,.76);
-    border-radius: var(--radius); box-shadow: var(--shadow);
-    backdrop-filter: blur(24px) saturate(132%);
   }
   .workspace-card > .chat-head { flex: none; }
   .workspace-card > .chat-transcript {
@@ -639,14 +630,6 @@
     overscroll-behavior: contain; scrollbar-gutter: stable;
   }
   .workspace-card > .chat-composer { flex: none; }
-  .chat-head, .chat-context, .chat-foot {
-    background: rgba(255,255,255,.30); border-color: var(--line-soft);
-    backdrop-filter: blur(16px);
-  }
-  .workspace-card > .chat-head,
-  .workspace-card > .chat-composer { border-color: rgba(255,255,255,.76); }
-  .workspace-card > .chat-head { border-bottom: 1px solid rgba(255,255,255,.76); }
-  .workspace-card > .chat-composer { border-top: 1px solid rgba(255,255,255,.76); }
   .chat-transcript { padding: 20px clamp(16px, 3vw, 40px); }
   .chat-transcript .message {
     display: grid; grid-template-columns: 32px minmax(0,1fr);
@@ -663,19 +646,21 @@
   .message.tool .message-avatar { background: #a18268; }
   .message-shell {
     min-width: 0; padding: 10px 12px; border-radius: 4px 14px 14px 14px;
-    background: rgba(255,255,255,.48); border: 1px solid rgba(255,255,255,.66);
-    box-shadow: 0 6px 16px rgba(69,98,102,.09);
+    background: transparent; border: 1px solid transparent;
+    box-shadow: none;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
     grid-column: 2; grid-row: 1; align-self: start;
   }
   .message.user .message-shell { background: rgba(224,238,247,.60); }
   .message.hermes .message-shell { background: rgba(227,242,236,.62); }
+  .message.agent .message-shell { background: rgba(255,255,255,.48); }
   .message.tool .message-shell { background: rgba(255,239,218,.60); }
   .chat-transcript .message.user { margin-left: 0; }
   .task-detail-pane {
     min-width: 0; min-height: 0; height: 100%; display: flex;
-    flex-direction: column; gap: 12px; overflow: visible; border: 0;
-    border-radius: 0; background: transparent; box-shadow: none;
-    backdrop-filter: none;
+    flex-direction: column; gap: 12px; overflow: visible;
   }
   .task-detail-pane .d-head {
     padding: 14px 16px; border: 1px solid rgba(255,255,255,.76);
@@ -778,7 +763,7 @@
   .chat-head .sub span { white-space: nowrap; }
 
   /* 对话：Agent 在左，Hermes / 用户在右 */
-  .chat-transcript .message { width: min(88%, 780px); max-width: none; }
+  .chat-transcript .message { width: min(96%, 980px); max-width: none; }
   .chat-transcript .message.outbound {
     grid-template-columns: minmax(0,1fr) 32px; margin-left: auto; margin-right: 0;
   }
@@ -786,15 +771,15 @@
   .chat-transcript .message.outbound .message-shell { grid-column: 1; grid-row: 1;
                                                        border-radius: 14px 4px 14px 14px; }
   .message-agent-label { color: var(--mut); }
-  .message .mc { font-family: inherit; font-size: 13px; line-height: 1.45; }
-  .message .mc, .markdown-body { min-width: 0; overflow-wrap: anywhere; }
-  .markdown-body { line-height: 1.45; color: var(--fg); }
+  .message .mc { font-family: inherit; font-size: 13px; line-height: 1.35; }
+  .message .mc, .markdown-body { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+  .markdown-body { line-height: 1.35; color: var(--fg); overflow-x: auto; }
   .markdown-body > :first-child { margin-top: 0; }
   .markdown-body > :last-child { margin-bottom: 0; }
-  .markdown-body p { margin: 0 0 .72em; }
+  .markdown-body p { margin: 0 0 .32em; }
   .markdown-body h1, .markdown-body h2, .markdown-body h3,
   .markdown-body h4, .markdown-body h5, .markdown-body h6 {
-    margin: 1em 0 .45em; line-height: 1.35; color: var(--fg);
+    margin: .5em 0 .25em; line-height: 1.32; color: var(--fg);
   }
   .markdown-body h1 { font-size: 1.35em; }
   .markdown-body h2 { font-size: 1.22em; }
@@ -816,13 +801,15 @@
   }
   .markdown-body pre code { padding: 0; background: none; color: inherit; }
   .markdown-body a { color: var(--acc); text-underline-offset: 2px; }
-  .markdown-body table { display: block; max-width: 100%; overflow-x: auto; margin: .7em 0;
+  .markdown-body table { width: 100%; max-width: 100%; margin: .5em 0;
                         border: 1px solid rgba(89,115,119,.20); border-collapse: collapse; }
   .markdown-body thead th,
   .markdown-body thead td { background: rgba(255,255,255,.55); }
   .markdown-body thead { background: rgba(255,255,255,.12); }
   .markdown-body th, .markdown-body td {
     padding: 5px 8px;
+    white-space: normal;
+    word-break: break-word;
     border: 1px solid rgba(89,115,119,.20);
     text-align: left;
     vertical-align: top;
@@ -851,7 +838,7 @@
   /* 可发送的会话输入区 */
   .chat-composer {
     border-top: 1px solid var(--line-soft); padding: 9px 14px 11px;
-    background: rgba(255,255,255,.31); backdrop-filter: blur(18px);
+    background: transparent; backdrop-filter: none;
   }
   .composer-row { display: flex; align-items: center; gap: 8px; color: var(--faint); font-size: 10.5px; }
   .composer-target-wrap { position: relative; flex: none; }
@@ -2394,11 +2381,15 @@ async function openDetail(id, {syncConversation = true} = {}) {
     return `<div class="delivery-item ${css}"><span><strong>${esc(name)}</strong><br>${esc(suffix)}</span></div>`;
   }).join("") : `<div class="empty">Task Plan 未声明预期交付物</div>`;
 
-  const artifactButtons = arts.length ? arts.map(artifact =>
+  // Adapter logs/canonical replies remain available in the API for audit and
+  // result recovery, but are not task deliverables.  Older API responses do
+  // not carry is_deliverable, so only an explicit false hides an artifact.
+  const deliverableArtifacts = arts.filter(artifact => artifact.is_deliverable !== false);
+  const artifactButtons = deliverableArtifacts.length ? deliverableArtifacts.map(artifact =>
     `<button class="chip art ${artifact.available ? "" : "missing"}" data-art="${esc(artifact.name)}" ` +
     `${artifact.available ? "" : "disabled title=\"文件已缺失或路径不可访问\""}>` +
     `${esc(artifact.name)}${artifact.available ? "" : "（不可用）"}</button>`
-  ).join("") : `<span class="empty">尚无已落盘产物</span>`;
+  ).join("") : `<span class="empty">尚无已落盘交付物</span>`;
 
   const planChain = plan ? (d.plan_steps || []).map(step =>
     `<div class="delivery-item ${["completed", "accepted"].includes(step.task_status) ? "ready" : ""}">` +
