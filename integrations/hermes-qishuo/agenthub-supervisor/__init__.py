@@ -139,10 +139,14 @@ def _watch_surface(watch: dict) -> str:
     value = str(watch.get("owner_mode") or "").strip().lower()
     if value in {"gateway", "cli", "agent_bridge"}:
         return value
-    # Legacy state had no ownership metadata.  Derive only enough information
-    # to keep a Gateway poller from consuming an old CLI watch; legacy CLI
-    # watches still require a fresh in-process owner token before polling.
-    return _session_surface(str(watch.get("session_key") or ""))
+    # Legacy state had no ownership metadata.  Only canonical Gateway keys can
+    # be classified without the original session environment.  In particular,
+    # never upgrade a bare ``mt...`` watch to agent_bridge merely because a new
+    # bridge process is currently loading it: that would adopt and write into a
+    # pre-upgrade user session.  Such watches remain unowned process-only state
+    # and require an explicit fresh registration.
+    session_key = str(watch.get("session_key") or "")
+    return "gateway" if session_key.startswith("agent:") else "cli"
 
 
 def _watch_is_durable(watch: dict) -> bool:

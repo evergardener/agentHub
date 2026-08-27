@@ -475,6 +475,22 @@ def test_gateway_poll_never_claims_agent_bridge_watches():
     assert list(plugin._owned_watches("agent_bridge")) == ["WATCH-WEBUI"]
 
 
+def test_agent_bridge_never_adopts_legacy_bare_session_watch(monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    monkeypatch.setattr(plugin, "_session_surface", lambda _key="": "agent_bridge")
+    ctx.state.set("watches", {"WATCH-LEGACY": {
+        "task_id": "T-USER", "context_id": "ctx-user",
+        "session_key": "mt-legacy-user",
+    }})
+
+    assert plugin._watch_surface(
+        ctx.state.get("watches")["WATCH-LEGACY"]) == "cli"
+    assert plugin._owned_watches("agent_bridge") == {}
+    assert plugin._owned_watches("cli") == {}
+
+
 def test_stale_cli_watch_is_not_adopted_by_a_new_process():
     plugin = _load_plugin()
     ctx = _Context(cli=True)
