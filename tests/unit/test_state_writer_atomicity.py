@@ -47,6 +47,9 @@ def test_worker_completed_event_enters_awaiting_acceptance(tmp_path):
     }) == "applied"
     task = state_store.get_task(writer.conn, "T-accept")
     assert task["status"] == "awaiting_acceptance"
+    collaboration = collaboration_store.get_collaboration(
+        writer.conn, collaboration_id)
+    assert collaboration["phase"] == "awaiting_acceptance"
     run = writer.conn.execute(
         "SELECT attempt, status FROM task_runs WHERE task_id = 'T-accept'"
         " ORDER BY started_at DESC LIMIT 1;").fetchone()
@@ -110,6 +113,8 @@ def test_result_message_failure_rolls_back_completed_event(
         writer.apply(event)
     assert state_store.get_task(
         writer.conn, "T-result-atomic")["status"] == "working"
+    assert collaboration_store.get_collaboration(
+        writer.conn, collaboration_id)["phase"] == "planning"
     assert writer.conn.execute(
         "SELECT COUNT(*) FROM events WHERE id = 'E-result-atomic';"
     ).fetchone()[0] == 0

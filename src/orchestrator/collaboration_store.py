@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from common.models import CollaborationPhase, InterventionMode
+from common.models import CollaborationPhase, InterventionMode, TaskStatus
 from state.db import now_iso
 
 
@@ -401,8 +401,74 @@ def get_collaboration(conn, collaboration_id: str):
     ).fetchone()
 
 
+def derive_phase_from_task_statuses(statuses) -> CollaborationPhase:
+    """Derive one stable user-visible phase from all collaboration tasks.
+
+    This reducer deliberately has no database or ordering dependency.  Active
+    work wins over completed siblings, and a collaboration becomes accepted or
+    cancelled only when every non-cancelled task has reached that outcome.
+    """
+    values = {
+        status.value if isinstance(status, TaskStatus) else str(status)
+        for status in statuses
+    }
+    if not values:
+        return CollaborationPhase.PLANNING
+    if TaskStatus.BLOCKED.value in values:
+        return CollaborationPhase.AWAITING_APPROVAL
+    if TaskStatus.REWORK_PENDING.value in values:
+        return CollaborationPhase.REWORK
+    if values & {
+            TaskStatus.ASSIGNED.value, TaskStatus.WORKING.value,
+            TaskStatus.RETRY_PENDING.value}:
+        return CollaborationPhase.EXECUTING
+    if values & {
+            TaskStatus.COMPLETED.value,
+            TaskStatus.AWAITING_ACCEPTANCE.value,
+            TaskStatus.REVIEWED.value}:
+        return CollaborationPhase.AWAITING_ACCEPTANCE
+    non_cancelled = values - {TaskStatus.CANCELLED.value}
+    if non_cancelled and non_cancelled <= {TaskStatus.ACCEPTED.value}:
+        return CollaborationPhase.ACCEPTED
+    if not non_cancelled:
+        return CollaborationPhase.CANCELLED
+    if TaskStatus.FAILED.value in values:
+        return CollaborationPhase.NEEDS_REPLAN
+    if values & {TaskStatus.CREATED.value, TaskStatus.QUEUED.value}:
+        return CollaborationPhase.READY
+    return CollaborationPhase.PLANNING
+
+
+def sync_phase_from_tasks(conn, collaboration_id: str, *,
+                          commit: bool = True) -> CollaborationPhase:
+    """Project task state into collaboration phase in the caller transaction."""
+    collaboration = get_collaboration(conn, collaboration_id)
+    if collaboration is None:
+        raise KeyError(f"collaboration not found: {collaboration_id}")
+    # User takeover/pause is an explicit control-plane state, not a projection
+    # of worker progress.  Preserve it until the corresponding control action
+    # explicitly resumes or returns control.
+    current = CollaborationPhase(collaboration["phase"])
+    if (collaboration["controller"] == "user"
+            and current in {
+                CollaborationPhase.PAUSED,
+                CollaborationPhase.NEEDS_REPLAN,
+            }):
+        return current
+    rows = conn.execute(
+        "SELECT status FROM tasks WHERE collaboration_id = ?;",
+        (collaboration_id,),
+    ).fetchall()
+    phase = derive_phase_from_task_statuses(row["status"] for row in rows)
+    if phase != current:
+        set_phase(conn, collaboration_id, phase, commit=False)
+    if commit:
+        conn.commit()
+    return phase
+
+
 def set_phase(conn, collaboration_id: str, phase: CollaborationPhase,
-              *, controller: str | None = None) -> None:
+              *, controller: str | None = None, commit: bool = True) -> None:
     extra = ", controller = ?" if controller else ""
     params: list[Any] = [phase.value, now_iso()]
     if controller:
@@ -412,7 +478,8 @@ def set_phase(conn, collaboration_id: str, phase: CollaborationPhase,
         f"UPDATE collaborations SET phase = ?, updated_at = ?{extra}"
         " WHERE id = ?;", params,
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     if cur.rowcount == 0:
         raise KeyError(f"collaboration not found: {collaboration_id}")
 

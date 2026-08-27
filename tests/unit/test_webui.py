@@ -690,6 +690,31 @@ def test_collaboration_multi_turn_api(client):
     ).status_code == 404
 
 
+def test_collaboration_detail_phase_matches_task_acceptance_state(client):
+    from common.models import TaskStatus
+    from orchestrator import collaboration_store, state_store
+    from state.db import connect
+
+    conn = connect()
+    task = conn.execute(
+        "SELECT id, collaboration_id FROM tasks WHERE id = 'T-2';"
+    ).fetchone()
+    for status in (
+        TaskStatus.ASSIGNED,
+        TaskStatus.WORKING,
+        TaskStatus.AWAITING_ACCEPTANCE,
+    ):
+        state_store.transition_task(conn, task["id"], status)
+    collaboration_store.sync_phase_from_tasks(
+        conn, task["collaboration_id"])
+    conn.close()
+
+    detail = client.get(
+        f"/api/collaborations/{task['collaboration_id']}").json()
+    assert detail["collaboration"]["phase"] == "awaiting_acceptance"
+    assert detail["tasks"][0]["status"] == "awaiting_acceptance"
+
+
 def test_collaboration_message_does_not_require_active_task(client):
     from state.db import connect
 

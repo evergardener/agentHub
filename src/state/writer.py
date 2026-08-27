@@ -132,6 +132,12 @@ class StateWriter:
                     review=payload.get("review"),
                     commit=False,
                 )
+                task = state_store.get_task(self.conn, task_id)
+                if task is not None and task["collaboration_id"]:
+                    from orchestrator import collaboration_store
+
+                    collaboration_store.sync_phase_from_tasks(
+                        self.conn, task["collaboration_id"], commit=False)
                 if event_type == "task.started":
                     state_store.add_task_run(
                         self.conn, task_id=task_id, agent_id=source,

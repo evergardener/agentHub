@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -76,6 +78,240 @@ def test_create_result_auto_registers_origin_session(monkeypatch):
         "owner_mode": "gateway", "owner_instance_id": "",
         "durable": True,
     }
+
+
+def test_agent_bridge_surface_is_not_misclassified_as_process_only_tui(
+        monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    values = {
+        "HERMES_SESSION_PLATFORM": "agent_bridge",
+        "HERMES_SESSION_SOURCE": "tui",
+    }
+    monkeypatch.setattr(plugin, "_session_env", lambda name: values.get(name, ""))
+
+    assert plugin._session_surface("mt-webui-1") == "agent_bridge"
+    watch = plugin._watch_record(
+        task_id="T-WEBUI", context_id="ctx-webui",
+        session_key="mt-webui-1", surface="agent_bridge")
+    assert watch == {
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "session_key": "mt-webui-1", "owner_mode": "agent_bridge",
+        "owner_instance_id": "", "durable": True,
+    }
+    assert plugin._delivery_label(watch) == "agent-bridge-durable"
+
+
+def test_create_result_registers_durable_agent_bridge_wake(monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    monkeypatch.setattr(plugin, "_current_session_key", lambda: "mt-webui-1")
+    monkeypatch.setattr(plugin, "_session_surface", lambda key="": "agent_bridge")
+    monkeypatch.setattr(
+        plugin, "_agent_bridge_delivery_available", lambda: True)
+    monkeypatch.setattr(plugin, "_ensure_polling", lambda: None)
+    monkeypatch.setattr(plugin, "_call_agenthub", lambda action, **fields: {
+        "status": "active", "watch_id": "WATCH-WEBUI",
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+    })
+
+    result = plugin._transform_tool_result(
+        tool_name="a2a_call",
+        args={"agent": "agenthub", "context_id": "ctx-webui", "message":
+              '{"agenthub":"v1","action":"tasks/create"}'},
+        result="[agenthub · context ctx-webui · submitted]\n"
+               "task_id=T-WEBUI")
+
+    assert "supervision active" in result
+    assert "delivery=agent-bridge-durable" in result
+    assert ctx.state.get("watches")["WATCH-WEBUI"]["owner_mode"] == \
+        "agent_bridge"
+
+
+def test_agent_bridge_notification_uses_native_durable_completion(monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    ctx.state.set("watches", {"WATCH-WEBUI": {
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "session_key": "mt-webui-1", "owner_mode": "agent_bridge",
+        "owner_instance_id": "", "durable": True,
+    }})
+    dispatched = []
+    monkeypatch.setattr(
+        plugin, "_agent_bridge_delivery_available", lambda: True)
+    monkeypatch.setattr(
+        plugin, "_dispatch_agent_bridge_notification",
+        lambda notification, watch: dispatched.append((notification, watch)) or
+        "deleg-agenthub-1")
+    monkeypatch.setattr(
+        plugin, "_native_delivery_is_pending", lambda _delegation_id: True)
+    notification = {
+        "notification_id": "SN-WEBUI", "watch_id": "WATCH-WEBUI",
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "event_type": "task.completed",
+        "internal_status": "awaiting_acceptance",
+        "payload": "untrusted remote payload",
+    }
+
+    assert plugin._inject_notification(notification) is True
+    assert len(dispatched) == 1
+    assert ctx.injected == []
+    assert ctx.state.get("deliveries") == {
+        "SN-WEBUI": {
+            "delegation_id": "deleg-agenthub-1",
+            "watch_id": "WATCH-WEBUI",
+            "task_id": "T-WEBUI",
+            "session_key": "mt-webui-1",
+        }
+    }
+
+    # AgentHub keeps the outbox row inflight until Hermes handles and ACKs it.
+    # Re-pulls before that ACK must not create duplicate WebUI turns.
+    assert plugin._inject_notification(notification) is True
+    assert len(dispatched) == 1
+
+
+def test_delivered_native_wake_is_retried_until_agenthub_ack(monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    ctx.state.set("watches", {"WATCH-WEBUI": {
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "session_key": "mt-webui-1", "owner_mode": "agent_bridge",
+        "owner_instance_id": "", "durable": True,
+    }})
+    ctx.state.set("deliveries", {"SN-WEBUI": {
+        "delegation_id": "deleg-delivered", "watch_id": "WATCH-WEBUI",
+        "task_id": "T-WEBUI", "session_key": "mt-webui-1",
+    }})
+    monkeypatch.setattr(
+        plugin, "_agent_bridge_delivery_available", lambda: True)
+    monkeypatch.setattr(
+        plugin, "_native_delivery_is_pending", lambda _delegation_id: False)
+    monkeypatch.setattr(
+        plugin, "_dispatch_agent_bridge_notification",
+        lambda *_: "deleg-retry")
+    notification = {
+        "notification_id": "SN-WEBUI", "watch_id": "WATCH-WEBUI",
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "event_type": "task.completed",
+        "internal_status": "awaiting_acceptance",
+    }
+
+    assert plugin._inject_notification(notification) is True
+    assert ctx.state.get("deliveries")["SN-WEBUI"]["delegation_id"] == \
+        "deleg-retry"
+    assert ctx.injected == []
+
+
+def test_agent_bridge_native_dispatch_is_bound_to_originating_webui_session(
+        monkeypatch):
+    plugin = _load_plugin()
+    captured = {}
+
+    def fake_dispatch(**kwargs):
+        captured.update(kwargs)
+        return {"status": "dispatched", "delegation_id": "deleg-native-1"}
+
+    monkeypatch.setattr(plugin, "_native_async_dispatch", fake_dispatch)
+    notification = {
+        "notification_id": "SN-WEBUI", "watch_id": "WATCH-WEBUI",
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "event_type": "task.completed",
+        "internal_status": "awaiting_acceptance",
+        "payload": "must not be forwarded",
+    }
+    watch = {
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "session_key": "mt-webui-1", "owner_mode": "agent_bridge",
+        "owner_instance_id": "", "durable": True,
+    }
+
+    assert plugin._dispatch_agent_bridge_notification(
+        notification, watch) == "deleg-native-1"
+    assert captured["session_key"] == "mt-webui-1"
+    assert captured["parent_session_id"] == "mt-webui-1"
+    assert captured["origin_ui_session_id"] == "mt-webui-1"
+    assert captured["origin_session_id"] == "mt-webui-1"
+    assert captured["toolsets"] == ["a2a"]
+    result = captured["runner"]()
+    assert result["status"] == "completed"
+    assert "SN-WEBUI" in result["summary"]
+    assert "tasks/get" in result["summary"]
+    assert "must not be forwarded" not in result["summary"]
+
+
+def test_agent_bridge_dispatch_feature_detects_hermes_public_api(monkeypatch):
+    plugin = _load_plugin()
+    calls = []
+    tools_module = types.ModuleType("tools")
+    async_module = types.ModuleType("tools.async_delegation")
+    async_module.dispatch_async_delegation = (
+        lambda **kwargs: calls.append(kwargs) or {
+            "status": "dispatched", "delegation_id": "deleg-contract",
+        }
+    )
+    monkeypatch.setitem(sys.modules, "tools", tools_module)
+    monkeypatch.setitem(sys.modules, "tools.async_delegation", async_module)
+
+    assert plugin._agent_bridge_delivery_available() is True
+    assert plugin._native_async_dispatch(goal="wake") == {
+        "status": "dispatched", "delegation_id": "deleg-contract",
+    }
+    assert calls == [{"goal": "wake"}]
+
+
+def test_agent_bridge_dispatch_rejection_remains_retriable(monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    ctx.state.set("watches", {"WATCH-WEBUI": {
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "session_key": "mt-webui-1", "owner_mode": "agent_bridge",
+        "owner_instance_id": "", "durable": True,
+    }})
+    monkeypatch.setattr(
+        plugin, "_agent_bridge_delivery_available", lambda: True)
+    monkeypatch.setattr(
+        plugin, "_dispatch_agent_bridge_notification", lambda *_: None)
+    notification = {
+        "notification_id": "SN-WEBUI", "watch_id": "WATCH-WEBUI",
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "event_type": "task.completed",
+        "internal_status": "awaiting_acceptance",
+    }
+
+    assert plugin._inject_notification(notification) is False
+    assert ctx.state.get("deliveries", {}) == {}
+
+
+def test_supervision_ack_clears_native_delivery_only_after_server_ack(
+        monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    delivery = {
+        "delegation_id": "deleg-native-1", "watch_id": "WATCH-WEBUI",
+        "task_id": "T-WEBUI", "session_key": "mt-webui-1",
+    }
+    ctx.state.set("deliveries", {"SN-WEBUI": delivery})
+
+    def fail_ack(action, **fields):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(plugin, "_call_agenthub", fail_ack)
+    assert plugin._ack({"notification_id": "SN-WEBUI"}).startswith("Error:")
+    assert ctx.state.get("deliveries") == {"SN-WEBUI": delivery}
+
+    monkeypatch.setattr(plugin, "_call_agenthub", lambda action, **fields: {
+        "status": "acked", "notification_id": fields["notification_id"],
+    })
+    assert json.loads(plugin._ack({
+        "notification_id": "SN-WEBUI"}))["status"] == "acked"
+    assert ctx.state.get("deliveries") == {}
 
 
 def test_notification_injection_drops_remote_payload():
@@ -215,6 +451,28 @@ def test_gateway_poll_filters_cli_owned_watches():
 
     assert list(plugin._owned_watches("gateway")) == ["WATCH-GW"]
     assert plugin._owned_watches("cli") == {}
+
+
+def test_gateway_poll_never_claims_agent_bridge_watches():
+    plugin = _load_plugin()
+    ctx = _Context(gateway=True)
+    plugin._set_context_for_tests(ctx)
+    ctx.state.set("watches", {
+        "WATCH-GW": {
+            "task_id": "T-GW", "context_id": "ctx-gw",
+            "session_key": "agent:main:discord:dm:1",
+            "owner_mode": "gateway", "owner_instance_id": "",
+            "durable": True,
+        },
+        "WATCH-WEBUI": {
+            "task_id": "T-WEBUI", "context_id": "ctx-webui",
+            "session_key": "mt-webui-1", "owner_mode": "agent_bridge",
+            "owner_instance_id": "", "durable": True,
+        },
+    })
+
+    assert list(plugin._owned_watches("gateway")) == ["WATCH-GW"]
+    assert list(plugin._owned_watches("agent_bridge")) == ["WATCH-WEBUI"]
 
 
 def test_stale_cli_watch_is_not_adopted_by_a_new_process():

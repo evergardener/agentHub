@@ -22,6 +22,7 @@ _ctx = None
 _poll_thread = None
 _poll_stop = threading.Event()
 _poll_lock = threading.Lock()
+_delivery_lock = threading.Lock()
 _poll_surface = ""
 _last_poll_skip_signature = None
 
@@ -83,10 +84,16 @@ def _cli_ref_available() -> bool | None:
 
 
 def _session_surface(session_key: str = "") -> str:
-    """Classify the current execution surface as gateway, CLI, or unsupported."""
+    """Classify the current execution surface and its supported wake route."""
     key = session_key or _current_session_key()
     platform = _session_env("HERMES_SESSION_PLATFORM")
     source = _session_env("HERMES_SESSION_SOURCE")
+    # hermes-web-ui runs a long-lived Python agent bridge.  It deliberately
+    # reports source=tui for prompt compatibility, but its ``mt...`` session
+    # is not an in-process CLI input queue.  The bridge owns a separate,
+    # durable async-completion queue, so classify it before the TUI aliases.
+    if platform == "agent_bridge":
+        return "agent_bridge"
     if source in _CLI_SOURCES or platform in _CLI_SOURCES:
         return "cli"
     if source in _NON_DELIVERING_SURFACES or \
@@ -107,8 +114,12 @@ def _session_surface(session_key: str = "") -> str:
 
 
 def _is_durable_route(surface: str, session_key: str) -> bool:
-    """Only canonical Gateway routes can survive the originating process."""
-    return surface == "gateway" and session_key.startswith("agent:")
+    """Return whether Hermes can recover this route after a process restart."""
+    return (
+        surface == "gateway" and session_key.startswith("agent:")
+    ) or (
+        surface == "agent_bridge" and bool(session_key)
+    )
 
 
 def _watch_record(*, task_id: str, context_id: str, session_key: str,
@@ -126,7 +137,7 @@ def _watch_record(*, task_id: str, context_id: str, session_key: str,
 
 def _watch_surface(watch: dict) -> str:
     value = str(watch.get("owner_mode") or "").strip().lower()
-    if value in {"gateway", "cli"}:
+    if value in {"gateway", "cli", "agent_bridge"}:
         return value
     # Legacy state had no ownership metadata.  Derive only enough information
     # to keep a Gateway poller from consuming an old CLI watch; legacy CLI
@@ -145,7 +156,7 @@ def _watch_is_durable(watch: dict) -> bool:
 def _owned_watches(surface: str | None = None) -> dict[str, dict]:
     """Return only watches this process is allowed to pull."""
     selected_surface = surface or _poll_surface
-    if selected_surface not in {"gateway", "cli"}:
+    if selected_surface not in {"gateway", "cli", "agent_bridge"}:
         return {}
     result = {}
     for watch_id, watch in _watches().items():
@@ -159,9 +170,46 @@ def _owned_watches(surface: str | None = None) -> dict[str, dict]:
     return result
 
 
+def _agent_bridge_delivery_available() -> bool:
+    """Feature-detect Hermes' durable WebUI completion dispatcher."""
+    try:
+        from tools.async_delegation import dispatch_async_delegation
+
+        return callable(dispatch_async_delegation)
+    except Exception:
+        return False
+
+
+def _native_async_dispatch(**kwargs) -> dict:
+    """Dispatch through Hermes' public durable async-completion API."""
+    from tools.async_delegation import dispatch_async_delegation
+
+    return dispatch_async_delegation(**kwargs)
+
+
+def _native_delivery_is_pending(delegation_id: str) -> bool:
+    """Return whether Hermes still owns an undelivered native completion."""
+    try:
+        from tools.async_delegation import get_durable_delegation
+
+        record = get_durable_delegation(delegation_id)
+    except Exception:
+        # Losing access to the durable ledger must not create duplicate turns.
+        # The existing record remains visible through supervision/status and a
+        # bridge restart can still restore the native completion.
+        return True
+    if not isinstance(record, dict):
+        return False
+    return record.get("delivery_state") == "pending" or record.get("state") in {
+        "running", "finalizing",
+    }
+
+
 def _delivery_surface_available(watch: dict) -> bool:
     """Preflight delivery before pulling, so a failed route keeps its row pending."""
     surface = _watch_surface(watch)
+    if surface == "agent_bridge":
+        return _agent_bridge_delivery_available()
     manager = getattr(_ctx, "_manager", None) if _ctx is not None else None
     if manager is None:
         # Test contexts provide inject_message directly.  Hermes PluginContext
@@ -177,6 +225,8 @@ def _delivery_surface_available(watch: dict) -> bool:
 
 def _delivery_label(watch: dict) -> str:
     surface = _watch_surface(watch)
+    if surface == "agent_bridge" and _watch_is_durable(watch):
+        return "agent-bridge-durable"
     if _watch_is_durable(watch):
         return "gateway-durable"
     if surface == "cli":
@@ -268,6 +318,19 @@ def _save_watches(watches: dict[str, dict]) -> None:
     _ctx.state.set("watches", watches)
 
 
+def _deliveries() -> dict[str, dict]:
+    if _ctx is None:
+        return {}
+    value = _ctx.state.get("deliveries", {})
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _save_deliveries(deliveries: dict[str, dict]) -> None:
+    if _ctx is None:
+        raise RuntimeError("agentHub supervisor plugin is not initialized")
+    _ctx.state.set("deliveries", deliveries)
+
+
 def _parse_create(args: Any, result: Any) -> tuple[str, str] | None:
     if not isinstance(args, dict) or not isinstance(result, str):
         return None
@@ -335,10 +398,10 @@ def _transform_tool_result(tool_name: str = "", args: Any = None,
         return result + (
             "\n\n[agentHub supervision unavailable: registration failed; "
             "do not describe this task as supervised]")
-    if _watch_is_durable(watch):
+    if _watch_is_durable(watch) and _delivery_surface_available(watch):
         marker = (
             f"[agentHub supervision active: watch_id={watch_id}; "
-            "delivery=gateway-durable]")
+            f"delivery={_delivery_label(watch)}]")
     elif _delivery_surface_available(watch):
         marker = (
             f"[agentHub supervision process-only: watch_id={watch_id}; "
@@ -372,6 +435,54 @@ def _safe_notification_message(notification: dict) -> str:
         "and never self-accept. After the event has been handled and reported, "
         "call agenthub_supervision_ack with the notification_id."
     )
+
+
+def _dispatch_agent_bridge_notification(
+        notification: dict, watch: dict) -> str | None:
+    """Publish an identifiers-only wake into Hermes WebUI's durable queue."""
+    session_key = str(watch.get("session_key") or "")
+    if not session_key:
+        return None
+    message = _safe_notification_message(notification)
+
+    def runner() -> dict:
+        return {
+            "status": "completed",
+            "summary": message,
+            "api_calls": 0,
+            "duration_seconds": 0,
+        }
+
+    result = _native_async_dispatch(
+        goal=(
+            "Handle agentHub lifecycle notification "
+            f"{notification.get('notification_id')} for task "
+            f"{notification.get('task_id')}"
+        ),
+        context=(
+            "Trusted identifiers-only supervisor wake. Retrieve authoritative "
+            "task state from agentHub before acting or reporting."
+        ),
+        toolsets=["a2a"],
+        role="agenthub-supervisor",
+        model=None,
+        session_key=session_key,
+        parent_session_id=session_key,
+        runner=runner,
+        origin_ui_session_id=session_key,
+        origin_session_id=session_key,
+    )
+    if not isinstance(result, dict) or result.get("status") != "dispatched":
+        logger.warning(
+            "agentHub WebUI durable dispatch rejected: notification_id=%s "
+            "watch_id=%s reason=%s",
+            notification.get("notification_id"), notification.get("watch_id"),
+            str(result.get("error") if isinstance(result, dict) else
+                "invalid_dispatch_result")[:240],
+        )
+        return None
+    delegation_id = result.get("delegation_id")
+    return delegation_id if isinstance(delegation_id, str) else None
 
 
 def _inject_notification(notification: dict) -> bool:
@@ -409,6 +520,46 @@ def _inject_notification(notification: dict) -> bool:
             watch.get("context_id"), watch.get("session_key"),
             _watch_surface(watch))
         return False
+    if _watch_surface(watch) == "agent_bridge":
+        # The agentHub outbox deliberately redelivers until Hermes ACKs after
+        # handling.  Persist the native delegation id immediately so repeated
+        # pulls do not create duplicate WebUI turns.
+        with _delivery_lock:
+            deliveries = _deliveries()
+            prior = deliveries.get(notification_id)
+            if isinstance(prior, dict):
+                delegation_id = str(prior.get("delegation_id") or "")
+                if delegation_id and _native_delivery_is_pending(delegation_id):
+                    return True
+                # A native completion was already delivered but Hermes did not
+                # ACK the agentHub outbox (for example its follow-up turn
+                # failed).  Permit a new durable wake instead of suppressing
+                # retries forever.
+                deliveries.pop(notification_id, None)
+            try:
+                delegation_id = _dispatch_agent_bridge_notification(
+                    notification, watch)
+            except Exception as exc:
+                logger.warning(
+                    "agentHub supervision injection failed: notification_id=%s "
+                    "watch_id=%s task_id=%s context_id=%s session_key=%s "
+                    "surface=agent_bridge reason=dispatch_exception "
+                    "error_type=%s",
+                    notification_id, watch_id, watch.get("task_id"),
+                    watch.get("context_id"), watch.get("session_key"),
+                    type(exc).__name__,
+                )
+                return False
+            if not delegation_id:
+                return False
+            deliveries[str(notification_id)] = {
+                "delegation_id": delegation_id,
+                "watch_id": watch_id,
+                "task_id": watch.get("task_id"),
+                "session_key": watch.get("session_key"),
+            }
+            _save_deliveries(deliveries)
+        return True
     try:
         accepted = bool(_ctx.inject_message(
             _safe_notification_message(notification),
@@ -479,7 +630,7 @@ def _poll_loop() -> None:
 def _ensure_polling(surface: str | None = None, **_: Any) -> None:
     global _poll_thread, _poll_surface
     resolved_surface = surface or _poll_surface or _session_surface()
-    if resolved_surface not in {"gateway", "cli"}:
+    if resolved_surface not in {"gateway", "cli", "agent_bridge"}:
         return
     _poll_surface = resolved_surface
     if _ctx is None or not _owned_watches(resolved_surface):
@@ -546,9 +697,14 @@ def _ack(args: dict, **_: Any) -> str:
     if not notification_id:
         return "Error: notification_id is required."
     try:
-        return json.dumps(_call_agenthub(
-            "supervision/ack", notification_id=notification_id),
-            ensure_ascii=False)
+        payload = _call_agenthub(
+            "supervision/ack", notification_id=notification_id)
+        with _delivery_lock:
+            deliveries = _deliveries()
+            if notification_id in deliveries:
+                deliveries.pop(notification_id, None)
+                _save_deliveries(deliveries)
+        return json.dumps(payload, ensure_ascii=False)
     except Exception as exc:
         return f"Error: supervision ACK failed — {exc}"
 

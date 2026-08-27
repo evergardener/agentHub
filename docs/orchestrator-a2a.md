@@ -155,8 +155,11 @@ Hermes control-plane 路径。
 
 qishuo profile-local `agenthub-supervisor` plugin 会在成功的 `tasks/create` 工具
 结果后自动登记 watch。canonical `agent:` Gateway route 会把 `watch_id` 与
-发起任务的 Gateway session、A2A `context_id` 持久绑定；CLI/TUI route 只在当前
-Hermes 进程内轮询和注入，进程退出后明确不可恢复，不得宣称 durable supervision。
+发起任务的 Gateway session、A2A `context_id` 持久绑定；Hermes WebUI 的
+`agent_bridge` route 使用原生 durable async-completion queue 将唤醒送回原
+`mt...` session。普通 CLI/TUI route 仍只在当前 Hermes 进程内轮询和注入，进程
+退出后明确不可恢复，不得宣称 durable supervision。Gateway poller 不得认领
+`agent_bridge` watch，WebUI route 也不得伪装成 `agent:` Gateway session。
 agentHub 对以下状态写入持久 outbox：委派审批、worker 原生
 交互、blocked、failed/cancelled，以及等待用户验收。Task 状态、告警和 outbox
 在 State Writer 的同一事务提交；写 outbox 失败时不会留下已前进却无人通知的状态。
@@ -167,7 +170,9 @@ Plugin 只轮询自己已知的 `watch_id`，服务端仍校验 authenticated pe
 `context_id`、`event_type` 和 `internal_status`，禁止包含 objective、worker 回复、
 工具参数或审批 payload，避免把远端内容直接注入 Hermes。Hermes 被唤醒后必须先用
 同一 `context_id` 调用 `tasks/get` 获取权威状态，再按上节权限处理，并在完成汇报
-后调用 plugin 的 `agenthub_supervision_ack`。`awaiting_user` 只能通知用户或等待
+后调用 plugin 的 `agenthub_supervision_ack`。同一 `notification_id` 在 ACK 前
+只创建一个 native async completion，dispatch 失败则保持 outbox 可重试。
+`awaiting_user` 只能通知用户或等待
 WebUI 操作；Hermes 不得据此自批。最终结果必须由用户显式 `tasks/accept`，不得由
 后台 supervisor 自动验收。
 

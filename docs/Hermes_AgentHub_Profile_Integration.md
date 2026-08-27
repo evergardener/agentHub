@@ -107,12 +107,14 @@ Kimi 停用时，`agents/list` 会标记 `enabled=false`；如用户仍指定 Ki
 - qishuo plugin doctor 通过，配置中仅该 profile 对 supervisor 开启
   `allow_gateway_injection`；全局 Hermes 配置未修改。
 - Gateway 创建任务后工具结果出现 `agentHub supervision active` 且
-  `delivery=gateway-durable`；CLI/TUI 只能出现 `process-only`，进程退出后不保证
+  `delivery=gateway-durable`；WebUI agent bridge 创建任务后出现
+  `delivery=agent-bridge-durable`，并通过 Hermes 原生 async-completion queue 回到
+  原 `mt...` session；普通 CLI/TUI 只能出现 `process-only`，进程退出后不保证
   唤醒。让任务进入批准、阻塞或等待验收时，可用的原 Hermes surface 在一个轮询
   周期内被唤醒并先调用 `tasks/get`。
 - 暂停 Hermes 超过一个租约周期后恢复，收到同一个 `notification_id`；ACK 后不再
-  重投。Hermes/profile 重启后只有 Gateway-durable watch 仍存在并继续监督；
-  process-only watch 必须重新注册。
+  重投。Hermes/profile 重启后 Gateway/agent-bridge durable watch 仍存在并继续
+  监督；process-only watch 必须重新注册。
 - 通知 envelope 不含 objective、worker 回复、tool args 或 approval payload；
   `awaiting_user` 不会被 Hermes 自批，等待验收也不会自动 `tasks/accept`。
 

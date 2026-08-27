@@ -47,6 +47,22 @@ def test_create_conversation_collaboration_and_task_link(conn):
     assert state_store.get_task(conn, task_id)["collaboration_id"] == collaboration_id
 
 
+@pytest.mark.parametrize(("statuses", "expected"), [
+    (["queued"], "ready"),
+    (["working", "awaiting_acceptance"], "executing"),
+    (["awaiting_acceptance", "accepted"], "awaiting_acceptance"),
+    (["accepted", "accepted"], "accepted"),
+    (["cancelled", "cancelled"], "cancelled"),
+    (["failed"], "needs_replan"),
+])
+def test_collaboration_phase_reducer_is_aggregate_and_order_independent(
+        statuses, expected):
+    assert collaboration_store.derive_phase_from_task_statuses(
+        statuses).value == expected
+    assert collaboration_store.derive_phase_from_task_statuses(
+        reversed(statuses)).value == expected
+
+
 def test_a2a_context_mapping_is_stable_and_peer_scoped(conn):
     first = collaboration_store.ensure_a2a_collaboration(
         conn, peer="qishuo", context_id="ctx-shared",

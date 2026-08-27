@@ -1,11 +1,12 @@
 name: agenthub-supervisor
-version: 1.1.0
+version: 1.2.0
 description: >
   Supervise agentHub tasks and wake an available originating qishuo delivery
   surface for approvals, failures, and result acceptance. Canonical Gateway
-  routes are durable; CLI/TUI routes are process-only and cannot be recovered
-  after that Hermes process exits. Remote worker content is never injected;
-  every wakeup requires an authoritative tasks/get call.
+  routes and WebUI agent-bridge async completions are durable; ordinary
+  CLI/TUI routes are process-only and cannot be recovered after that Hermes
+  process exits. Remote worker content is never injected; every wakeup requires
+  an authoritative tasks/get call.
 author: evergarden
 hooks:
   - transform_tool_result
