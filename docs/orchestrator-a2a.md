@@ -66,6 +66,14 @@ Hermes v0.20.4 的 `a2a_call` 不允许添加自定义 `metadata.agent`，因此
 {"agenthub":"v1","action":"tasks/create","agent":"dsh","access_mode":"read","title":"核验容器状态","summary":"只读获取状态并返回简洁报告。","objective":"完整未总结指令","project":"optional","workspace":"/absolute/project/path"}
 ```
 
+已结束任务后的执行性新要求必须创建关联的新任务，并继续使用原 context：
+
+```json
+{"agenthub":"v1","action":"tasks/create","agent":"dsh","parent_task_id":"T-...","access_mode":"read","title":"执行后续检查","summary":"根据用户后续要求执行独立检查。","objective":"完整后续要求","workspace":"/absolute/project/path"}
+```
+
+`parent_task_id` 只建立审计关系，不重开父任务，也不复用其原生 Agent Session。
+
 只读调查或状态查询应显式传入 `access_mode: "read"`。该字段只声明创建阶段
 的 read dispatch，不授予原生写权限；运行时仍必须由结构化 ActionIntent 严格
 门控，真实写入、删除、重启以及未知/无法结构化审计的命令继续走既有审批流。
@@ -195,12 +203,26 @@ Plugin 只轮询自己已知的 `watch_id`，服务端仍校验 authenticated pe
 `context_id`、`event_type` 和 `internal_status`，禁止包含 objective、worker 回复、
 工具参数或审批 payload，避免把远端内容直接注入 Hermes。Hermes 被唤醒后必须先用
 同一 `context_id` 调用 `tasks/get` 获取权威状态，再按上节权限处理，并在完成汇报
-后调用 plugin 的 `agenthub_supervision_ack`。同一 `notification_id` 在 ACK 前
+后调用 plugin 的 `agenthub_supervision_ack(notification_id=..., context_id=...)`。同一 `notification_id` 在 ACK 前
 只创建一个 native async completion，dispatch 失败则保持 outbox 可重试。
 `awaiting_user` 只能通知用户或等待 WebUI 操作；Hermes 不得据此自批。A2A peer
 身份不能证明某次用户决定，因此当前 `tasks/accept` / `tasks/request-rework` 对 A2A
 调用 fail closed；最终结果必须由用户在 WebUI 显式处理，不得由后台 supervisor
 自动验收。
+
+WebUI 发送给 Hermes 的后续消息同样走该持久 outbox。通知只增加 `message_id`，
+不携带正文。Hermes 使用同一 `context_id` 调用：
+
+```json
+{"agenthub":"v1","action":"conversations/messages/get","message_id":"M-..."}
+{"agenthub":"v1","action":"conversations/respond","message_id":"M-...","text":"答复或新任务信息"}
+```
+
+纯解释或总结由 Hermes 直接答复；需要执行时创建带 `parent_task_id` 的独立任务。
+服务端在响应落库前拒绝 ACK。已结束 Task 的 watch 仅作为原 Hermes 会话的路由
+锚点临时恢复，不改变 Task 终态，也不恢复已关闭的 Agent Session。
+因此 Task 终态后不得自动调用 `supervision/stop`；只有用户归档/删除整个会话、
+明确要求停止监督或安全撤销路由时才停止 watch。
 
 监督控制包供 profile plugin 使用，常规对话不应手写：
 
@@ -210,6 +232,9 @@ Plugin 只轮询自己已知的 `watch_id`，服务端仍校验 authenticated pe
 {"agenthub":"v1","action":"supervision/ack","notification_id":"SN-..."}
 {"agenthub":"v1","action":"supervision/stop","task_id":"T-..."}
 ```
+
+`supervision/ack` 的 A2A `message.contextId` 必须与通知中的原始
+`context_id` 一致；同一 peer 的其他会话也不能代为 ACK。
 
 `/agents/**` 经 Orchestrator 动态代理时同时携带两个不同用途的凭据：Bearer
 只认证 agentgateway，`X-Agent-Token` 只透传给 Adapter。Orchestrator 仅在

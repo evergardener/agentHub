@@ -85,7 +85,7 @@ def test_migrations_upgrade_existing_database(tmp_path):
         " VALUES ('T-old', 'queued', 'keep me', 'now', 'now');")
     conn.commit()
 
-    assert migrate(conn) == [4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+    assert migrate(conn) == [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     assert conn.execute(
         "SELECT objective FROM tasks WHERE id = 'T-old';").fetchone()[0] == "keep me"
     assert conn.execute(
@@ -99,6 +99,14 @@ def test_migrations_upgrade_existing_database(tmp_path):
         "SELECT name FROM sqlite_master WHERE type = 'table'"
         " AND name = 'supervision_outbox';"
     ).fetchone()[0] == "supervision_outbox"
+    outbox_columns = {
+        row[1] for row in conn.execute(
+            "PRAGMA table_info(supervision_outbox);")}
+    assert "message_id" in outbox_columns
+    assert conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+        " AND name = 'supervision_conversation_routes';"
+    ).fetchone()[0] == "supervision_conversation_routes"
     columns = {r[1] for r in conn.execute("PRAGMA table_info(tasks);")}
     assert "collaboration_id" in columns
     assert "plan_step_id" in columns
@@ -124,6 +132,37 @@ def test_migrations_upgrade_existing_database(tmp_path):
     ).fetchone() is not None
 
 
+def test_sqlite_migration_failure_rolls_back_for_safe_retry(
+        tmp_path, monkeypatch):
+    from state import db as db_module
+
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    (migrations / "001_initial.sql").write_text(
+        "CREATE TABLE sample (id INTEGER PRIMARY KEY);",
+        encoding="utf-8")
+    broken = migrations / "002_add_column.sql"
+    broken.write_text(
+        "ALTER TABLE sample ADD COLUMN detail TEXT; THIS IS NOT SQL;",
+        encoding="utf-8")
+    monkeypatch.setattr(db_module, "MIGRATIONS_DIR", migrations)
+    conn = sqlite3.connect(tmp_path / "retry.db")
+
+    with pytest.raises(sqlite3.OperationalError):
+        db_module.migrate(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(sample);")}
+    assert columns == {"id"}
+    assert [row[0] for row in conn.execute(
+        "SELECT version FROM schema_migrations ORDER BY version;")] == [1]
+
+    broken.write_text(
+        "ALTER TABLE sample ADD COLUMN detail TEXT;",
+        encoding="utf-8")
+    assert db_module.migrate(conn) == [2]
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(sample);")}
+    assert columns == {"id", "detail"}
+
+
 class _FakePg:
     backend = "pg"
 
@@ -135,6 +174,9 @@ class _FakePg:
 
     def commit(self):
         self.conn.commit()
+
+    def rollback(self):
+        self.conn.rollback()
 
 
 def _existing_pg() -> _FakePg:

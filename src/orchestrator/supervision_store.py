@@ -65,7 +65,7 @@ def register_watch(conn, *, peer: str, context_id: str,
     task_id = str(task_id or "").strip()
     if not peer or not context_id or not task_id:
         raise ValueError("peer, context_id and task_id are required")
-    _task_belongs_to_context(
+    task = _task_belongs_to_context(
         conn, task_id=task_id, peer=peer, context_id=context_id)
     existing = conn.execute(
         "SELECT * FROM supervision_watches WHERE peer = ? AND task_id = ?;",
@@ -84,6 +84,22 @@ def register_watch(conn, *, peer: str, context_id: str,
             "UPDATE supervision_watches SET context_id = ?, status = 'active',"
             " updated_at = ? WHERE id = ?;",
             (context_id, timestamp, watch_id))
+    conn.execute(
+        "INSERT INTO supervision_conversation_routes"
+        " (collaboration_id, peer, context_id, watch_id, created_at)"
+        " VALUES (?,?,?,?,?) ON CONFLICT(collaboration_id) DO NOTHING;",
+        (task["collaboration_id"], peer, context_id, watch_id, timestamp),
+    )
+    route = conn.execute(
+        "SELECT peer, context_id FROM supervision_conversation_routes"
+        " WHERE collaboration_id = ?;",
+        (task["collaboration_id"],),
+    ).fetchone()
+    if (route is None or route["peer"] != peer
+            or route["context_id"] != context_id):
+        conn.rollback()
+        raise PermissionError(
+            "collaboration is already bound to another Hermes route")
     sync_watch(conn, watch_id, commit=False)
     conn.commit()
     saved = _as_dict(conn.execute(
@@ -109,16 +125,138 @@ def _pending_interaction_ids(conn, task_id: str) -> list[str]:
 
 
 def _enqueue(conn, *, watch_id: str, task_id: str, dedupe_key: str,
-             event_type: str, internal_status: str) -> None:
+             event_type: str, internal_status: str,
+             message_id: str | None = None):
     timestamp = now_iso()
     notification_id = f"SN-{uuid.uuid4().hex[:20]}"
     conn.execute(
         "INSERT INTO supervision_outbox (id, watch_id, task_id, dedupe_key,"
-        " event_type, internal_status, status, attempts, available_at,"
-        " created_at) VALUES (?,?,?,?,?,?,'pending',0,?,?)"
+        " event_type, internal_status, message_id, status, attempts,"
+        " available_at, created_at) VALUES (?,?,?,?,?,?,?,'pending',0,?,?)"
         " ON CONFLICT(watch_id, dedupe_key) DO NOTHING;",
         (notification_id, watch_id, task_id, dedupe_key, event_type,
-         internal_status, timestamp, timestamp))
+         internal_status, message_id, timestamp, timestamp))
+    return conn.execute(
+        "SELECT * FROM supervision_outbox WHERE watch_id = ?"
+        " AND dedupe_key = ?;",
+        (watch_id, dedupe_key),
+    ).fetchone()
+
+
+def enqueue_user_message(conn, *, collaboration_id: str,
+                         message_id: str) -> dict:
+    """Queue one identifiers-only wake for the originating Hermes context.
+
+    A completed task remains immutable.  Its supervision watch is reused only
+    as a durable route back to the originating peer/session; the user message
+    itself remains collaboration-scoped and can lead Hermes to answer directly
+    or create a separate follow-up task.
+    """
+    from orchestrator import collaboration_store
+
+    collaboration = collaboration_store.get_collaboration(
+        conn, collaboration_id)
+    if collaboration is None:
+        raise KeyError(f"collaboration not found: {collaboration_id}")
+    conversation = collaboration_store.get_conversation(
+        conn, collaboration["conversation_id"])
+    created_by = str(conversation["created_by"] if conversation else "")
+    if not created_by.startswith("a2a:"):
+        raise ValueError(
+            "collaboration has no external Hermes delivery route")
+    peer = created_by.removeprefix("a2a:")
+    message = conn.execute(
+        "SELECT * FROM conversation_messages WHERE id = ?;",
+        (message_id,),
+    ).fetchone()
+    if (message is None or message["collaboration_id"] != collaboration_id
+            or message["sender_type"] != "user"
+            or message["recipient_type"] != "hermes"
+            or message["recipient_id"] != "hermes"
+            or message["message_type"] != "user.comment"):
+        raise PermissionError("message is not a user message for Hermes")
+    if message["delivery_status"] == "delivered":
+        return {
+            "message_id": message_id,
+            "delivery_status": "delivered",
+        }
+    route = conn.execute(
+        "SELECT r.watch_id FROM supervision_conversation_routes r"
+        " WHERE r.collaboration_id = ? AND r.peer = ?;",
+        (collaboration_id, peer),
+    ).fetchone()
+    if route is None:
+        # Lazy, deterministic backfill for conversations created before
+        # migration 014.  Once selected, this route never drifts to a later
+        # task/session in the same A2A context.
+        candidate = conn.execute(
+            "SELECT w.id, w.context_id, w.created_at"
+            " FROM supervision_watches w JOIN tasks t ON t.id = w.task_id"
+            " WHERE t.collaboration_id = ? AND w.peer = ?"
+            " AND w.status != 'stopped'"
+            " ORDER BY w.created_at, w.id LIMIT 1;",
+            (collaboration_id, peer),
+        ).fetchone()
+        if candidate is not None:
+            conn.execute(
+                "INSERT INTO supervision_conversation_routes"
+                " (collaboration_id, peer, context_id, watch_id, created_at)"
+                " VALUES (?,?,?,?,?)"
+                " ON CONFLICT(collaboration_id) DO NOTHING;",
+                (collaboration_id, peer, candidate["context_id"],
+                 candidate["id"], candidate["created_at"]),
+            )
+            route = conn.execute(
+                "SELECT watch_id FROM supervision_conversation_routes"
+                " WHERE collaboration_id = ? AND peer = ?;",
+                (collaboration_id, peer),
+            ).fetchone()
+    watch = (conn.execute(
+        "SELECT * FROM supervision_watches WHERE id = ?"
+        " AND peer = ? AND status IN ('active', 'completed');",
+        (route["watch_id"], peer),
+    ).fetchone() if route is not None else None)
+    if watch is None:
+        raise ValueError(
+            "originating Hermes session has no registered delivery route")
+    expected = collaboration_store.a2a_context_ids(
+        peer=peer, context_id=watch["context_id"])
+    if expected["collaboration_id"] != collaboration_id:
+        raise PermissionError("Hermes route does not own this collaboration")
+    conn.execute(
+        "UPDATE supervision_watches SET status = 'active', updated_at = ?"
+        " WHERE id = ?;",
+        (now_iso(), watch["id"]),
+    )
+    outbox = _enqueue(
+        conn,
+        watch_id=watch["id"],
+        task_id=watch["task_id"],
+        dedupe_key=f"conversation-message:{message_id}",
+        event_type="conversation.user_message",
+        internal_status="message_pending",
+        message_id=message_id,
+    )
+    if (outbox is None or outbox["message_id"] != message_id
+            or outbox["event_type"] != "conversation.user_message"):
+        raise PermissionError("message delivery dedupe conflict")
+    if outbox["status"] not in {"pending", "inflight"}:
+        raise ValueError(
+            f"message delivery is not retryable: {outbox['status']}")
+    conn.execute(
+        "UPDATE conversation_messages SET delivery_status = 'queued'"
+        " WHERE id = ?;",
+        (message_id,),
+    )
+    conn.commit()
+    return {
+        "message_id": message_id,
+        "watch_id": watch["id"],
+        "task_id": watch["task_id"],
+        "peer": peer,
+        "context_id": watch["context_id"],
+        "delivery_status": "queued",
+    }
 
 
 def sync_watch(conn, watch_id: str, *, commit: bool = True) -> None:
@@ -183,9 +321,16 @@ def sync_watch(conn, watch_id: str, *, commit: bool = True) -> None:
             dedupe_key=f"terminal:{status}:{task['updated_at']}",
             event_type=f"task.{status}", internal_status=status)
     elif status == "accepted":
-        conn.execute(
-            "UPDATE supervision_watches SET status = 'completed',"
-            " updated_at = ? WHERE id = ?;", (now_iso(), watch_id))
+        pending_message = conn.execute(
+            "SELECT 1 FROM supervision_outbox WHERE watch_id = ?"
+            " AND event_type = 'conversation.user_message'"
+            " AND status IN ('pending', 'inflight') LIMIT 1;",
+            (watch_id,),
+        ).fetchone()
+        if pending_message is None:
+            conn.execute(
+                "UPDATE supervision_watches SET status = 'completed',"
+                " updated_at = ? WHERE id = ?;", (now_iso(), watch_id))
     if commit:
         conn.commit()
 
@@ -238,7 +383,7 @@ def pull_notifications(conn, *, peer: str, watch_ids: Iterable[str],
             (attempts, lease_until, row["id"], current_iso, current_iso))
         if claimed.rowcount != 1:
             continue
-        public.append({
+        item = {
             "notification_id": row["id"],
             "watch_id": row["watch_id"],
             "task_id": row["task_id"],
@@ -246,30 +391,61 @@ def pull_notifications(conn, *, peer: str, watch_ids: Iterable[str],
             "event_type": row["event_type"],
             "internal_status": row["internal_status"],
             "created_at": row["created_at"],
-        })
+        }
+        if row["message_id"]:
+            item["message_id"] = row["message_id"]
+        public.append(item)
     conn.commit()
     return public
 
 
-def acknowledge_notification(conn, *, peer: str,
+def acknowledge_notification(conn, *, peer: str, context_id: str,
                              notification_id: str) -> dict:
+    if (not isinstance(context_id, str) or not context_id.strip()
+            or len(context_id.strip()) > 512):
+        raise ValueError("invalid context_id")
+    context_id = context_id.strip()
     if not isinstance(notification_id, str) or not \
             _NOTIFICATION_ID_RE.fullmatch(notification_id):
         raise ValueError("invalid notification_id")
     row = conn.execute(
-        "SELECT o.*, w.peer FROM supervision_outbox o"
+        "SELECT o.*, w.peer, w.context_id FROM supervision_outbox o"
         " JOIN supervision_watches w ON w.id = o.watch_id"
         " WHERE o.id = ?;", (notification_id,)).fetchone()
     if row is None:
         raise KeyError(f"notification not found: {notification_id}")
-    if row["peer"] != peer:
-        raise PermissionError("notification does not belong to authenticated peer")
+    if row["peer"] != peer or row["context_id"] != context_id:
+        raise PermissionError(
+            "notification does not belong to authenticated peer/context")
+    if row["event_type"] == "conversation.user_message":
+        response = conn.execute(
+            "SELECT response.id FROM conversation_messages response"
+            " JOIN conversation_messages original"
+            " ON original.id = response.parent_message_id"
+            " WHERE original.id = ?"
+            " AND response.conversation_id = original.conversation_id"
+            " AND response.collaboration_id = original.collaboration_id"
+            " AND response.sender_type = 'hermes'"
+            " AND response.sender_id = ?"
+            " AND response.recipient_type = 'user'"
+            " AND response.recipient_id = 'user'"
+            " AND response.message_type = 'llm.assistant' LIMIT 1;",
+            (row["message_id"], peer),
+        ).fetchone()
+        if response is None:
+            raise ValueError(
+                "Hermes response is required before message notification ACK")
     if row["status"] != "acknowledged":
-        conn.execute(
-            "UPDATE supervision_outbox SET status = 'acknowledged',"
-            " acknowledged_at = ?, acknowledged_by = ?, lease_until = NULL"
-            " WHERE id = ?;", (now_iso(), peer, notification_id))
-        conn.commit()
+        try:
+            conn.execute(
+                "UPDATE supervision_outbox SET status = 'acknowledged',"
+                " acknowledged_at = ?, acknowledged_by = ?, lease_until = NULL"
+                " WHERE id = ?;", (now_iso(), peer, notification_id))
+            sync_watch(conn, row["watch_id"], commit=False)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     return {"notification_id": notification_id, "status": "acknowledged"}
 
 

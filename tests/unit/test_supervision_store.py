@@ -52,6 +52,136 @@ def test_pull_lease_retries_without_duplicate_outbox_rows(tmp_path):
         "SELECT COUNT(*) FROM supervision_outbox;").fetchone()[0] == 1
 
 
+def test_completed_task_watch_routes_user_message_without_reopening_task(
+        tmp_path):
+    conn, watch = _watched_task(tmp_path)
+    for status in (
+        state_store.TaskStatus.ASSIGNED,
+        state_store.TaskStatus.WORKING,
+        state_store.TaskStatus.AWAITING_ACCEPTANCE,
+        state_store.TaskStatus.ACCEPTED,
+    ):
+        state_store.transition_task(conn, "T-SUPERVISED", status)
+    supervision_store.sync_watch(conn, watch["watch_id"])
+    assert conn.execute(
+        "SELECT status FROM supervision_watches WHERE id = ?;",
+        (watch["watch_id"],),
+    ).fetchone()["status"] == "completed"
+
+    message = collaboration_store.append_user_message_to_hermes(
+        conn,
+        collaboration_id=collaboration_store.a2a_context_ids(
+            peer="qishuo", context_id="ctx-supervised")["collaboration_id"],
+        user_id="user",
+        content={"text": "请解释结果；如需执行则创建后续任务"},
+    )
+    delivery = supervision_store.enqueue_user_message(
+        conn,
+        collaboration_id=message["collaboration_id"],
+        message_id=message["id"],
+    )
+
+    assert delivery["task_id"] == "T-SUPERVISED"
+    assert state_store.get_task(conn, "T-SUPERVISED")["status"] == "accepted"
+    notifications = supervision_store.pull_notifications(
+        conn, peer="qishuo", watch_ids=[watch["watch_id"]])
+    user_wake = next(
+        item for item in notifications
+        if item["event_type"] == "conversation.user_message")
+    assert user_wake["message_id"] == message["id"]
+    assert "请解释结果" not in str(user_wake)
+
+    collaboration_store.append_message(
+        conn,
+        conversation_id=message["conversation_id"],
+        collaboration_id=message["collaboration_id"],
+        sender_type="hermes",
+        sender_id="other-peer",
+        recipient_type="user",
+        recipient_id="user",
+        message_type="llm.assistant",
+        content={"role": "assistant", "content": "伪造响应"},
+        parent_message_id=message["id"],
+    )
+
+    try:
+        supervision_store.acknowledge_notification(
+            conn, peer="qishuo", context_id="ctx-supervised",
+            notification_id=user_wake["notification_id"])
+    except ValueError as exc:
+        assert "response is required" in str(exc)
+    else:
+        raise AssertionError("message ACK must fail before a Hermes response")
+
+    response = collaboration_store.record_a2a_hermes_response(
+        conn,
+        peer="qishuo",
+        context_id="ctx-supervised",
+        message_id=message["id"],
+        text="这是结果说明，不需要继续执行。",
+    )
+    assert response["parent_message_id"] == message["id"]
+    acknowledged = supervision_store.acknowledge_notification(
+        conn, peer="qishuo", context_id="ctx-supervised",
+        notification_id=user_wake["notification_id"])
+    assert acknowledged["status"] == "acknowledged"
+    assert conn.execute(
+        "SELECT delivery_status FROM conversation_messages WHERE id = ?;",
+        (message["id"],),
+    ).fetchone()["delivery_status"] == "delivered"
+    assert conn.execute(
+        "SELECT status FROM supervision_watches WHERE id = ?;",
+        (watch["watch_id"],),
+    ).fetchone()["status"] == "completed"
+
+
+def test_conversation_message_uses_stable_first_route(tmp_path):
+    conn, first = _watched_task(tmp_path)
+    collaboration_id = collaboration_store.a2a_context_ids(
+        peer="qishuo", context_id="ctx-supervised")["collaboration_id"]
+    state_store.create_task(
+        conn, task_id="T-FOLLOWUP", objective="follow-up",
+        created_by="qishuo", assigned_to="codex",
+        collaboration_id=collaboration_id)
+    second = supervision_store.register_watch(
+        conn, peer="qishuo", context_id="ctx-supervised",
+        task_id="T-FOLLOWUP")
+    assert second["watch_id"] != first["watch_id"]
+    message = collaboration_store.append_user_message_to_hermes(
+        conn, collaboration_id=collaboration_id, user_id="user",
+        content={"text": "继续讨论，不要漂移到其他 Hermes Session"})
+
+    delivery = supervision_store.enqueue_user_message(
+        conn, collaboration_id=collaboration_id, message_id=message["id"])
+
+    assert delivery["watch_id"] == first["watch_id"]
+    assert delivery["task_id"] == "T-SUPERVISED"
+
+
+def test_stopped_conversation_route_cannot_be_reactivated(tmp_path):
+    conn, watch = _watched_task(tmp_path)
+    supervision_store.stop_watch(
+        conn, peer="qishuo", task_id="T-SUPERVISED")
+    collaboration_id = collaboration_store.a2a_context_ids(
+        peer="qishuo", context_id="ctx-supervised")["collaboration_id"]
+    message = collaboration_store.append_user_message_to_hermes(
+        conn, collaboration_id=collaboration_id, user_id="user",
+        content={"text": "不应绕过显式停止"})
+
+    try:
+        supervision_store.enqueue_user_message(
+            conn, collaboration_id=collaboration_id,
+            message_id=message["id"])
+    except ValueError as exc:
+        assert "registered delivery route" in str(exc)
+    else:
+        raise AssertionError("a stopped route must remain stopped")
+    assert conn.execute(
+        "SELECT status FROM supervision_watches WHERE id = ?;",
+        (watch["watch_id"],),
+    ).fetchone()["status"] == "stopped"
+
+
 def test_legacy_completed_wakeup_uses_canonical_acceptance_status(tmp_path):
     conn, watch = _watched_task(tmp_path)
     for status in (

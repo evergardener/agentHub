@@ -166,6 +166,19 @@ def _migration_versions(conn) -> tuple[Path, set[int], list[int]]:
     return migrations_dir, applied, [v for v in available if v not in applied]
 
 
+def _sql_statements(sql: str):
+    """Split plain migrations without breaking comments or quoted semicolons."""
+    buffer = ""
+    for char in sql:
+        buffer += char
+        if char == ";" and sqlite3.complete_statement(buffer):
+            if buffer.strip():
+                yield buffer.strip()
+            buffer = ""
+    if buffer.strip():
+        yield buffer.strip()
+
+
 def _validate_migration_backup(pending: list[int], applied: set[int]) -> Path | None:
     from common import config as cfg
 
@@ -216,13 +229,15 @@ def migrate(conn) -> list[int]:
             if version in applied:
                 continue
             sql = path.read_text(encoding="utf-8")
-            if pg:
-                # psycopg 单语句执行：按分号切（迁移 DDL 内无过程体）
-                for stmt in sql.split(";"):
-                    if stmt.strip():
-                        conn.execute(stmt)
-            else:
-                conn.executescript(sql)
+            if not pg:
+                # sqlite3.executescript() implicitly commits before running,
+                # which can leave a half-applied ALTER when a later statement
+                # fails.  All project migrations are plain statements (no
+                # procedure bodies), so execute them individually inside one
+                # explicit transaction just like PostgreSQL.
+                conn.execute("BEGIN;")
+            for stmt in _sql_statements(sql):
+                conn.execute(stmt)
             conn.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?);",
                 (version, now_iso()),
@@ -230,6 +245,7 @@ def migrate(conn) -> list[int]:
             conn.commit()
             newly.append(version)
     except Exception:
+        conn.rollback()
         if consuming_path is not None and consuming_path.exists():
             consuming_path.replace(receipt_path)
         raise

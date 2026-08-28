@@ -23,6 +23,7 @@
                   （精确动作；重复/晚到/终态返回稳定错误，不重复委派）
     interactions/get params.interaction_id → pending native interaction detail
     interactions/respond params.interaction_id, outcome → one-time response
+    conversations/messages/get + conversations/respond → WebUI 后续消息取回/回写
                   supervision/register|pull|ack|stop → qishuo 原会话的持久异步监督；
                   仅返回任务/事件标识，不返回 worker 内容
 
@@ -145,6 +146,7 @@ def _hub_command(text: str) -> tuple[dict | None, str | None]:
             "tasks/approve", "tasks/reject", "tasks/accept",
             "tasks/request-rework", "interactions/respond",
             "interactions/get",
+            "conversations/messages/get", "conversations/respond",
             "supervision/register", "supervision/pull",
             "supervision/ack", "supervision/stop"}:
         return None, f"未知 agentHub action: {action}"
@@ -507,7 +509,7 @@ def create_app(tm: TaskManager | None = None,
             "name": "agenthub-orchestrator",
             "description": "agentHub 编排执行平面：任务委派、审批门禁、"
                            "持久监督、产物核验、事件审计。",
-            "version": "0.3.0",
+            "version": "0.3.1",
             "url": base,
             "supportedInterfaces": [
                 # A2A clients select this URL and POST JSON-RPC to it verbatim.
@@ -529,7 +531,8 @@ def create_app(tm: TaskManager | None = None,
                                 "interactions/respond 按 ActionIntent 路由"},
                 {"id": "durable-supervision",
                  "description": "peer/context 隔离的持久 watch 与租约 outbox；"
-                                "为原 Hermes 会话提供审批、失败和验收唤醒"},
+                                "为原 Hermes 会话提供审批、失败、验收和"
+                                "用户后续消息唤醒"},
             ],
         }
 
@@ -629,6 +632,13 @@ def create_app(tm: TaskManager | None = None,
         metadata = params.get("message", {}).get("metadata", {}) or {}
         text = _extract_text(params).strip()
         context_id = params.get("message", {}).get("contextId")
+        if context_id is not None:
+            if (not isinstance(context_id, str)
+                    or not context_id.strip() or len(context_id.strip()) > 512):
+                return _error(
+                    rpc_id, -32602,
+                    "message.contextId 必须是 1-512 字符的字符串")
+            context_id = context_id.strip()
         task_id = metadata.get("taskId")
         if task_id:
             if v1:
@@ -720,6 +730,51 @@ def create_app(tm: TaskManager | None = None,
                     context_id=context_id,
                     wrapped=True,
                 )
+            if action in {
+                    "conversations/messages/get", "conversations/respond"}:
+                from orchestrator import collaboration_store
+
+                message_id = command.get("message_id")
+                if (not isinstance(message_id, str)
+                        or not message_id.strip() or len(message_id) > 128):
+                    return _error(rpc_id, -32602, "message_id 必填")
+                if not context_id:
+                    return _error(
+                        rpc_id, -32602,
+                        f"{action} 必须携带 contextId")
+                try:
+                    if action == "conversations/messages/get":
+                        payload = {
+                            "message": collaboration_store.get_a2a_user_message(
+                                tm.conn,
+                                peer=identity["peer"],
+                                context_id=context_id,
+                                message_id=message_id.strip(),
+                            )
+                        }
+                    else:
+                        response_text = command.get("text")
+                        response = (
+                            collaboration_store.record_a2a_hermes_response(
+                                tm.conn,
+                                peer=identity["peer"],
+                                context_id=context_id,
+                                message_id=message_id.strip(),
+                                text=response_text,
+                            )
+                        )
+                        payload = {
+                            "status": "responded",
+                            "message_id": message_id.strip(),
+                            "response_message_id": response["id"],
+                        }
+                except PermissionError as exc:
+                    return _error(rpc_id, -32003, str(exc))
+                except (KeyError, TypeError, ValueError) as exc:
+                    return _error(rpc_id, -32602, str(exc))
+                message = _text_message(
+                    json.dumps(payload, ensure_ascii=False), context_id)
+                return _result(rpc_id, {"message": message})
             if action.startswith("supervision/"):
                 from orchestrator import supervision_store
 
@@ -752,6 +807,7 @@ def create_app(tm: TaskManager | None = None,
                         payload = supervision_store.acknowledge_notification(
                             tm.conn,
                             peer=identity["peer"],
+                            context_id=context_id,
                             notification_id=command.get("notification_id"),
                         )
                     else:
@@ -782,6 +838,7 @@ def create_app(tm: TaskManager | None = None,
                 "model": command.get("model"),
                 "reasoning_effort": command.get("reasoning_effort"),
                 "access_mode": command.get("access_mode"),
+                "parent_task_id": command.get("parent_task_id"),
             }
         else:
             claimed = (metadata.get("agent") or "").strip()
@@ -852,9 +909,33 @@ def create_app(tm: TaskManager | None = None,
                 return _error(rpc_id, -32602, str(exc))
             collaboration_id = a2a_context["collaboration_id"]
 
+        parent_task_id = metadata.get("parent_task_id")
+        if parent_task_id is not None:
+            if (identity.get("kind") != "hub"
+                    or not isinstance(parent_task_id, str)
+                    or not parent_task_id.strip()):
+                return _error(
+                    rpc_id, -32602,
+                    "parent_task_id 仅支持同一 Hermes context 内的任务")
+            from orchestrator import collaboration_store
+
+            try:
+                collaboration_store.require_a2a_task(
+                    tm.conn,
+                    task_id=parent_task_id.strip(),
+                    peer=identity["peer"],
+                    context_id=context_id,
+                )
+            except PermissionError as exc:
+                return _error(rpc_id, -32003, str(exc))
+            except (KeyError, TypeError, ValueError) as exc:
+                return _error(rpc_id, -32602, str(exc))
+            parent_task_id = parent_task_id.strip()
+
         tid = tm.create_task(
             text,
             project=metadata.get("project"),
+            parent_id=parent_task_id,
             collaboration_id=collaboration_id,
             context={
                 **({"display_title": display_title}
@@ -871,6 +952,8 @@ def create_app(tm: TaskManager | None = None,
         if a2a_context is not None:
             from orchestrator import collaboration_store
 
+            collaboration = collaboration_store.get_collaboration(
+                tm.conn, collaboration_id)
             collaboration_store.append_message(
                 tm.conn,
                 conversation_id=a2a_context["conversation_id"],
@@ -895,8 +978,10 @@ def create_app(tm: TaskManager | None = None,
                        if runtime_config else {}),
                     **({"access_mode": access_mode}
                        if access_mode else {}),
+                    **({"parent_task_id": parent_task_id}
+                       if parent_task_id else {}),
                 },
-                based_on_revision=1,
+                based_on_revision=collaboration["context_revision"],
                 idempotency_key=f"a2a-task-request:{tid}",
             )
             _record(

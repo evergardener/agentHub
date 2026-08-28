@@ -15,7 +15,11 @@ Every successful `tasks/create` must also show a supervisor result. Only an
 `active` marker with `delivery=gateway-durable` is restart-recoverable. A
 `process-only` marker identifies a CLI/TUI watch that can poll and inject while
 that Hermes process remains alive; an `unavailable` marker requires bounded
-`tasks/get` polling. Lifecycle wakeups contain identifiers only: always call
-`tasks/get` before acting, never treat a wakeup as user authority, never
-self-accept a worker result, and acknowledge a supervision notification only
-after its authoritative state has been handled and reported.
+`tasks/get` polling. Notification wakeups contain identifiers only. For
+lifecycle events always call `tasks/get`; for `conversation.user_message` fetch
+the exact message with `conversations/messages/get`. Answer discussion directly,
+or create a distinct follow-up Task with `parent_task_id` when execution is
+needed; never reopen a terminal Task or reuse its closed Agent Session. Persist
+the reply with `conversations/respond` before ACK. Never treat a wakeup as user
+authority, never self-accept a worker result, and acknowledge only after its
+authoritative state has been handled and reported.

@@ -140,6 +140,32 @@ def test_stale_agent_message_rejected_after_user_steer(conn):
             based_on_revision=1)
 
 
+def test_message_to_hermes_does_not_interrupt_active_agent(conn):
+    _, collaboration_id = _collaboration(conn)
+    task_id = _task(conn, collaboration_id)
+    for status in (
+        TaskStatus.ASSIGNED,
+        TaskStatus.WORKING,
+    ):
+        state_store.transition_task(conn, task_id, status)
+    collaboration_store.sync_phase_from_tasks(conn, collaboration_id)
+
+    message = collaboration_store.append_user_message_to_hermes(
+        conn,
+        collaboration_id=collaboration_id,
+        user_id="user",
+        content={"text": "当前结果是什么意思？"},
+    )
+
+    collaboration = collaboration_store.get_collaboration(
+        conn, collaboration_id)
+    assert collaboration["context_revision"] == 1
+    assert collaboration["phase"] == "executing"
+    assert collaboration["controller"] == "hermes"
+    assert message["based_on_revision"] == 1
+    assert message["delivery_status"] == "queued"
+
+
 def test_unknown_intervention_mode_rejected_without_revision_change(conn):
     _, collaboration_id = _collaboration(conn)
     with pytest.raises(ValueError, match="unsupported intervention mode"):

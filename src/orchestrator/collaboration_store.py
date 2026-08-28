@@ -514,18 +514,19 @@ def _insert_message(conn, *, conversation_id: str,
                     parent_message_id: str | None = None,
                     based_on_revision: int | None = None,
                     idempotency_key: str | None = None,
-                    visibility: str = "participants") -> None:
+                    visibility: str = "participants",
+                    delivery_status: str = "persisted") -> None:
     conn.execute(
         "INSERT INTO conversation_messages (id, conversation_id,"
         " collaboration_id, task_id, agent_id, sender_type, sender_id,"
         " recipient_type, recipient_id, message_type, content_json,"
         " parent_message_id, based_on_revision, sequence, delivery_status,"
         " visibility, redaction_status, idempotency_key, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'persisted',?,'none',?,?);",
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'none',?,?);",
         (message_id, conversation_id, collaboration_id, task_id, agent_id,
          sender_type, sender_id, recipient_type, recipient_id, message_type,
          _json(content), parent_message_id, based_on_revision, sequence,
-         visibility, idempotency_key, now_iso()),
+         delivery_status, visibility, idempotency_key, now_iso()),
     )
 
 
@@ -542,6 +543,7 @@ def append_message(conn, *, conversation_id: str,
                    based_on_revision: int | None = None,
                    idempotency_key: str | None = None,
                    visibility: str = "participants",
+                   delivery_status: str = "persisted",
                    commit: bool = True):
     if idempotency_key:
         existing = conn.execute(
@@ -570,6 +572,7 @@ def append_message(conn, *, conversation_id: str,
             message_type=message_type, parent_message_id=parent_message_id,
             based_on_revision=based_on_revision,
             idempotency_key=idempotency_key, visibility=visibility,
+            delivery_status=delivery_status,
         )
         _audit(
             conn, "conversation.message.created", task_id=task_id,
@@ -600,12 +603,44 @@ def append_message(conn, *, conversation_id: str,
     ).fetchone()
 
 
+def append_user_message_to_hermes(
+        conn, *, collaboration_id: str, user_id: str,
+        content: dict | list | str,
+        idempotency_key: str | None = None,
+        delivery_status: str = "queued",
+        commit: bool = True):
+    """Append a conversation message without steering or invalidating a run.
+
+    Hermes decides later whether the message is discussion or requires a new
+    follow-up Task.  Until then it must not change collaboration phase,
+    controller, or the revision used to gate the current Agent session.
+    """
+    conversation_id, revision = _current_revision(conn, collaboration_id)
+    return append_message(
+        conn,
+        conversation_id=conversation_id,
+        collaboration_id=collaboration_id,
+        sender_type="user",
+        sender_id=user_id,
+        recipient_type="hermes",
+        recipient_id="hermes",
+        message_type="user.comment",
+        content=content,
+        based_on_revision=revision,
+        idempotency_key=idempotency_key,
+        delivery_status=delivery_status,
+        commit=commit,
+    )
+
+
 def record_user_intervention(conn, *, collaboration_id: str,
                              user_id: str, mode: str,
                              content: dict | list | str,
                              task_id: str | None = None,
                              agent_id: str | None = None,
-                             idempotency_key: str | None = None):
+                             idempotency_key: str | None = None,
+                             delivery_status: str = "persisted",
+                             commit: bool = True):
     """Persist an intervention and atomically advance context revision."""
     try:
         intervention_mode = InterventionMode(mode)
@@ -660,6 +695,7 @@ def record_user_intervention(conn, *, collaboration_id: str,
             message_type=f"user.{intervention_mode.value}",
             based_on_revision=revision,
             idempotency_key=idempotency_key,
+            delivery_status=delivery_status,
         )
         _audit(
             conn, "conversation.message.created", task_id=task_id,
@@ -683,13 +719,105 @@ def record_user_intervention(conn, *, collaboration_id: str,
                 "context_revision": revision,
                 "phase": phase,
             })
-        conn.commit()
+        if commit:
+            conn.commit()
     except Exception:
         conn.rollback()
         raise
     return conn.execute(
         "SELECT * FROM conversation_messages WHERE id = ?;", (message_id,)
     ).fetchone()
+
+
+def get_a2a_user_message(conn, *, peer: str, context_id: str,
+                         message_id: str) -> dict:
+    """Return one bounded user-to-Hermes message after ownership checks."""
+    mapping = a2a_context_ids(peer=peer, context_id=context_id)
+    row = conn.execute(
+        "SELECT * FROM conversation_messages WHERE id = ?;",
+        (message_id,),
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"message not found: {message_id}")
+    if (row["conversation_id"] != mapping["conversation_id"]
+            or row["collaboration_id"] != mapping["collaboration_id"]
+            or row["sender_type"] != "user"
+            or row["recipient_type"] != "hermes"
+            or row["recipient_id"] != "hermes"
+            or row["message_type"] != "user.comment"):
+        raise PermissionError("message does not belong to this peer/context")
+    try:
+        content = json.loads(row["content_json"])
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("message content is invalid") from exc
+    text = content.get("text") if isinstance(content, dict) else None
+    if not isinstance(text, str) or not text.strip() or len(text) > 20000:
+        raise ValueError("message text is invalid")
+    return {
+        "message_id": row["id"],
+        "collaboration_id": row["collaboration_id"],
+        "conversation_id": row["conversation_id"],
+        "sequence": row["sequence"],
+        "text": text,
+        "delivery_status": row["delivery_status"],
+        "created_at": row["created_at"],
+    }
+
+
+def record_a2a_hermes_response(conn, *, peer: str, context_id: str,
+                               message_id: str, text: str):
+    """Persist one idempotent Hermes response to a WebUI user message."""
+    if not isinstance(text, str) or not text.strip() or len(text) > 20000:
+        raise ValueError("response text must contain 1-20000 characters")
+    original = get_a2a_user_message(
+        conn, peer=peer, context_id=context_id, message_id=message_id)
+    existing = conn.execute(
+        "SELECT * FROM conversation_messages WHERE parent_message_id = ?"
+        " AND conversation_id = ? AND collaboration_id = ?"
+        " AND sender_type = 'hermes' AND sender_id = ?"
+        " AND recipient_type = 'user' AND recipient_id = 'user'"
+        " AND message_type = 'llm.assistant' ORDER BY sequence LIMIT 1;",
+        (message_id, original["conversation_id"],
+         original["collaboration_id"], peer),
+    ).fetchone()
+    if existing is not None:
+        try:
+            existing_payload = json.loads(existing["content_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("existing Hermes response is invalid") from exc
+        if (not isinstance(existing_payload, dict)
+                or existing_payload.get("role") != "assistant"
+                or existing_payload.get("content") != text.strip()):
+            raise ValueError(
+                "message already has a different Hermes response")
+        conn.execute(
+            "UPDATE conversation_messages SET delivery_status = 'delivered'"
+            " WHERE id = ?;",
+            (message_id,),
+        )
+        conn.commit()
+        return existing
+    response = append_message(
+        conn,
+        conversation_id=original["conversation_id"],
+        collaboration_id=original["collaboration_id"],
+        sender_type="hermes",
+        sender_id=peer,
+        recipient_type="user",
+        recipient_id="user",
+        message_type="llm.assistant",
+        content={"role": "assistant", "content": text.strip()},
+        parent_message_id=message_id,
+        idempotency_key=f"hermes-response:{message_id}",
+        commit=False,
+    )
+    conn.execute(
+        "UPDATE conversation_messages SET delivery_status = 'delivered'"
+        " WHERE id = ?;",
+        (message_id,),
+    )
+    conn.commit()
+    return response
 
 
 def list_messages(conn, conversation_id: str, *, after: int = 0,

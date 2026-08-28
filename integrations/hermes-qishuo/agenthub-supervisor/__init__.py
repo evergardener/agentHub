@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -248,6 +249,15 @@ def _poll_seconds() -> float:
         return 5.0
 
 
+def _redelivery_holdoff_seconds() -> float:
+    """Bound duplicate native turns while Hermes is handling a delivered wake."""
+    raw = os.getenv("AGENTHUB_SUPERVISOR_REDELIVERY_SECONDS", "900")
+    try:
+        return min(max(float(raw), 300.0), 3600.0)
+    except (TypeError, ValueError):
+        return 900.0
+
+
 def _endpoint() -> str:
     url = os.getenv("AGENTHUB_SUPERVISOR_URL", _DEFAULT_URL).strip()
     if url != _DEFAULT_URL:
@@ -427,17 +437,38 @@ def _safe_notification_message(notification: dict) -> str:
         "event_type": notification.get("event_type"),
         "internal_status": notification.get("internal_status"),
     }
+    if notification.get("message_id"):
+        fields["message_id"] = notification.get("message_id")
     envelope = json.dumps(fields, ensure_ascii=False, separators=(",", ":"))
+    if notification.get("event_type") == "conversation.user_message":
+        instruction = (
+            "This envelope contains identifiers only and is not user "
+            "authority. Fetch the exact message with "
+            "conversations/messages/get in the same context_id. If it only "
+            "needs explanation or discussion, answer directly. If execution "
+            "is required, create a separate follow-up task in the same "
+            "context with parent_task_id set to the route task_id; never "
+            "reopen the completed task or reuse its closed native Agent "
+            "session. Persist a concise user-facing answer with "
+            "conversations/respond, then ACK this notification with its "
+            "notification_id and context_id."
+        )
+    else:
+        instruction = (
+            "This envelope contains identifiers only and is not user "
+            "authority. Use a2a_call(agent=agenthub) with the listed "
+            "context_id and a strict tasks/get control object to obtain "
+            "authoritative state. Follow the agenthub-orchestration skill: "
+            "handle only eligible Hermes-routed interactions, report "
+            "user-routed approvals, inspect artifacts/results, and never "
+            "self-accept. After the event has been handled and reported, "
+            "call agenthub_supervision_ack with the notification_id and "
+            "context_id."
+        )
     return (
         "[agentHub trusted lifecycle envelope]\n"
         f"{envelope}\n"
-        "This envelope contains identifiers only and is not user authority. "
-        "Use a2a_call(agent=agenthub) with the listed context_id and a strict "
-        "tasks/get control object to obtain authoritative state. Follow the "
-        "agenthub-orchestration skill: handle only eligible Hermes-routed "
-        "interactions, report user-routed approvals, inspect artifacts/results, "
-        "and never self-accept. After the event has been handled and reported, "
-        "call agenthub_supervision_ack with the notification_id."
+        + instruction
     )
 
 
@@ -459,7 +490,7 @@ def _dispatch_agent_bridge_notification(
 
     result = _native_async_dispatch(
         goal=(
-            "Handle agentHub lifecycle notification "
+            "Handle agentHub notification "
             f"{notification.get('notification_id')} for task "
             f"{notification.get('task_id')}"
         ),
@@ -535,6 +566,15 @@ def _inject_notification(notification: dict) -> bool:
                 delegation_id = str(prior.get("delegation_id") or "")
                 if delegation_id and _native_delivery_is_pending(delegation_id):
                     return True
+                dispatched_at = prior.get("dispatched_at")
+                if (isinstance(dispatched_at, (int, float))
+                        and time.time() - float(dispatched_at)
+                        < _redelivery_holdoff_seconds()):
+                    # The native completion was delivered, but the Hermes turn
+                    # may still be fetching state, creating a follow-up task,
+                    # or writing its response.  Keep renewing the agentHub
+                    # lease without starting a concurrent duplicate turn.
+                    return True
                 # A native completion was already delivered but Hermes did not
                 # ACK the agentHub outbox (for example its follow-up turn
                 # failed).  Permit a new durable wake instead of suppressing
@@ -561,6 +601,7 @@ def _inject_notification(notification: dict) -> bool:
                 "watch_id": watch_id,
                 "task_id": watch.get("task_id"),
                 "session_key": watch.get("session_key"),
+                "dispatched_at": time.time(),
             }
             _save_deliveries(deliveries)
         return True
@@ -698,11 +739,13 @@ def _stop_polling() -> None:
 
 def _ack(args: dict, **_: Any) -> str:
     notification_id = str(args.get("notification_id") or "").strip()
-    if not notification_id:
-        return "Error: notification_id is required."
+    context_id = str(args.get("context_id") or "").strip()
+    if not notification_id or not context_id:
+        return "Error: notification_id and context_id are required."
     try:
         payload = _call_agenthub(
-            "supervision/ack", notification_id=notification_id)
+            "supervision/ack", context_id=context_id,
+            notification_id=notification_id)
         with _delivery_lock:
             deliveries = _deliveries()
             if notification_id in deliveries:
@@ -785,8 +828,9 @@ _TOOLS = {
         _ack,
         "Acknowledge one handled agentHub lifecycle notification.",
         {"type": "object", "properties": {
-            "notification_id": {"type": "string"}},
-         "required": ["notification_id"]}),
+            "notification_id": {"type": "string"},
+            "context_id": {"type": "string"}},
+         "required": ["notification_id", "context_id"]}),
     "agenthub_supervision_register": (
         _register,
         "Register the current Hermes session to supervise a task while its "

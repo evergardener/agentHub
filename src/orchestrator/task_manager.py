@@ -23,6 +23,23 @@ from orchestrator.a2a_client import A2aClient
 from state.db import init_db, next_task_id
 
 
+_TERMINAL_AGENT_SESSION_STATUSES = {
+    TaskStatus.COMPLETED.value,
+    TaskStatus.AWAITING_ACCEPTANCE.value,
+    TaskStatus.REVIEWED.value,
+    TaskStatus.ACCEPTED.value,
+    TaskStatus.FAILED.value,
+    TaskStatus.CANCELLED.value,
+}
+
+
+def _require_open_agent_session(task, task_id: str) -> None:
+    if task["status"] in _TERMINAL_AGENT_SESSION_STATUSES:
+        raise ValueError(
+            f"task {task_id} is {task['status']}; create a separate "
+            "follow-up task instead of reusing its Agent session")
+
+
 def normalize_execution_workspace(value: str | Path) -> str:
     """Return one canonical absolute execution workspace path.
 
@@ -519,6 +536,7 @@ class TaskManager:
         row = state_store.get_task(self.conn, task_id)
         if row is None:
             raise KeyError(f"task not found: {task_id}")
+        _require_open_agent_session(row, task_id)
         from orchestrator import collaboration_store
 
         binding = collaboration_store.get_current_agent_session(
@@ -575,6 +593,8 @@ class TaskManager:
         task = state_store.get_task(self.conn, task_id)
         if task is None:
             raise KeyError(f"task not found: {task_id}")
+        if mode in {"steer", "pause", "interrupt", "cancel", "takeover"}:
+            _require_open_agent_session(task, task_id)
         if not task["collaboration_id"]:
             raise ValueError("task is not attached to a collaboration")
         agent_id = agent_id or task["assigned_to"]

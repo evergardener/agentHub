@@ -101,6 +101,17 @@ def test_registry_discovery_uses_single_peer(env):
     assert not delegated
 
 
+@pytest.mark.parametrize("context_id", [123, ["ctx"], {"id": "ctx"}, " "])
+def test_hub_control_rejects_malformed_context_id(env, context_id):
+    _, client, delegated = env
+    body = _control("agents/list")
+    body["params"]["message"]["contextId"] = context_id
+    response = client.post(
+        "/a2a", json=body, headers=_bearer()).json()
+    assert response["error"]["code"] == -32602
+    assert not delegated
+
+
 def test_dynamic_worker_can_be_added_without_peer_config(env):
     tm, client, delegated = env
     state_store.update_heartbeat(tm.conn, "pi",
@@ -1094,6 +1105,13 @@ def test_supervision_register_pull_and_ack_are_peer_scoped(env):
         "event_type", "internal_status", "created_at",
     }
 
+    wrong_context = client.post(
+        "/a2a", json=_control(
+            "supervision/ack", context_id="ctx-other",
+            notification_id=notification["notification_id"]),
+        headers=_bearer()).json()
+    assert wrong_context["error"]["code"] == -32003
+
     acked = client.post(
         "/a2a", json=_control(
             "supervision/ack",
@@ -1107,6 +1125,105 @@ def test_supervision_register_pull_and_ack_are_peer_scoped(env):
         headers=_bearer()).json()["result"]["message"]
     assert json.loads(acked_again["parts"][0]["text"])["status"] == \
         "acknowledged"
+
+
+def test_terminal_conversation_message_can_reply_or_create_followup(env):
+    tm, client, delegated = env
+    created = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="codex", objective="检查当前状态",
+            access_mode="read"),
+        headers=_bearer()).json()["result"]["task"]
+    registered = client.post(
+        "/a2a", json=_control(
+            "supervision/register", task_id=created["id"]),
+        headers=_bearer()).json()["result"]["message"]
+    watch = json.loads(registered["parts"][0]["text"])
+    for status in (
+        state_store.TaskStatus.WORKING,
+        state_store.TaskStatus.AWAITING_ACCEPTANCE,
+        state_store.TaskStatus.ACCEPTED,
+    ):
+        state_store.transition_task(tm.conn, created["id"], status)
+
+    mapping = collaboration_store.a2a_context_ids(
+        peer="qishuo", context_id="ctx-live")
+    user_message = collaboration_store.append_user_message_to_hermes(
+        tm.conn,
+        collaboration_id=mapping["collaboration_id"],
+        user_id="user",
+        content={"text": "解释一下结果；如果要执行请创建新任务"},
+    )
+    from orchestrator import supervision_store
+
+    supervision_store.enqueue_user_message(
+        tm.conn,
+        collaboration_id=mapping["collaboration_id"],
+        message_id=user_message["id"],
+    )
+    pulled = client.post(
+        "/a2a", json=_control(
+            "supervision/pull", watch_ids=[watch["watch_id"]]),
+        headers=_bearer()).json()["result"]["message"]
+    notifications = json.loads(pulled["parts"][0]["text"])["notifications"]
+    notification = next(
+        item for item in notifications
+        if item["event_type"] == "conversation.user_message")
+    assert notification["message_id"] == user_message["id"]
+
+    fetched = client.post(
+        "/a2a", json=_control(
+            "conversations/messages/get", message_id=user_message["id"]),
+        headers=_bearer()).json()["result"]["message"]
+    assert json.loads(fetched["parts"][0]["text"])["message"]["text"].startswith(
+        "解释一下结果")
+    denied = client.post(
+        "/a2a", json=_control(
+            "conversations/messages/get", message_id=user_message["id"]),
+        headers=_bearer(OTHER_HUB_TOKEN)).json()
+    assert denied["error"]["code"] == -32003
+
+    responded = client.post(
+        "/a2a", json=_control(
+            "conversations/respond", message_id=user_message["id"],
+            text="这是结果说明；后续执行会创建独立任务。"),
+        headers=_bearer()).json()["result"]["message"]
+    assert json.loads(responded["parts"][0]["text"])["status"] == "responded"
+    replay = client.post(
+        "/a2a", json=_control(
+            "conversations/respond", message_id=user_message["id"],
+            text="这是结果说明；后续执行会创建独立任务。"),
+        headers=_bearer()).json()
+    assert "result" in replay
+    conflict = client.post(
+        "/a2a", json=_control(
+            "conversations/respond", message_id=user_message["id"],
+            text="不一致的第二份答复"),
+        headers=_bearer()).json()
+    assert conflict["error"]["code"] == -32602
+    saved_response = tm.conn.execute(
+        "SELECT message_type, content_json FROM conversation_messages"
+        " WHERE parent_message_id = ?;",
+        (user_message["id"],),
+    ).fetchone()
+    assert saved_response["message_type"] == "llm.assistant"
+    assert json.loads(saved_response["content_json"])["role"] == "assistant"
+    acked = client.post(
+        "/a2a", json=_control(
+            "supervision/ack",
+            notification_id=notification["notification_id"]),
+        headers=_bearer()).json()["result"]["message"]
+    assert json.loads(acked["parts"][0]["text"])["status"] == "acknowledged"
+
+    followup = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="codex", objective="执行后续只读检查",
+            access_mode="read", parent_task_id=created["id"]),
+        headers=_bearer()).json()["result"]["task"]
+    assert followup["id"] != created["id"]
+    assert state_store.get_task(tm.conn, followup["id"])["parent_id"] == \
+        created["id"]
+    assert delegated[-1] == (followup["id"], "codex")
 
 
 def test_supervision_rejects_context_or_watch_not_owned_by_peer(env):

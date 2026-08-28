@@ -55,7 +55,14 @@ def test_pg_migrations_and_core_flow(pg_url):
     # 迁移：全部版本已应用，含 supervision outbox 与 Profile runtime policy
     versions = [r[0] for r in conn.execute(
         "SELECT version FROM schema_migrations ORDER BY version;").fetchall()]
-    assert versions == list(range(1, 14))
+    assert versions == list(range(1, 15))
+    outbox_columns = {row[0] for row in conn.execute(
+        "SELECT column_name FROM information_schema.columns"
+        " WHERE table_name = 'supervision_outbox';").fetchall()}
+    assert "message_id" in outbox_columns
+    assert conn.execute(
+        "SELECT to_regclass('supervision_conversation_routes');"
+    ).fetchone()[0] == "supervision_conversation_routes"
 
     from orchestrator import agent_control_store
 

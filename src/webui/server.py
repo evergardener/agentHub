@@ -881,7 +881,7 @@ def create_app() -> FastAPI:
     @app.post("/api/collaborations/{collaboration_id}/messages")
     async def add_collaboration_message(collaboration_id: str, body: dict):
         """Persist a WebUI user message to Hermes without requiring a task."""
-        from orchestrator import collaboration_store
+        from orchestrator import collaboration_store, supervision_store
 
         recipient_id = (body or {}).get("recipient_id", "hermes")
         if recipient_id != "hermes":
@@ -908,13 +908,19 @@ def create_app() -> FastAPI:
             if collaboration_store.get_collaboration(
                     conn, collaboration_id) is None:
                 return JSONResponse({"error": "not found"}, status_code=404)
-            message = collaboration_store.record_user_intervention(
+            message = collaboration_store.append_user_message_to_hermes(
                 conn,
                 collaboration_id=collaboration_id,
                 user_id="user",
-                mode="comment",
                 content={"text": text},
                 idempotency_key=idempotency_key,
+                delivery_status="queued",
+                commit=False,
+            )
+            delivery = supervision_store.enqueue_user_message(
+                conn,
+                collaboration_id=collaboration_id,
+                message_id=message["id"],
             )
             return {
                 "collaboration_id": collaboration_id,
@@ -922,8 +928,10 @@ def create_app() -> FastAPI:
                 "message_id": message["id"],
                 "sequence": message["sequence"],
                 "context_revision": message["based_on_revision"],
+                "delivery_status": delivery["delivery_status"],
             }
-        except (KeyError, ValueError) as exc:
+        except (KeyError, PermissionError, ValueError) as exc:
+            conn.rollback()
             return JSONResponse({"error": str(exc)}, status_code=409)
         finally:
             conn.close()

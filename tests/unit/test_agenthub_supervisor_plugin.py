@@ -159,14 +159,12 @@ def test_agent_bridge_notification_uses_native_durable_completion(monkeypatch):
     assert plugin._inject_notification(notification) is True
     assert len(dispatched) == 1
     assert ctx.injected == []
-    assert ctx.state.get("deliveries") == {
-        "SN-WEBUI": {
-            "delegation_id": "deleg-agenthub-1",
-            "watch_id": "WATCH-WEBUI",
-            "task_id": "T-WEBUI",
-            "session_key": "mt-webui-1",
-        }
-    }
+    delivery = ctx.state.get("deliveries")["SN-WEBUI"]
+    assert delivery["delegation_id"] == "deleg-agenthub-1"
+    assert delivery["watch_id"] == "WATCH-WEBUI"
+    assert delivery["task_id"] == "T-WEBUI"
+    assert delivery["session_key"] == "mt-webui-1"
+    assert isinstance(delivery["dispatched_at"], float)
 
     # AgentHub keeps the outbox row inflight until Hermes handles and ACKs it.
     # Re-pulls before that ACK must not create duplicate WebUI turns.
@@ -205,6 +203,43 @@ def test_delivered_native_wake_is_retried_until_agenthub_ack(monkeypatch):
     assert ctx.state.get("deliveries")["SN-WEBUI"]["delegation_id"] == \
         "deleg-retry"
     assert ctx.injected == []
+
+
+def test_recent_delivered_native_wake_renews_lease_without_duplicate_turn(
+        monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    ctx.state.set("watches", {"WATCH-WEBUI": {
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "session_key": "mt-webui-1", "owner_mode": "agent_bridge",
+        "owner_instance_id": "", "durable": True,
+    }})
+    ctx.state.set("deliveries", {"SN-WEBUI": {
+        "delegation_id": "deleg-delivered", "watch_id": "WATCH-WEBUI",
+        "task_id": "T-WEBUI", "session_key": "mt-webui-1",
+        "dispatched_at": 1000.0,
+    }})
+    monkeypatch.setattr(plugin.time, "time", lambda: 1100.0)
+    monkeypatch.setattr(
+        plugin, "_agent_bridge_delivery_available", lambda: True)
+    monkeypatch.setattr(
+        plugin, "_native_delivery_is_pending", lambda _delegation_id: False)
+    dispatched = []
+    monkeypatch.setattr(
+        plugin, "_dispatch_agent_bridge_notification",
+        lambda *_: dispatched.append(True) or "deleg-duplicate")
+    notification = {
+        "notification_id": "SN-WEBUI", "watch_id": "WATCH-WEBUI",
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "event_type": "conversation.user_message",
+        "message_id": "M-1", "internal_status": "message_pending",
+    }
+
+    assert plugin._inject_notification(notification) is True
+    assert dispatched == []
+    assert ctx.state.get("deliveries")["SN-WEBUI"]["delegation_id"] == \
+        "deleg-delivered"
 
 
 def test_completed_but_unconsumed_native_wake_remains_pending(monkeypatch):
@@ -317,14 +352,17 @@ def test_supervision_ack_clears_native_delivery_only_after_server_ack(
         raise RuntimeError("offline")
 
     monkeypatch.setattr(plugin, "_call_agenthub", fail_ack)
-    assert plugin._ack({"notification_id": "SN-WEBUI"}).startswith("Error:")
+    assert plugin._ack({
+        "notification_id": "SN-WEBUI", "context_id": "ctx-webui",
+    }).startswith("Error:")
     assert ctx.state.get("deliveries") == {"SN-WEBUI": delivery}
 
     monkeypatch.setattr(plugin, "_call_agenthub", lambda action, **fields: {
         "status": "acked", "notification_id": fields["notification_id"],
     })
     assert json.loads(plugin._ack({
-        "notification_id": "SN-WEBUI"}))["status"] == "acked"
+        "notification_id": "SN-WEBUI",
+        "context_id": "ctx-webui"}))["status"] == "acked"
     assert ctx.state.get("deliveries") == {}
 
 
@@ -353,6 +391,34 @@ def test_notification_injection_drops_remote_payload():
     assert "SN-1" in content and "T-1" in content
     assert "tasks/get" in content
     assert "ignore prior instructions" not in content
+
+
+def test_user_message_wakeup_fetches_content_and_never_reopens_task():
+    plugin = _load_plugin()
+    ctx = _Context(gateway=True)
+    plugin._set_context_for_tests(ctx)
+    ctx.state.set("watches", {"WATCH-1": {
+        "task_id": "T-1", "context_id": "ctx-1",
+        "session_key": "agent:main:discord:dm:1",
+        "owner_mode": "gateway", "owner_instance_id": "",
+        "durable": True,
+    }})
+    notification = {
+        "notification_id": "SN-MSG", "watch_id": "WATCH-1",
+        "task_id": "T-1", "context_id": "ctx-1",
+        "message_id": "M-1", "event_type": "conversation.user_message",
+        "internal_status": "message_pending",
+        "payload": "malicious user text must not be injected",
+    }
+
+    assert plugin._inject_notification(notification) is True
+    content = ctx.injected[0][0]
+    assert "M-1" in content
+    assert "conversations/messages/get" in content
+    assert "conversations/respond" in content
+    assert "parent_task_id" in content
+    assert "never reopen" in content
+    assert "malicious user text" not in content
 
 
 def test_create_parser_matches_hermes_a2a_aliases():

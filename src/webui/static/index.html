@@ -2251,12 +2251,21 @@ function renderMessageList(messages) {
       isHermes ? "Hermes" : m.sender_type === "system" ? "工具/系统" : m.sender_id || "Agent";
     const avatar = String(m.sender_id || speaker || "?").charAt(0).toUpperCase();
     const avatarHtml = `<span class="message-avatar" aria-hidden="true">${esc(avatar)}</span>`;
+    const deliveryLabels = {
+      queued: "等待 Hermes 处理",
+      delivered: "Hermes 已响应",
+      persisted: "仅保存，尚未投递",
+      failed: "投递失败",
+    };
+    const delivery = m.sender_type === "user" && m.recipient_type === "hermes"
+      ? deliveryLabels[m.delivery_status] : "";
     const value = messageValue(m);
     return `<article class="message ${css}">
       ${avatarHtml}
       <div class="message-shell">
         <div class="mh"><strong>${esc(speaker)}${esc(route)}</strong>
           <span>#${esc(m.sequence)}</span><span>${esc(m.message_type)}</span><span>revision ${esc(m.based_on_revision ?? "-")}</span>
+          ${delivery ? `<span>${esc(delivery)}</span>` : ""}
           <span>${esc(formatTime(m.created_at))}</span></div>
         <div class="mc">${renderMessageBody(m, value)}</div>
       </div>
@@ -2626,7 +2635,10 @@ function parseComposerTarget(text) {
     rest = rest.slice(match[0].length);
   }
   if (ids.length > 1) return {error: "一条消息不能指定多个 @ 接收者，请拆分后分别发送"};
-  const id = ids[0] || S.composerTarget || "hermes";
+  // An unmentioned message is always a new request to Hermes.  Agent routing
+  // is intentionally explicit so a stale composer selection cannot steer an
+  // execution after the visible @agent mention has been removed.
+  const id = ids[0] || "hermes";
   const target = recipientById(id);
   if (!target) return {error: `未知接收者 @${id}`};
   const normalized = ids.length ? String(text).trim() : `@${target.id} ${String(text).trim()}`;
@@ -2694,7 +2706,7 @@ async function chooseComposerRecipient(id) {
     showToast(`@${target.id} ${target.reason}`, "error");
     return;
   }
-  S.composerTarget = target.id;
+  S.composerTarget = "hermes";
   const input = $("#chat-message");
   const context = mentionContext();
   let content = input.value;
@@ -2717,7 +2729,7 @@ function updateComposer() {
   const canWriteHermes = S.role !== "viewer" && !!S.collaborationId;
   let target = recipientById(S.composerTarget);
   if (!target || (target.type === "agent" &&
-      S.currentSession?.agent_id !== target.id)) {
+      (S.currentSession?.agent_id !== target.id || terminal || !target.available))) {
     S.composerTarget = "hermes";
     target = recipientById("hermes");
   }
@@ -2733,7 +2745,7 @@ function updateComposer() {
   else if (!S.collaborationId) hint.textContent = "选择 Session 后可发送消息";
   else if (!task) hint.textContent = "默认 @hermes；当前 Session 尚未创建任务";
   else if (!S.currentSession) hint.textContent = "默认 @hermes；当前任务没有可恢复的 Agent Session";
-  else if (terminal) hint.textContent = "任务已结束，仍可发送给 @hermes";
+  else if (terminal) hint.textContent = "任务已结束；可继续咨询 @hermes，需要执行时将创建关联的新任务";
   else if (!S.currentSessionCaps?.steer) hint.textContent = "当前 Agent 不支持实时纠正，可发送给 @hermes";
   else hint.textContent = `输入 @ 选择 @hermes 或 @${S.currentSession.agent_id}`;
 }
@@ -2785,7 +2797,10 @@ async function sendChatMessage() {
   }
   $("#chat-message").value = "";
   S.composerTarget = target.id;
-  showToast(`消息已发送给 @${target.id}`, "ok");
+  const deliveryText = result.delivery_status === "queued"
+    ? `消息已排队，等待 @${target.id} 处理`
+    : `消息已由 @${target.id} 处理`;
+  showToast(deliveryText, "ok");
   await loadConversationPanel(S.collaborationId, {preserveScroll: false});
 }
 $("#chat-send").onclick = sendChatMessage;

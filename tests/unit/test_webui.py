@@ -38,17 +38,21 @@ def client(tmp_path, monkeypatch):
     from orchestrator import (
         agent_profile_store,
         collaboration_store,
+        supervision_store,
         task_plan_store,
     )
     agent_profile_store.seed_catalog(conn)
     agent_profile_store.assign_seed_profile(conn, "codex")
-    conversation_id = collaboration_store.create_conversation(conn)
-    collaboration_id = collaboration_store.create_collaboration(
-        conn, conversation_id=conversation_id, objective="planned research")
+    mapping = collaboration_store.ensure_a2a_collaboration(
+        conn, peer="qishuo", context_id="ctx-webui-test",
+        objective="planned research")
+    collaboration_id = mapping["collaboration_id"]
     conn.execute(
         "UPDATE tasks SET collaboration_id = ? WHERE id = 'T-2';",
         (collaboration_id,),
     )
+    supervision_store.register_watch(
+        conn, peer="qishuo", context_id="ctx-webui-test", task_id="T-2")
     task_plan_store.create_plan(
         conn, collaboration_id=collaboration_id, objective="planned research",
         project="webui-test", steps=[{
@@ -310,7 +314,11 @@ def test_index_page(client):
     assert "输入 @ 选择 Hermes 或当前 Agent" in r.text
     assert "function composerRecipients" in r.text
     assert "function parseComposerTarget" in r.text
+    assert 'const id = ids[0] || "hermes";' in r.text
     assert "多个 @ 接收者" in r.text
+    assert "等待 Hermes 处理" in r.text
+    assert "需要执行时将创建关联的新任务" in r.text
+    assert "terminal || !target.available" in r.text
     assert 'agent_id: target.id' in r.text
     assert 'class="task-action-input" id="acceptance-feedback"' in r.text
     # Task follow-up text is sent from the central @mention composer; the
@@ -743,8 +751,9 @@ def test_collaboration_message_does_not_require_active_task(client):
               "recipient_id": "hermes", "idempotency_key": "continue-1"},
     )
     assert response.status_code == 200
-    assert response.json()["context_revision"] == 2
+    assert response.json()["context_revision"] == 1
     assert response.json()["recipient_id"] == "hermes"
+    assert response.json()["delivery_status"] == "queued"
     replay = client.post(
         f"/api/collaborations/{collaboration_id}/messages",
         json={"text": "@hermes 任务结束后继续询问",
@@ -756,7 +765,9 @@ def test_collaboration_message_does_not_require_active_task(client):
         f"/api/collaborations/{collaboration_id}"
     ).json()
     assert detail["messages"][-1]["message_type"] == "user.comment"
+    assert detail["messages"][-1]["delivery_status"] == "queued"
     assert "任务结束后继续询问" in detail["messages"][-1]["content_json"]
+    assert detail["collaboration"]["controller"] == "hermes"
     assert client.post(
         f"/api/collaborations/{collaboration_id}/messages",
         json={"text": "错误路由", "recipient_id": "codex"},
@@ -769,6 +780,28 @@ def test_collaboration_message_does_not_require_active_task(client):
         "/api/collaborations/COL-NOPE/messages",
         json={"text": "hello"},
     ).status_code == 404
+
+
+def test_collaboration_message_fails_closed_without_hermes_route(client):
+    from orchestrator import collaboration_store
+    from state.db import connect
+
+    conn = connect()
+    conversation_id = collaboration_store.create_conversation(
+        conn, created_by="user")
+    collaboration_id = collaboration_store.create_collaboration(
+        conn, conversation_id=conversation_id, objective="local only")
+    conn.close()
+
+    response = client.post(
+        f"/api/collaborations/{collaboration_id}/messages",
+        json={"text": "这条消息不能假装已发送"},
+    )
+    assert response.status_code == 409
+    detail = client.get(
+        f"/api/collaborations/{collaboration_id}").json()
+    assert detail["collaboration"]["context_revision"] == 1
+    assert detail["messages"] == []
 
 
 def test_collaboration_detail_synthesizes_legacy_agent_result(client):

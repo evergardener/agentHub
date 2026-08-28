@@ -68,6 +68,13 @@ qishuo 原生 `a2a_call` 不提供自定义 `metadata.agent`，因此 agentHub
    ACK；未 ACK 会按租约重投，重启后从 profile state 恢复；
 9. 核对终态、产物和审计记录后汇报，只有用户显式接受才能 `tasks/accept`。
 
+任务结束后，agentHub WebUI 仍可向原 Hermes 会话发送消息。Plugin 收到
+`conversation.user_message` 时只接收 `message_id`，认证调用
+`conversations/messages/get` 取回正文。纯咨询直接通过
+`conversations/respond` 回写；需要执行时使用相同 context 创建带
+`parent_task_id` 的新任务和新 Agent Session，再回写新任务 ID。旧任务和旧原生
+Session 均保持终态。未回写响应时，服务端拒绝该通知 ACK。
+
 后台唤醒不授予任何审批权限。`awaiting_user` 必须留给 WebUI 用户，Hermes 只能
 处理 `inspectable=true` 且 `action_intent_status=awaiting_hermes` 的交互。Plugin
 不得把 objective、worker 内容、工具参数或审批 payload 注入模型上下文；先

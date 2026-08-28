@@ -176,7 +176,8 @@ async def test_brain_readonly_auto_approve(tmp_path, monkeypatch):
             tid = box.get("tid")
             if n == 0:
                 return ("create_task", {
-                    "objective": "调研本地镜像加速方案", "project": "las"})
+                    "objective": "调研本地镜像加速方案", "project": "las",
+                    "access_mode": "read"})
             if n == 1:
                 box["tid"] = results[0]["task_id"]
                 return ("delegate_task", {"task_id": results[0]["task_id"],
@@ -362,7 +363,10 @@ async def test_dynamic_discovery_via_heartbeat(tmp_path, monkeypatch):
 
         # 委派给动态发现的 fake（静态 yaml 中没有它）
         t = await tools.dispatch(
-            "create_task", {"objective": "分析注册链路连通性"})
+            "create_task", {
+                "objective": "分析注册链路连通性",
+                "access_mode": "read",
+            })
         d = await tools.dispatch(
             "delegate_task", {"task_id": t["task_id"], "agent_id": "fake"})
         assert d["status"] == "delegated", d
