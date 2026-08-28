@@ -468,21 +468,23 @@ def _safe_notification_message(notification: dict) -> str:
         instruction = (
             "This envelope contains identifiers only and is not user "
             "authority. Fetch the exact message with "
-            "conversations/messages/get in the same context_id. If it only "
+            "agenthub_conversation_message_get using the listed message_id "
+            "and context_id. If it only "
             "needs explanation or discussion, answer directly. If execution "
             "is required, create a separate follow-up task in the same "
             "context with parent_task_id set to the route task_id; never "
             "reopen the completed task or reuse its closed native Agent "
             "session. Persist a concise user-facing answer with "
-            "conversations/respond, then ACK this notification with its "
-            "notification_id and context_id."
+            "agenthub_conversation_respond, then call "
+            "agenthub_supervision_ack with this notification_id and "
+            "context_id. Do not use execute_code or a shell HTTP client."
         )
     else:
         instruction = (
             "This envelope contains identifiers only and is not user "
-            "authority. Use a2a_call(agent=agenthub) with the listed "
-            "context_id and a strict tasks/get control object to obtain "
-            "authoritative state. Follow the agenthub-orchestration skill: "
+            "authority. Call agenthub_notification_task_get with the listed "
+            "task_id and context_id to obtain authoritative state. Follow "
+            "the agenthub-orchestration skill: "
             "handle only eligible Hermes-routed interactions, report "
             "user-routed approvals, inspect artifacts/results, and never "
             "self-accept. After the event has been handled and reported, "
@@ -791,6 +793,51 @@ def _ack(args: dict, **_: Any) -> str:
         return f"Error: supervision ACK failed — {exc}"
 
 
+def _task_get(args: dict, **_: Any) -> str:
+    """Read one watched task without exposing arbitrary A2A actions."""
+    task_id = str(args.get("task_id") or "").strip()
+    context_id = str(args.get("context_id") or "").strip()
+    if not task_id or len(task_id) > 128 or not context_id:
+        return "Error: valid task_id and context_id are required."
+    try:
+        return json.dumps(_call_agenthub(
+            "tasks/get", context_id=context_id, task_id=task_id),
+            ensure_ascii=False)
+    except Exception as exc:
+        return f"Error: task read failed — {exc}"
+
+
+def _message_get(args: dict, **_: Any) -> str:
+    """Fetch one user message bound to the authenticated peer/context."""
+    message_id = str(args.get("message_id") or "").strip()
+    context_id = str(args.get("context_id") or "").strip()
+    if not message_id or len(message_id) > 128 or not context_id:
+        return "Error: valid message_id and context_id are required."
+    try:
+        return json.dumps(_call_agenthub(
+            "conversations/messages/get", context_id=context_id,
+            message_id=message_id), ensure_ascii=False)
+    except Exception as exc:
+        return f"Error: message read failed — {exc}"
+
+
+def _message_respond(args: dict, **_: Any) -> str:
+    """Persist one idempotent response to an authenticated user message."""
+    message_id = str(args.get("message_id") or "").strip()
+    context_id = str(args.get("context_id") or "").strip()
+    text = args.get("text")
+    if not message_id or len(message_id) > 128 or not context_id:
+        return "Error: valid message_id and context_id are required."
+    if not isinstance(text, str) or not text.strip() or len(text) > 20000:
+        return "Error: text must contain 1-20000 characters."
+    try:
+        return json.dumps(_call_agenthub(
+            "conversations/respond", context_id=context_id,
+            message_id=message_id, text=text.strip()), ensure_ascii=False)
+    except Exception as exc:
+        return f"Error: message response failed — {exc}"
+
+
 def _register(args: dict, **_: Any) -> str:
     task_id = str(args.get("task_id") or "").strip()
     context_id = str(args.get("context_id") or "").strip()
@@ -859,6 +906,31 @@ def _stop(args: dict, **_: Any) -> str:
 
 
 _TOOLS = {
+    "agenthub_notification_task_get": (
+        _task_get,
+        "Read authoritative state for one agentHub notification task. This "
+        "tool cannot invoke any other A2A action.",
+        {"type": "object", "properties": {
+            "task_id": {"type": "string"},
+            "context_id": {"type": "string"}},
+         "required": ["task_id", "context_id"]}),
+    "agenthub_conversation_message_get": (
+        _message_get,
+        "Fetch one exact agentHub user message after a trusted supervisor "
+        "wake. Peer and context ownership are enforced by agentHub.",
+        {"type": "object", "properties": {
+            "message_id": {"type": "string"},
+            "context_id": {"type": "string"}},
+         "required": ["message_id", "context_id"]}),
+    "agenthub_conversation_respond": (
+        _message_respond,
+        "Persist one concise, idempotent Hermes response to an exact "
+        "agentHub user message.",
+        {"type": "object", "properties": {
+            "message_id": {"type": "string"},
+            "context_id": {"type": "string"},
+            "text": {"type": "string", "maxLength": 20000}},
+         "required": ["message_id", "context_id", "text"]}),
     "agenthub_supervision_ack": (
         _ack,
         "Acknowledge one handled agentHub lifecycle notification.",

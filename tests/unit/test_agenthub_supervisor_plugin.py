@@ -289,7 +289,7 @@ def test_agent_bridge_native_dispatch_is_bound_to_originating_webui_session(
     result = captured["runner"]()
     assert result["status"] == "completed"
     assert "SN-WEBUI" in result["summary"]
-    assert "tasks/get" in result["summary"]
+    assert "agenthub_notification_task_get" in result["summary"]
     assert "must not be forwarded" not in result["summary"]
 
 
@@ -380,6 +380,76 @@ def test_supervision_ack_clears_native_delivery_only_after_server_ack(
     assert ctx.state.get("deliveries") == {}
 
 
+def test_recovery_tools_expose_only_fixed_agenthub_actions(monkeypatch):
+    plugin = _load_plugin()
+    calls = []
+
+    def call_agenthub(action, **fields):
+        calls.append((action, fields))
+        return {"status": "ok", "action": action}
+
+    monkeypatch.setattr(plugin, "_call_agenthub", call_agenthub)
+
+    assert json.loads(plugin._task_get({
+        "task_id": "T-1", "context_id": "ctx-1",
+    }))["action"] == "tasks/get"
+    assert json.loads(plugin._message_get({
+        "message_id": "M-1", "context_id": "ctx-1",
+    }))["action"] == "conversations/messages/get"
+    assert json.loads(plugin._message_respond({
+        "message_id": "M-1", "context_id": "ctx-1",
+        "text": "  concise answer  ",
+    }))["action"] == "conversations/respond"
+
+    assert calls == [
+        ("tasks/get", {"context_id": "ctx-1", "task_id": "T-1"}),
+        ("conversations/messages/get", {
+            "context_id": "ctx-1", "message_id": "M-1"}),
+        ("conversations/respond", {
+            "context_id": "ctx-1", "message_id": "M-1",
+            "text": "concise answer"}),
+    ]
+
+
+def test_recovery_tools_reject_invalid_identifiers_and_response_text(
+        monkeypatch):
+    plugin = _load_plugin()
+    calls = []
+    monkeypatch.setattr(
+        plugin, "_call_agenthub",
+        lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    assert plugin._task_get({"task_id": "", "context_id": "ctx"}).startswith(
+        "Error:")
+    assert plugin._message_get({
+        "message_id": "M" * 129, "context_id": "ctx",
+    }).startswith("Error:")
+    assert plugin._message_respond({
+        "message_id": "M-1", "context_id": "ctx", "text": " ",
+    }).startswith("Error:")
+    assert plugin._message_respond({
+        "message_id": "M-1", "context_id": "ctx", "text": "x" * 20001,
+    }).startswith("Error:")
+    assert calls == []
+
+
+def test_recovery_tool_errors_remain_fail_closed(monkeypatch):
+    plugin = _load_plugin()
+    monkeypatch.setattr(
+        plugin, "_call_agenthub",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")))
+
+    assert plugin._task_get({
+        "task_id": "T-1", "context_id": "ctx-1",
+    }) == "Error: task read failed — offline"
+    assert plugin._message_get({
+        "message_id": "M-1", "context_id": "ctx-1",
+    }) == "Error: message read failed — offline"
+    assert plugin._message_respond({
+        "message_id": "M-1", "context_id": "ctx-1", "text": "answer",
+    }) == "Error: message response failed — offline"
+
+
 def test_notification_injection_drops_remote_payload():
     plugin = _load_plugin()
     ctx = _Context(gateway=True)
@@ -403,7 +473,7 @@ def test_notification_injection_drops_remote_payload():
     assert role == "user"
     assert session_key == "agent:main:discord:dm:1"
     assert "SN-1" in content and "T-1" in content
-    assert "tasks/get" in content
+    assert "agenthub_notification_task_get" in content
     assert "ignore prior instructions" not in content
 
 
@@ -428,8 +498,9 @@ def test_user_message_wakeup_fetches_content_and_never_reopens_task():
     assert plugin._inject_notification(notification) is True
     content = ctx.injected[0][0]
     assert "M-1" in content
-    assert "conversations/messages/get" in content
-    assert "conversations/respond" in content
+    assert "agenthub_conversation_message_get" in content
+    assert "agenthub_conversation_respond" in content
+    assert "execute_code" in content
     assert "parent_task_id" in content
     assert "never reopen" in content
     assert "malicious user text" not in content
@@ -640,7 +711,7 @@ def test_non_gateway_host_does_not_start_persistent_relay(monkeypatch):
 
     assert started == []
     manifest = PLUGIN.with_name("plugin.yaml").read_text(encoding="utf-8")
-    assert "version: 1.3.0" in manifest
+    assert "version: 1.4.0" in manifest
 
 
 def test_gateway_relay_pulls_and_dispatches_agent_bridge_notification(
