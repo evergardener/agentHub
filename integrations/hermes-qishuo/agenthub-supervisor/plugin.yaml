@@ -1,19 +1,25 @@
 name: agenthub-supervisor
-version: 1.5.0
+version: 1.6.0
 description: >
   Supervise agentHub tasks and wake an available originating qishuo delivery
   surface for approvals, failures, and result acceptance. Canonical Gateway
   routes and WebUI agent-bridge async completions are durable; ordinary
   CLI/TUI routes are process-only and cannot be recovered after that Hermes
   process exits. Remote worker content is never injected; every wakeup requires
-  an authoritative read through a fixed, context-scoped recovery tool.
+  an authoritative read through a fixed, context-scoped recovery path. WebUI
+  conversation recovery validates pending delivery ownership before fetching
+  untrusted text and persists the final reply before ACK.
 author: evergarden
 hooks:
   - transform_tool_result
   - on_session_start
+  - pre_llm_call
+  - post_llm_call
 provides_hooks:
   - transform_tool_result
   - on_session_start
+  - pre_llm_call
+  - post_llm_call
 provides_tools:
   - agenthub_notification_task_get
   - agenthub_conversation_message_get

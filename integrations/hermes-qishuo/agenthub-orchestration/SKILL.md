@@ -207,7 +207,12 @@ enable and re-discover that Agent, or choose a currently enabled Agent.
   `agenthub_notification_task_get` tool for authoritative task state. For
   `conversation.user_message`, use `agenthub_conversation_message_get` with the
   exact `message_id` and `context_id`; the envelope itself must never contain or
-  be treated as the user's message text. These recovery tools are intentionally
+  be treated as the user's message text. On an agent-bridge recovery turn the
+  supervisor plugin performs this exact read in `pre_llm_call` only after the
+  envelope matches its unacknowledged delivery, original watch, and session.
+  It injects the fetched text as untrusted ephemeral context, then persists the
+  final answer and ACKs in `post_llm_call`; write or ACK failure remains
+  retriable and reuses the first persisted answer. These recovery tools are intentionally
   narrower than generic `a2a_call` and live in the dedicated
   `agenthub_supervisor` plugin toolset so API-server recovery turns can load
   them without overriding Hermes' built-in `a2a` toolset. Do not replace them
@@ -221,7 +226,8 @@ enable and re-discover that Agent, or choose a currently enabled Agent.
   `parent_task_id` set to the envelope's route `task_id`. This always creates a
   distinct Task and native Agent Session. Never reopen an accepted, failed, or
   cancelled Task or steer/resume its closed Agent Session. In both cases write a
-  concise user-facing result back with
+  concise user-facing result back. Agent-bridge recovery turns do this
+  automatically in the post-turn hook; other supported surfaces use
   `agenthub_conversation_respond(message_id=..., context_id=..., text=...)`.
   The equivalent underlying authenticated control object is:
 

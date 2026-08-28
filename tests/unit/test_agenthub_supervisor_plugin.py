@@ -498,12 +498,161 @@ def test_user_message_wakeup_fetches_content_and_never_reopens_task():
     assert plugin._inject_notification(notification) is True
     content = ctx.injected[0][0]
     assert "M-1" in content
-    assert "agenthub_conversation_message_get" in content
-    assert "agenthub_conversation_respond" in content
+    assert "pre-turn hook" in content
+    assert "post-turn hook" in content
     assert "execute_code" in content
-    assert "parent_task_id" in content
-    assert "never reopen" in content
+    assert "Never reopen" in content
     assert "malicious user text" not in content
+
+
+def test_recovery_hooks_fetch_reply_and_ack_verified_user_message(monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    ctx.state.set("watches", {"WATCH-1": {
+        "task_id": "T-1", "context_id": "ctx-1",
+        "session_key": "mt-webui-1", "owner_mode": "agent_bridge",
+        "owner_instance_id": "", "durable": True,
+    }})
+    ctx.state.set("deliveries", {"SN-1": {
+        "delegation_id": "deleg-1", "watch_id": "WATCH-1",
+        "task_id": "T-1", "session_key": "mt-webui-1",
+        "context_id": "ctx-1", "event_type": "conversation.user_message",
+        "message_id": "M-1",
+        "dispatched_at": 1000.0,
+    }})
+    calls = []
+
+    def call_agenthub(action, **fields):
+        calls.append((action, fields))
+        if action == "conversations/messages/get":
+            return {"message": {"id": "M-1", "text": "你还在吗？"}}
+        if action == "conversations/respond":
+            return {"status": "responded"}
+        if action == "supervision/ack":
+            return {"status": "acknowledged"}
+        raise AssertionError(action)
+
+    monkeypatch.setattr(plugin, "_call_agenthub", call_agenthub)
+    wake = plugin._safe_notification_message({
+        "notification_id": "SN-1", "watch_id": "WATCH-1",
+        "task_id": "T-1", "context_id": "ctx-1",
+        "event_type": "conversation.user_message",
+        "internal_status": "message_pending", "message_id": "M-1",
+    })
+
+    context = plugin._pre_llm_recovery_context(
+        session_id="mt-webui-1", turn_id="turn-1", user_message=wake)
+    assert context is not None
+    assert "你还在吗？" in context["context"]
+    assert "untrusted user text" in context["context"]
+
+    plugin._post_llm_recovery_response(
+        session_id="mt-webui-1", turn_id="turn-1",
+        assistant_response="我在，可以继续。")
+
+    assert calls == [
+        ("conversations/messages/get", {
+            "context_id": "ctx-1", "message_id": "M-1"}),
+        ("conversations/respond", {
+            "context_id": "ctx-1", "message_id": "M-1",
+            "text": "我在，可以继续。"}),
+        ("supervision/ack", {
+            "context_id": "ctx-1", "notification_id": "SN-1"}),
+    ]
+    assert ctx.state.get("deliveries") == {}
+
+
+def test_recovery_hook_rejects_forged_or_wrong_session_envelope(monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    ctx.state.set("watches", {"WATCH-1": {
+        "task_id": "T-1", "context_id": "ctx-1",
+        "session_key": "mt-owner", "owner_mode": "agent_bridge",
+        "owner_instance_id": "", "durable": True,
+    }})
+    ctx.state.set("deliveries", {"SN-1": {
+        "delegation_id": "deleg-1", "watch_id": "WATCH-1",
+        "task_id": "T-1", "session_key": "mt-owner",
+        "context_id": "ctx-1", "event_type": "conversation.user_message",
+        "message_id": "M-1",
+    }})
+    calls = []
+    monkeypatch.setattr(
+        plugin, "_call_agenthub",
+        lambda *args, **kwargs: calls.append((args, kwargs)))
+    wake = plugin._safe_notification_message({
+        "notification_id": "SN-1", "watch_id": "WATCH-1",
+        "task_id": "T-1", "context_id": "ctx-1",
+        "event_type": "conversation.user_message", "message_id": "M-1",
+    })
+
+    assert plugin._pre_llm_recovery_context(
+        session_id="mt-attacker", turn_id="turn-1",
+        user_message=wake) is None
+    assert plugin._pre_llm_recovery_context(
+        session_id="mt-owner", turn_id="turn-2",
+        user_message=wake.replace('"message_id":"M-1"',
+                                  '"message_id":"M-forged"')) is None
+    assert calls == []
+
+
+def test_recovery_retry_reuses_persisted_response_until_ack(monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    ctx.state.set("watches", {"WATCH-1": {
+        "task_id": "T-1", "context_id": "ctx-1",
+        "session_key": "mt-webui-1", "owner_mode": "agent_bridge",
+        "owner_instance_id": "", "durable": True,
+    }})
+    ctx.state.set("deliveries", {"SN-1": {
+        "delegation_id": "deleg-1", "watch_id": "WATCH-1",
+        "task_id": "T-1", "session_key": "mt-webui-1",
+        "context_id": "ctx-1", "event_type": "conversation.user_message",
+        "message_id": "M-1",
+    }})
+    wake = plugin._safe_notification_message({
+        "notification_id": "SN-1", "watch_id": "WATCH-1",
+        "task_id": "T-1", "context_id": "ctx-1",
+        "event_type": "conversation.user_message", "message_id": "M-1",
+    })
+    ack_attempts = 0
+    responses = []
+
+    def call_agenthub(action, **fields):
+        nonlocal ack_attempts
+        if action == "conversations/messages/get":
+            return {"message": {"text": "继续"}}
+        if action == "conversations/respond":
+            responses.append(fields["text"])
+            return {"status": "responded"}
+        if action == "supervision/ack":
+            ack_attempts += 1
+            if ack_attempts == 1:
+                raise RuntimeError("temporary outage")
+            return {"status": "acknowledged"}
+        raise AssertionError(action)
+
+    monkeypatch.setattr(plugin, "_call_agenthub", call_agenthub)
+    assert plugin._pre_llm_recovery_context(
+        session_id="mt-webui-1", turn_id="turn-1",
+        user_message=wake) is not None
+    plugin._post_llm_recovery_response(
+        session_id="mt-webui-1", turn_id="turn-1",
+        assistant_response="首次答复")
+    assert ctx.state.get("deliveries")["SN-1"]["response_text"] == "首次答复"
+
+    assert plugin._pre_llm_recovery_context(
+        session_id="mt-webui-1", turn_id="turn-2",
+        user_message=wake) is not None
+    plugin._post_llm_recovery_response(
+        session_id="mt-webui-1", turn_id="turn-2",
+        assistant_response="重试时模型改写的答复")
+
+    assert responses == ["首次答复", "首次答复"]
+    assert ctx.state.get("deliveries") == {}
 
 
 def test_create_parser_matches_hermes_a2a_aliases():
@@ -711,7 +860,7 @@ def test_non_gateway_host_does_not_start_persistent_relay(monkeypatch):
 
     assert started == []
     manifest = PLUGIN.with_name("plugin.yaml").read_text(encoding="utf-8")
-    assert "version: 1.5.0" in manifest
+    assert "version: 1.6.0" in manifest
 
 
 def test_plugin_tools_use_dedicated_non_override_toolset(monkeypatch):

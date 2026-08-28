@@ -71,13 +71,17 @@ qishuo 原生 `a2a_call` 不提供自定义 `metadata.agent`，因此 agentHub
 9. 核对终态、产物和审计记录后汇报，只有用户显式接受才能 `tasks/accept`。
 
 任务结束后，agentHub WebUI 仍可向原 Hermes 会话发送消息。Plugin 收到
-`conversation.user_message` 时只接收 `message_id`，恢复 turn 使用 plugin 自带的
-窄化 `agenthub_conversation_message_get` 取回正文；普通生命周期事件使用
+`conversation.user_message` 时只接收 `message_id`。恢复 turn 的 `pre_llm_call`
+先把 envelope 与 plugin 当前未 ACK delivery、原 watch 和原 session 逐字段核对，
+再通过固定的 `conversations/messages/get` 动作取回正文，并以明确标记为不受信的
+临时 turn context 提供给 Hermes；正文不会写入 native completion 或持久历史。
+`post_llm_call` 将最终答复幂等回写，成功后才 ACK；回写或 ACK 失败均保留 delivery
+等待重投，并复用首次答复避免重试产生冲突。普通生命周期事件仍使用
 `agenthub_notification_task_get` 读取权威任务状态。这两类工具只允许固定动作和
 原 `context_id`，并注册在独立 `agenthub_supervisor` plugin toolset，避免覆盖内置
 `a2a` 导致 API-server turn 丢失工具；它们不依赖恢复 turn 是否暴露通用
-`a2a_call`，也不得用 shell 或 `execute_code` 绕过。纯咨询通过
-`agenthub_conversation_respond` 回写；需要执行时使用相同 context 创建带
+`a2a_call`，也不得用 shell 或 `execute_code` 绕过。纯咨询由上述 hook 自动通过
+`conversations/respond` 回写；需要执行时使用相同 context 创建带
 `parent_task_id` 的新任务和新 Agent Session，再回写新任务 ID。旧任务和旧原生
 Session 均保持终态。未回写响应时，服务端拒绝该通知 ACK。
 
