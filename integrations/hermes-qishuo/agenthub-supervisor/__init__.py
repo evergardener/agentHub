@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 import urllib.error
@@ -165,7 +166,21 @@ def _owned_watches(surface: str | None = None) -> dict[str, dict]:
         return {}
     result = {}
     for watch_id, watch in _watches().items():
-        if not isinstance(watch, dict) or _watch_surface(watch) != selected_surface:
+        if not isinstance(watch, dict):
+            continue
+        watch_surface = _watch_surface(watch)
+        # The long-lived Gateway is the restart-safe relay for Studio-owned
+        # watches.  Agent-bridge workers are created lazily, so after a Studio
+        # restart there may be no profile worker alive to poll agentHub.  The
+        # Gateway can still publish the wake through Hermes' durable native
+        # completion queue; the Studio bridge consumes that queue separately.
+        gateway_bridge_relay = (
+            selected_surface == "gateway"
+            and watch_surface == "agent_bridge"
+            and _watch_is_durable(watch)
+            and _agent_bridge_delivery_available()
+        )
+        if watch_surface != selected_surface and not gateway_bridge_relay:
             continue
         if _watch_is_durable(watch):
             result[watch_id] = watch
@@ -183,6 +198,15 @@ def _agent_bridge_delivery_available() -> bool:
         return callable(dispatch_async_delegation)
     except Exception:
         return False
+
+
+def _is_gateway_process() -> bool:
+    """Identify the documented Hermes ``gateway run`` host command."""
+    args = [str(value).strip().lower() for value in sys.argv[1:]]
+    return any(
+        args[index:index + 2] == ["gateway", "run"]
+        for index in range(max(0, len(args) - 1))
+    )
 
 
 def _native_async_dispatch(**kwargs) -> dict:
@@ -675,10 +699,21 @@ def _poll_loop() -> None:
 def _ensure_polling(surface: str | None = None, **_: Any) -> None:
     global _poll_thread, _poll_surface
     resolved_surface = surface or _poll_surface or _session_surface()
+    # Gateway plugin discovery happens before Hermes installs its live message
+    # injector, so a cold start has no session key or surface marker yet.  The
+    # native completion API is process-independent and durable; when it is
+    # available, keep a lightweight Gateway relay alive even before any watch
+    # exists.  It will observe profile-state updates made later by a Studio
+    # worker and can wake that worker through the native completion queue.
+    if resolved_surface not in {"gateway", "cli", "agent_bridge"} and \
+            _is_gateway_process() and _agent_bridge_delivery_available():
+        resolved_surface = "gateway"
     if resolved_surface not in {"gateway", "cli", "agent_bridge"}:
         return
     _poll_surface = resolved_surface
-    if _ctx is None or not _owned_watches(resolved_surface):
+    if _ctx is None:
+        return
+    if resolved_surface != "gateway" and not _owned_watches(resolved_surface):
         return
     with _poll_lock:
         if _poll_thread is not None and _poll_thread.is_alive():

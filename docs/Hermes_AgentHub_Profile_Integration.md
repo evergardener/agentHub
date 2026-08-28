@@ -61,9 +61,11 @@ qishuo 原生 `a2a_call` 不提供自定义 `metadata.agent`，因此 agentHub
    `task.id`）；
 5. `input-required` 时向用户请求批准，也可在 WebUI 审批中心处理；
 6. 使用同一 `context_id` 调用 `tasks/get/approve/reject`；
-7. `agenthub-supervisor` 轮询 agentHub outbox；canonical Gateway route 可持久恢复
-   watch，CLI/TUI route 仅在当前 Hermes 进程存活时轮询/注入，发生审批、阻塞、失败
-   或等待验收时，以只含 ID/状态的可信 envelope 唤醒可用 surface；
+7. `agenthub-supervisor` 轮询 agentHub outbox；常驻 Gateway 进程同时作为 Studio
+   `agent-bridge-durable` watch 的持久中继，即使原 profile worker 在 Studio 重启后尚未
+   重建，也会把 notification 发布到 Hermes 原生 async-completion queue；canonical
+   Gateway route 可持久恢复 watch，CLI/TUI route 仅在当前 Hermes 进程存活时轮询/注入。
+   发生审批、阻塞、失败或等待验收时，只以 ID/状态可信 envelope 唤醒可用 surface；
 8. Hermes 使用 envelope 中原 `context_id` 调用 `tasks/get`，处理并向用户汇报后
    ACK；未 ACK 会按租约重投，重启后从 profile state 恢复；
 9. 核对终态、产物和审计记录后汇报，只有用户显式接受才能 `tasks/accept`。
@@ -155,9 +157,10 @@ Kimi 停用时，`agents/list` 会标记 `enabled=false`；如用户仍指定 Ki
 - Gateway 创建任务后工具结果出现 `agentHub supervision active` 且
   `delivery=gateway-durable`；WebUI agent bridge 创建任务后出现
   `delivery=agent-bridge-durable`，并通过 Hermes 原生 async-completion queue 回到
-  原 `mt...` session；普通 CLI/TUI 只能出现 `process-only`，进程退出后不保证
-  唤醒。让任务进入批准、阻塞或等待验收时，可用的原 Hermes surface 在一个轮询
-  周期内被唤醒并先调用 `tasks/get`。
+  原 `mt...` session；重启 Studio、且尚未在该 session 产生新用户 turn 时，常驻
+  Gateway 仍会拉取该 watch 并发布 native completion。普通 CLI/TUI 只能出现
+  `process-only`，进程退出后不保证唤醒。让任务进入批准、阻塞或等待验收时，可用的
+  原 Hermes surface 在一个轮询周期内被唤醒并先调用 `tasks/get`。
 - 暂停 Hermes 超过一个租约周期后恢复，收到同一个 `notification_id`；ACK 后不再
   重投。Hermes/profile 重启后 Gateway/agent-bridge durable watch 仍存在并继续
   监督；process-only watch 必须重新注册。

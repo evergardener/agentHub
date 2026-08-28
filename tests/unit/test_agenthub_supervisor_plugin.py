@@ -313,6 +313,20 @@ def test_agent_bridge_dispatch_feature_detects_hermes_public_api(monkeypatch):
     assert calls == [{"goal": "wake"}]
 
 
+def test_gateway_process_detection_matches_documented_cli(monkeypatch):
+    plugin = _load_plugin()
+    monkeypatch.setattr(plugin.sys, "argv", [
+        "hermes_cli.main", "--profile", "qishuo", "gateway", "run",
+        "--replace", "--external-supervisor",
+    ])
+    assert plugin._is_gateway_process() is True
+
+    monkeypatch.setattr(plugin.sys, "argv", [
+        "hermes", "plugins", "doctor", "agenthub-supervisor",
+    ])
+    assert plugin._is_gateway_process() is False
+
+
 def test_agent_bridge_dispatch_rejection_remains_retriable(monkeypatch):
     plugin = _load_plugin()
     ctx = _Context()
@@ -533,10 +547,12 @@ def test_gateway_poll_filters_cli_owned_watches():
     assert plugin._owned_watches("cli") == {}
 
 
-def test_gateway_poll_never_claims_agent_bridge_watches():
+def test_gateway_poll_relays_durable_agent_bridge_watches(monkeypatch):
     plugin = _load_plugin()
     ctx = _Context(gateway=True)
     plugin._set_context_for_tests(ctx)
+    monkeypatch.setattr(
+        plugin, "_agent_bridge_delivery_available", lambda: True)
     ctx.state.set("watches", {
         "WATCH-GW": {
             "task_id": "T-GW", "context_id": "ctx-gw",
@@ -551,8 +567,132 @@ def test_gateway_poll_never_claims_agent_bridge_watches():
         },
     })
 
-    assert list(plugin._owned_watches("gateway")) == ["WATCH-GW"]
+    assert list(plugin._owned_watches("gateway")) == [
+        "WATCH-GW", "WATCH-WEBUI"]
     assert list(plugin._owned_watches("agent_bridge")) == ["WATCH-WEBUI"]
+
+
+def test_gateway_does_not_claim_agent_bridge_watch_without_native_queue(
+        monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context(gateway=True)
+    plugin._set_context_for_tests(ctx)
+    monkeypatch.setattr(
+        plugin, "_agent_bridge_delivery_available", lambda: False)
+    ctx.state.set("watches", {"WATCH-WEBUI": {
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "session_key": "mt-webui-1", "owner_mode": "agent_bridge",
+        "owner_instance_id": "", "durable": True,
+    }})
+
+    assert plugin._owned_watches("gateway") == {}
+    assert list(plugin._owned_watches("agent_bridge")) == ["WATCH-WEBUI"]
+
+
+def test_gateway_process_starts_persistent_relay_before_any_watch(
+        monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    monkeypatch.setattr(plugin, "_session_surface", lambda _key="": "unknown")
+    monkeypatch.setattr(plugin, "_is_gateway_process", lambda: True)
+    monkeypatch.setattr(
+        plugin, "_agent_bridge_delivery_available", lambda: True)
+    started = []
+
+    class FakeThread:
+        def __init__(self, *, target, name, daemon):
+            assert target is plugin._poll_loop
+            assert name == "plugin:agenthub-supervisor:poll"
+            assert daemon is True
+            self.alive = False
+
+        def is_alive(self):
+            return self.alive
+
+        def start(self):
+            self.alive = True
+            started.append(True)
+
+    monkeypatch.setattr(plugin.threading, "Thread", FakeThread)
+
+    plugin._ensure_polling()
+
+    assert started == [True]
+    assert plugin._poll_surface == "gateway"
+    plugin._stop_polling()
+    assert plugin._poll_stop.is_set()
+
+
+def test_non_gateway_host_does_not_start_persistent_relay(monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    monkeypatch.setattr(plugin, "_session_surface", lambda _key="": "unknown")
+    monkeypatch.setattr(plugin, "_is_gateway_process", lambda: False)
+    monkeypatch.setattr(
+        plugin, "_agent_bridge_delivery_available", lambda: True)
+    started = []
+    monkeypatch.setattr(
+        plugin.threading, "Thread", lambda **_: started.append(True))
+
+    plugin._ensure_polling()
+
+    assert started == []
+    manifest = PLUGIN.with_name("plugin.yaml").read_text(encoding="utf-8")
+    assert "version: 1.3.0" in manifest
+
+
+def test_gateway_relay_pulls_and_dispatches_agent_bridge_notification(
+        monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    plugin._poll_surface = "gateway"
+    ctx.state.set("watches", {"WATCH-WEBUI": {
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "session_key": "mt-webui-1", "owner_mode": "agent_bridge",
+        "owner_instance_id": "", "durable": True,
+    }})
+    monkeypatch.setattr(
+        plugin, "_agent_bridge_delivery_available", lambda: True)
+    calls = []
+    notification = {
+        "notification_id": "SN-WEBUI", "watch_id": "WATCH-WEBUI",
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "event_type": "conversation.user_message",
+        "internal_status": "message_pending", "message_id": "M-USER",
+    }
+
+    def call_agenthub(action, **fields):
+        calls.append((action, fields))
+        return {"notifications": [notification]}
+
+    monkeypatch.setattr(plugin, "_call_agenthub", call_agenthub)
+    monkeypatch.setattr(
+        plugin, "_dispatch_agent_bridge_notification",
+        lambda pulled, watch: "deleg-relay-1"
+        if pulled == notification and watch["session_key"] == "mt-webui-1"
+        else None)
+    monkeypatch.setattr(plugin, "_poll_seconds", lambda: 0)
+
+    class _StopOnce:
+        def __init__(self):
+            self.count = 0
+
+        def is_set(self):
+            return self.count > 0
+
+        def wait(self, _seconds):
+            self.count += 1
+
+    plugin._poll_stop = _StopOnce()
+    plugin._poll_loop()
+
+    assert calls == [("supervision/pull", {
+        "watch_ids": ["WATCH-WEBUI"], "limit": 20})]
+    assert ctx.state.get("deliveries")["SN-WEBUI"]["delegation_id"] == \
+        "deleg-relay-1"
 
 
 def test_agent_bridge_never_adopts_legacy_bare_session_watch(monkeypatch):

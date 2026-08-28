@@ -1,5 +1,5 @@
 name: agenthub-supervisor
-version: 1.2.0
+version: 1.3.0
 description: >
   Supervise agentHub tasks and wake an available originating qishuo delivery
   surface for approvals, failures, and result acceptance. Canonical Gateway

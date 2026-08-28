@@ -192,10 +192,13 @@ enable and re-discover that Agent, or choose a currently enabled Agent.
   durably bound to a canonical Gateway route. An `active` marker with
   `delivery=agent-bridge-durable` means Hermes WebUI will route a native async
   completion back to the originating `mt...` session, including after a Studio
-  restart when the pinned compatibility gate is healthy; do not rewrite it as
-  an `agent:` key or use Gateway injection. A `process-only` marker means a CLI/TUI
-  process can poll and inject only while that same Hermes process lives; it is
-  not restart-recoverable. An `unavailable` marker requires bounded
+  restart when the pinned compatibility gate is healthy. The long-lived Hermes
+  Gateway relays these Studio-owned watches into the native completion queue,
+  so recovery must not depend on the original profile worker receiving a new
+  user turn first; do not rewrite the destination as an `agent:` key or use
+  Gateway message injection. A `process-only` marker means a CLI/TUI process
+  can poll and inject only while that same Hermes process lives; it is not
+  restart-recoverable. An `unavailable` marker requires bounded
   `tasks/get` polling for the current turn. Never describe process-only or
   unavailable work as durably supervised.
 - A trusted notification envelope is only a wakeup containing identifiers. Never
