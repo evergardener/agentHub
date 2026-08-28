@@ -74,8 +74,10 @@ qishuo 原生 `a2a_call` 不提供自定义 `metadata.agent`，因此 agentHub
 `conversation.user_message` 时只接收 `message_id`，恢复 turn 使用 plugin 自带的
 窄化 `agenthub_conversation_message_get` 取回正文；普通生命周期事件使用
 `agenthub_notification_task_get` 读取权威任务状态。这两类工具只允许固定动作和
-原 `context_id`，不依赖恢复 turn 是否暴露通用 `a2a_call`，也不得用 shell 或
-`execute_code` 绕过。纯咨询通过 `agenthub_conversation_respond` 回写；需要执行时使用相同 context 创建带
+原 `context_id`，并注册在独立 `agenthub_supervisor` plugin toolset，避免覆盖内置
+`a2a` 导致 API-server turn 丢失工具；它们不依赖恢复 turn 是否暴露通用
+`a2a_call`，也不得用 shell 或 `execute_code` 绕过。纯咨询通过
+`agenthub_conversation_respond` 回写；需要执行时使用相同 context 创建带
 `parent_task_id` 的新任务和新 Agent Session，再回写新任务 ID。旧任务和旧原生
 Session 均保持终态。未回写响应时，服务端拒绝该通知 ACK。
 

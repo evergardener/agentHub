@@ -285,7 +285,7 @@ def test_agent_bridge_native_dispatch_is_bound_to_originating_webui_session(
     assert captured["parent_session_id"] == "mt-webui-1"
     assert captured["origin_ui_session_id"] == "mt-webui-1"
     assert captured["origin_session_id"] == "mt-webui-1"
-    assert captured["toolsets"] == ["a2a"]
+    assert captured["toolsets"] == ["agenthub_supervisor"]
     result = captured["runner"]()
     assert result["status"] == "completed"
     assert "SN-WEBUI" in result["summary"]
@@ -711,7 +711,30 @@ def test_non_gateway_host_does_not_start_persistent_relay(monkeypatch):
 
     assert started == []
     manifest = PLUGIN.with_name("plugin.yaml").read_text(encoding="utf-8")
-    assert "version: 1.4.0" in manifest
+    assert "version: 1.5.0" in manifest
+
+
+def test_plugin_tools_use_dedicated_non_override_toolset(monkeypatch):
+    plugin = _load_plugin()
+    registered = []
+
+    class RegisterContext(_Context):
+        def register_hook(self, *_args, **_kwargs):
+            pass
+
+        def on_unload(self, _callback):
+            pass
+
+        def register_tool(self, **kwargs):
+            registered.append(kwargs)
+
+    monkeypatch.setattr(plugin, "_ensure_polling", lambda **_kwargs: None)
+    plugin.register(RegisterContext())
+
+    assert len(registered) == 7
+    assert {item["toolset"] for item in registered} == {
+        "agenthub_supervisor"}
+    assert {item["name"] for item in registered} == set(plugin._TOOLS)
 
 
 def test_gateway_relay_pulls_and_dispatches_agent_bridge_notification(

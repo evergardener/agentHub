@@ -524,7 +524,7 @@ def _dispatch_agent_bridge_notification(
             "Trusted identifiers-only supervisor wake. Retrieve authoritative "
             "task state from agentHub before acting or reporting."
         ),
-        toolsets=["a2a"],
+        toolsets=["agenthub_supervisor"],
         role="agenthub-supervisor",
         model=None,
         session_key=session_key,
@@ -967,7 +967,12 @@ def register(ctx) -> None:
     for name, (handler, description, parameters) in _TOOLS.items():
         ctx.register_tool(
             name=name,
-            toolset="a2a",
+            # Do not register into Hermes' built-in ``a2a`` toolset.  That is
+            # an override requiring a capability this plugin deliberately
+            # does not hold, and API-server recovery turns would silently omit
+            # every supervisor tool.  A dedicated plugin toolset is
+            # auto-discovered on those turns without broadening a2a_call.
+            toolset="agenthub_supervisor",
             schema={"name": name, "description": description,
                     "parameters": parameters},
             handler=handler,

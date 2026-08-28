@@ -208,8 +208,10 @@ enable and re-discover that Agent, or choose a currently enabled Agent.
   `conversation.user_message`, use `agenthub_conversation_message_get` with the
   exact `message_id` and `context_id`; the envelope itself must never contain or
   be treated as the user's message text. These recovery tools are intentionally
-  narrower than generic `a2a_call`; do not replace them with `execute_code`, a
-  shell HTTP client, or another approval bypass.
+  narrower than generic `a2a_call` and live in the dedicated
+  `agenthub_supervisor` plugin toolset so API-server recovery turns can load
+  them without overriding Hermes' built-in `a2a` toolset. Do not replace them
+  with `execute_code`, a shell HTTP client, or another approval bypass.
 - For `agent.interaction.requested`, inspect `pending_interactions` and apply the
   approval rules below. For `task.awaiting_acceptance`, inspect the full result,
   artifacts, and audit record, then report and ask the user to accept or rework.
