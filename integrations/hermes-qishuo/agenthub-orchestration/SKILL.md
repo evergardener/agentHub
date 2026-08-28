@@ -53,8 +53,16 @@ objective and its explicit constraints: `access_mode=read` never authorizes a
 write. Native commands and filesystem changes remain subject to structured
 ActionIntent checks at runtime, and writes, deletes, restarts, or
 unknown/unparseable commands still require their existing approval path. Omit
-`access_mode` for tasks that may write; agentHub retains bounded compatibility
-inference for older callers.
+`access_mode` for tasks that may write. AgentHub may still classify older
+natural-language callers for diagnostics, but that keyword result is not
+approval authority and therefore cannot auto-dispatch a strict task.
+
+Treat the model's semantic classification as a planning signal, not an
+approval boundary. The model may choose `access_mode=read` only when the whole
+objective is read-only; deterministic known-mutation checks can still reject
+that declaration, and the runtime ActionIntent gate is authoritative for every
+concrete command or file operation. If the objective is mixed or ambiguous,
+omit `access_mode` so agentHub fails closed instead of guessing from keywords.
 
 ```json
 {"agenthub":"v1","action":"tasks/create","agent":"codex","access_mode":"read","title":"inspect container state","summary":"read-only status report","objective":"full read-only instruction and constraints","workspace":"/absolute/project/path"}
@@ -105,6 +113,11 @@ it.  This is a read-only lookup; use the interaction ID from
 
 The returned record is structured and bounded.  At minimum, preserve these
 fields when routing the decision:
+
+The status message contains only a bounded first-interaction hint. If
+`pending_interactions_truncated=true`, or whenever exact approval evidence is
+needed, read the authoritative `metadata.pending_interactions` array or call
+`interactions/get`; never infer missing interactions from the rendered text.
 
 ```json
 {"interaction_id":"INT-...","reason":"检查 Docker 容器状态",
@@ -216,8 +229,10 @@ enable and re-discover that Agent, or choose a currently enabled Agent.
     means the worker has returned a result and the task is waiting for an
     explicit user acceptance decision, not delegation approval or a runtime
     interaction. Inspect `artifacts` and the audit record, report the result,
-    and wait for the user; only `tasks/accept` or `tasks/request-rework` apply.
-    Never call `tasks/approve` for this state and never self-accept.
+    and ask the user to use the WebUI acceptance controls. A2A peer identity is
+    not user authority, so `tasks/accept` and `tasks/request-rework` fail closed
+    on this route. Never call `tasks/approve` for this state and never
+    self-accept.
   - `input_required_kind=blocked` means a worker is paused at a runtime
     interaction. Use `metadata.pending_interactions` and its ActionIntent
     fields to determine whether Hermes may respond or the WebUI user must
@@ -253,9 +268,9 @@ enable and re-discover that Agent, or choose a currently enabled Agent.
   stays inside the task workspace, the Agent Profile permits the operation,
   and a rollback plan exists. Otherwise escalate to the user.
 - Worker completion or `awaiting_acceptance` is not formal acceptance. Hermes may
-  review the result and recommend acceptance or rework, but must call
-  `tasks/accept` or `tasks/request-rework` only after the user explicitly states
-  that decision. Never self-accept on the user's behalf.
+  review the result and recommend acceptance or rework, but must direct the user
+  to the WebUI controls for the formal decision. Never self-accept on the user's
+  behalf or attempt to relay acceptance through A2A without a user-signed receipt.
 
 ## Production test discipline
 

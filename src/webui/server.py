@@ -625,9 +625,9 @@ def create_app() -> FastAPI:
         conn = _conn()
         try:
             return {"tasks": _rows(conn.execute(
-                "SELECT * FROM tasks WHERE status IN (?, ?)"
+                "SELECT * FROM tasks WHERE status IN (?, ?, ?)"
                 " ORDER BY updated_at DESC LIMIT ?;",
-                ("awaiting_acceptance", "reviewed",
+                ("awaiting_acceptance", "reviewed", "completed",
                  min(max(int(limit), 1), 500)),
             ))}
         finally:

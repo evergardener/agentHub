@@ -140,7 +140,9 @@ def sync_watch(conn, watch_id: str, *, commit: bool = True) -> None:
     # but a durable interaction record can also arrive independently.  Do not
     # make Hermes wait for a later status poll in that case.
     interaction_ids = _pending_interaction_ids(conn, task_id)
-    if interaction_ids and status in {"assigned", "working", "blocked"}:
+    interaction_wakeup = bool(
+        interaction_ids and status in {"assigned", "working", "blocked"})
+    if interaction_wakeup:
         digest = hashlib.sha256(
             "\0".join(interaction_ids).encode("utf-8")).hexdigest()[:20]
         _enqueue(
@@ -157,18 +159,24 @@ def sync_watch(conn, watch_id: str, *, commit: bool = True) -> None:
                 dedupe_key=f"delegation:{approval['id']}",
                 event_type="task.approval_requested",
                 internal_status=status)
-    elif status == "blocked":
+    elif status == "blocked" and not interaction_wakeup:
+        # A structured native interaction is the more specific reason for a
+        # blocked task.  Emitting both edges creates two Hermes wakeups for the
+        # same gate, so the generic blocked event is only the fallback when no
+        # durable interaction exists.
         _enqueue(
             conn, watch_id=watch_id, task_id=task_id,
             dedupe_key=f"blocked:{task['updated_at']}",
             event_type="task.blocked",
             internal_status=status)
     elif status in {"awaiting_acceptance", "completed", "reviewed"}:
+        notification_status = (
+            "awaiting_acceptance" if status == "completed" else status)
         _enqueue(
             conn, watch_id=watch_id, task_id=task_id,
             dedupe_key=f"acceptance:{task['updated_at']}",
             event_type="task.awaiting_acceptance",
-            internal_status=status)
+            internal_status=notification_status)
     elif status in {"failed", "cancelled"}:
         _enqueue(
             conn, watch_id=watch_id, task_id=task_id,
@@ -222,10 +230,14 @@ def pull_notifications(conn, *, peer: str, watch_ids: Iterable[str],
         attempts = int(row["attempts"]) + 1
         lease_seconds = min(300, 60 * (2 ** min(attempts - 1, 2)))
         lease_until = _iso(current + timedelta(seconds=lease_seconds))
-        conn.execute(
+        claimed = conn.execute(
             "UPDATE supervision_outbox SET status = 'inflight', attempts = ?,"
-            " lease_until = ? WHERE id = ?;",
-            (attempts, lease_until, row["id"]))
+            " lease_until = ? WHERE id = ? AND ("
+            " (status = 'pending' AND available_at <= ?) OR"
+            " (status = 'inflight' AND lease_until <= ?));",
+            (attempts, lease_until, row["id"], current_iso, current_iso))
+        if claimed.rowcount != 1:
+            continue
         public.append({
             "notification_id": row["id"],
             "watch_id": row["watch_id"],

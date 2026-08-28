@@ -91,7 +91,9 @@ _MUTATING_DELETE_COMMAND = re.compile(
 )
 _MUTATING_WRITE_COMMAND = re.compile(
     r"(?<![\w-])(?:touch|mkdir|mv|cp|tee|chmod|chown|"
-    r"sed\s+-i|git\s+(?:commit|push)|docker\s+(?:build|pull|run))\b",
+    r"sed\s+-i|git\s+(?:commit|push)|docker\s+(?:build|pull|run)|"
+    r"kubectl\s+(?:apply|create|patch|replace|set|scale|rollout)|"
+    r"helm\s+(?:install|upgrade|rollback))\b",
     re.IGNORECASE,
 )
 _NEGATED_CHINESE_RISK_PHRASES = (
@@ -339,13 +341,20 @@ class ApprovalPolicy:
         return risk
 
     def decide(self, conn: sqlite3.Connection, objective: str, *,
-               access_mode: str | None = None) -> Decision:
+               access_mode: str | None = None,
+               require_structured_read: bool = False) -> Decision:
         access_mode = normalize_access_mode(access_mode)
         risk, negation_ambiguous = self._classify(
             objective, access_mode=access_mode)
         if negation_ambiguous:
             return Decision("ask", "unknown", "只读声明无法解析，按 fail-closed 原则等待用户批准")
         if risk == "read":
+            if require_structured_read and access_mode != "read":
+                return Decision(
+                    "ask", "unknown",
+                    "自然语言只读分类仅供兼容提示；缺少结构化 access_mode=read，"
+                    "按 fail-closed 原则等待用户批准",
+                )
             reason = "只读/查询类，自动批准"
             if access_mode == "read":
                 reason = "显式 read capability 且未发现写入意图，自动批准初始委派"

@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from hermes.policy import ApprovalPolicy
 from orchestrator import agent_control_store, collaboration_store, state_store
-from orchestrator.a2a_server import create_app
+from orchestrator.a2a_server import _message_interaction_summary, create_app
 from orchestrator.task_manager import TaskManager
 
 pytestmark = pytest.mark.anyio
@@ -107,7 +107,7 @@ def test_dynamic_worker_can_be_added_without_peer_config(env):
                                  endpoint="http://worker:8299")
     response = client.post(
         "/a2a", json=_control("tasks/create", agent="pi",
-                              objective="查询运行状态"),
+                                  objective="查询运行状态", access_mode="read"),
         headers=_bearer()).json()
     task = response["result"]["task"]
     assert delegated == [(task["id"], "pi")]
@@ -133,7 +133,8 @@ def test_task_response_is_native_hermes_readable(env):
     tm, client, delegated = env
     response = client.post(
         "/a2a", json=_control("tasks/create", agent="codex",
-                              objective="查询当前任务列表"),
+                                  objective="查询当前任务列表",
+                                  access_mode="read"),
         headers=_bearer()).json()
     task = response["result"]["task"]
     assert task["status"]["state"] == "submitted"
@@ -170,7 +171,7 @@ def test_tasks_create_persists_explicit_execution_workspace(env, tmp_path):
     response = client.post(
         "/a2a", json=_control(
             "tasks/create", agent="codex", objective="查询项目状态",
-            workspace=str(execution_workspace)),
+            access_mode="read", workspace=str(execution_workspace)),
         headers=_bearer()).json()
 
     task = response["result"]["task"]
@@ -216,7 +217,24 @@ def test_tasks_create_readonly_docker_status_dispatches_without_approval(
         "SELECT payload_json FROM events WHERE task_id = ?"
         " AND event_type = 'task.access_mode.selected';", (task["id"],)
     ).fetchone()
-    assert json.loads(selected["payload_json"])["access_mode"] == "read"
+    assert json.loads(selected["payload_json"]) == {
+        "agent_id": "codex",
+        "access_mode": "read",
+        "source": "caller_semantic_declaration",
+        "authority": "initial_dispatch_only",
+    }
+    classified = tm.conn.execute(
+        "SELECT payload_json FROM events WHERE task_id = ?"
+        " AND event_type = 'task.intent.classified';", (task["id"],)
+    ).fetchone()
+    assert json.loads(classified["payload_json"]) == {
+        "risk": "read",
+        "decision": "auto",
+        "reason": "显式 read capability 且未发现写入意图，自动批准初始委派",
+        "source": "structured_access_mode",
+        "runtime_authority": False,
+        "runtime_gate": "structured_action_intent",
+    }
 
 
 def test_tasks_create_explicit_read_dispatches_without_keyword_inference(
@@ -238,7 +256,7 @@ def test_tasks_create_explicit_read_dispatches_without_keyword_inference(
     assert delegated == [(task["id"], "codex")]
 
 
-def test_tasks_create_readonly_docker_status_legacy_inference(
+def test_tasks_create_readonly_legacy_inference_is_not_approval_authority(
         env, tmp_path):
     tm, client, delegated = env
     execution_workspace = tmp_path / "project"
@@ -255,9 +273,16 @@ def test_tasks_create_readonly_docker_status_legacy_inference(
         headers=_bearer()).json()
 
     task = response["result"]["task"]
-    assert task["status"]["state"] == "submitted"
+    assert task["status"]["state"] == "input-required"
     assert task["metadata"].get("access_mode") is None
-    assert delegated == [(task["id"], "codex")]
+    assert delegated == []
+    classified = tm.conn.execute(
+        "SELECT payload_json FROM events WHERE task_id = ?"
+        " AND event_type = 'task.intent.classified';", (task["id"],)
+    ).fetchone()
+    assert json.loads(classified["payload_json"])["source"] == \
+        "legacy_keyword_compatibility"
+    assert json.loads(classified["payload_json"])["decision"] == "ask"
 
 
 def test_tasks_create_readonly_capability_does_not_bypass_restart(
@@ -361,7 +386,7 @@ def test_tasks_create_persists_profile_allowed_runtime_config(env, tmp_path):
         "/a2a", json=_control(
             "tasks/create", agent="codex", objective="查询运行状态",
             model="gpt-5.6-luna", reasoning_effort="max",
-            workspace=str(execution_workspace)),
+            access_mode="read", workspace=str(execution_workspace)),
         headers=_bearer()).json()
 
     task = response["result"]["task"]
@@ -562,12 +587,31 @@ def test_tasks_get_exposes_safe_pending_native_interaction(env):
     }]
     status_text = task["status"]["message"]["parts"][0]["text"]
     assert "pending_interactions=" in status_text
+    assert "pending_interactions_total=1" in status_text
+    assert "pending_interactions_truncated=false" in status_text
+    assert task["metadata"]["pending_interactions_summary"] == {
+        "total": 1,
+        "included": 1,
+        "truncated": False,
+        "authoritative_field": "metadata.pending_interactions",
+        "detail_action": "interactions/get",
+    }
     assert interaction["id"] in status_text
     assert "awaiting_hermes" in status_text
     tm.conn.execute(
         "UPDATE action_intents SET status = 'awaiting_user',"
         " policy_route = 'user' WHERE id = ?;", (intent["id"],))
     tm.conn.commit()
+    awaiting_user = client.post(
+        "/a2a", json=_control("tasks/get", task_id=task_id),
+        headers=_bearer()).json()["result"]["task"]
+    assert awaiting_user["metadata"]["state_detail"] == \
+        "awaiting_user_interaction"
+    assert awaiting_user["metadata"]["required_action"] == \
+        "user_interaction"
+    assert awaiting_user["metadata"]["required_actor"] == "user"
+    assert awaiting_user["metadata"]["available_actions"] == []
+    assert awaiting_user["metadata"]["ui_actions"] == ["approve", "reject"]
     denied = client.post(
         "/a2a", json=_control(
             "interactions/respond", interaction_id=interaction["id"],
@@ -577,17 +621,37 @@ def test_tasks_get_exposes_safe_pending_native_interaction(env):
     assert "requires user approval" in denied["error"]["message"]
 
 
+def test_pending_interaction_message_summary_is_bounded_and_explicit():
+    summary, truncated = _message_interaction_summary([
+        {
+            "interaction_id": "INT-1", "inspectable": True,
+            "command": "x" * 1000, "args": ["y" * 1000] * 20,
+            "cwd": "/" + "c" * 1000,
+            "workspace": "/" + "w" * 1000,
+            "rollback_plan": "r" * 1000,
+        },
+        {"interaction_id": "INT-2"},
+    ])
+
+    assert truncated is True
+    assert len(summary) == 1
+    assert summary[0]["interaction_id"] == "INT-1"
+    assert len(summary[0]["command"]) == 160
+    assert len(summary[0]["args"]) == 4
+    assert all(len(arg) == 96 for arg in summary[0]["args"])
+    assert len(json.dumps(summary, ensure_ascii=False)) < 1800
+
+
 def _command_read_interaction(tm, *, command="docker", args=None,
-                              context_id="ctx-live"):
+                              context_id="ctx-live", blocked=True):
     collaboration_id = collaboration_store.ensure_a2a_collaboration(
         tm.conn, peer="qishuo", context_id=context_id, objective="诊断",
     )["collaboration_id"]
     task_id = tm.create_task("只读诊断", collaboration_id=collaboration_id)
-    for status in (
-        state_store.TaskStatus.ASSIGNED,
-        state_store.TaskStatus.WORKING,
-        state_store.TaskStatus.BLOCKED,
-    ):
+    statuses = [state_store.TaskStatus.ASSIGNED, state_store.TaskStatus.WORKING]
+    if blocked:
+        statuses.append(state_store.TaskStatus.BLOCKED)
+    for status in statuses:
         state_store.transition_task(tm.conn, task_id, status)
     binding = collaboration_store.bind_agent_session(
         tm.conn, collaboration_id=collaboration_id, task_id=task_id,
@@ -627,6 +691,24 @@ def _command_read_interaction(tm, *, command="docker", args=None,
     collaboration_store.attach_action_intent(
         tm.conn, interaction["id"], intent["id"])
     return task_id, interaction, intent
+
+
+def test_tasks_get_surfaces_interaction_before_blocked_status_event(env):
+    tm, client, _ = env
+    task_id, interaction, _ = _command_read_interaction(tm, blocked=False)
+
+    task = client.post(
+        "/a2a", json=_control("tasks/get", task_id=task_id),
+        headers=_bearer()).json()["result"]["task"]
+
+    assert state_store.get_task(tm.conn, task_id)["status"] == "working"
+    assert task["status"]["state"] == "input-required"
+    assert task["metadata"]["internal_status"] == "working"
+    assert task["metadata"]["input_required_kind"] == "blocked"
+    assert task["metadata"]["pending_interactions"][0][
+        "interaction_id"] == interaction["id"]
+    assert task["metadata"]["available_actions"] == [
+        "interactions/respond"]
 
 
 def test_command_read_details_are_context_scoped_and_not_delegation_approval(
@@ -737,11 +819,13 @@ def test_same_peer_context_reuses_collaboration_for_multiple_tasks(env):
     tm, client, delegated = env
     first = client.post(
         "/a2a", json=_control("tasks/create", agent="codex",
-                              objective="查询第一项状态"),
+                               objective="查询第一项状态",
+                               access_mode="read"),
         headers=_bearer()).json()["result"]["task"]
     second = client.post(
         "/a2a", json=_control("tasks/create", agent="codex",
-                              objective="查询第二项状态"),
+                               objective="查询第二项状态",
+                               access_mode="read"),
         headers=_bearer()).json()["result"]["task"]
 
     rows = tm.conn.execute(
@@ -842,25 +926,85 @@ def test_acceptance_is_distinct_input_required_and_explicit_user_action(env):
     assert pending["metadata"]["state_detail"] == "awaiting_acceptance"
     assert pending["metadata"]["required_action"] == \
         "explicit_user_acceptance"
-    assert pending["metadata"]["available_actions"] == [
-        "tasks/accept", "tasks/request-rework"]
+    assert pending["metadata"]["required_actor"] == "user"
+    assert pending["metadata"]["available_actions"] == []
+    assert pending["metadata"]["ui_actions"] == [
+        "accept", "request-rework"]
     assert pending["artifacts"] == [{
         "name": "last-message.md", "type": "file",
         "path": "/workspace/last-message.md", "sha256": "a" * 64,
     }]
     status_message = pending["status"]["message"]["parts"][0]["text"]
     assert "等待用户验收，不是委派审批或运行时审批" in status_message
-    assert "available_actions=tasks/accept,tasks/request-rework" in \
-        status_message
+    assert "available_actions=none" in status_message
 
-    accepted = client.post(
+    denied = client.post(
         "/a2a", json=_control("tasks/accept", task_id=task_id),
+        headers=_bearer()).json()
+    assert denied["error"]["code"] == -32003
+    assert "explicit user authority" in denied["error"]["message"]
+    assert state_store.get_task(tm.conn, task_id)["status"] == \
+        "awaiting_acceptance"
+
+    tm.accept_result(task_id, decided_by="user", via="webui")
+    accepted = client.post(
+        "/a2a", json=_control("tasks/get", task_id=task_id),
         headers=_bearer()).json()["result"]["task"]
     assert accepted["status"]["state"] == "completed"
     assert accepted["metadata"]["internal_status"] == "accepted"
 
 
-def test_a2a_rework_requires_feedback_and_does_not_reopen_completed(env):
+def test_legacy_completed_row_is_exposed_as_canonical_acceptance_gate(env):
+    tm, client, _ = env
+    collaboration_id = collaboration_store.ensure_a2a_collaboration(
+        tm.conn, peer="qishuo", context_id="ctx-live", objective="验收",
+    )["collaboration_id"]
+    task_id = tm.create_task("历史完成任务", collaboration_id=collaboration_id)
+    for status in (
+        state_store.TaskStatus.ASSIGNED,
+        state_store.TaskStatus.WORKING,
+        state_store.TaskStatus.COMPLETED,
+    ):
+        state_store.transition_task(tm.conn, task_id, status)
+
+    task = client.post(
+        "/a2a", json=_control("tasks/get", task_id=task_id),
+        headers=_bearer()).json()["result"]["task"]
+
+    assert task["status"]["state"] == "input-required"
+    assert task["metadata"]["internal_status"] == "awaiting_acceptance"
+    assert task["metadata"]["legacy_internal_status"] == "completed"
+    assert task["metadata"]["input_required_kind"] == "acceptance"
+    assert task["metadata"]["available_actions"] == []
+    assert task["metadata"]["ui_actions"] == [
+        "accept", "request-rework"]
+
+
+def test_status_message_bounds_long_result_detail(env):
+    tm, client, _ = env
+    collaboration_id = collaboration_store.ensure_a2a_collaboration(
+        tm.conn, peer="qishuo", context_id="ctx-live", objective="验收",
+    )["collaboration_id"]
+    task_id = tm.create_task("长结果", collaboration_id=collaboration_id)
+    state_store.transition_task(
+        tm.conn, task_id, state_store.TaskStatus.ASSIGNED)
+    state_store.transition_task(
+        tm.conn, task_id, state_store.TaskStatus.WORKING)
+    state_store.transition_task(
+        tm.conn, task_id, state_store.TaskStatus.AWAITING_ACCEPTANCE,
+        result_summary="证" * 5000)
+
+    task = client.post(
+        "/a2a", json=_control("tasks/get", task_id=task_id),
+        headers=_bearer()).json()["result"]["task"]
+    message = task["status"]["message"]["parts"][0]["text"]
+
+    assert task["metadata"]["status_detail_truncated"] is True
+    assert "status_detail_truncated=true" in message
+    assert len(message) < 1500
+
+
+def test_a2a_rework_requires_explicit_webui_user_authority(env):
     tm, client, _ = env
     collaboration_id = collaboration_store.ensure_a2a_collaboration(
         tm.conn, peer="qishuo", context_id="ctx-live", objective="返工",
@@ -878,13 +1022,23 @@ def test_a2a_rework_requires_feedback_and_does_not_reopen_completed(env):
         "/a2a", json=_control(
             "tasks/request-rework", task_id=task_id, feedback="  "),
         headers=_bearer()).json()
-    assert missing["error"]["code"] == -32602
-    assert "feedback" in missing["error"]["message"]
+    assert missing["error"]["code"] == -32003
+    assert "explicit user authority" in missing["error"]["message"]
 
-    rework = client.post(
+    denied = client.post(
         "/a2a", json=_control(
             "tasks/request-rework", task_id=task_id,
             feedback="测试尚未覆盖恢复路径"),
+        headers=_bearer()).json()
+    assert denied["error"]["code"] == -32003
+    assert state_store.get_task(tm.conn, task_id)["status"] == \
+        "awaiting_acceptance"
+
+    tm.reject_result(
+        task_id, feedback="测试尚未覆盖恢复路径",
+        decided_by="user", via="webui")
+    rework = client.post(
+        "/a2a", json=_control("tasks/get", task_id=task_id),
         headers=_bearer()).json()["result"]["task"]
     assert rework["metadata"]["internal_status"] == "rework_pending"
     assert rework["status"]["state"] == "working"
@@ -907,7 +1061,8 @@ def test_supervision_register_pull_and_ack_are_peer_scoped(env):
     tm, client, _ = env
     created = client.post(
         "/a2a", json=_control(
-            "tasks/create", agent="codex", objective="查询当前状态"),
+            "tasks/create", agent="codex", objective="查询当前状态",
+            access_mode="read"),
         headers=_bearer()).json()["result"]["task"]
 
     registered = client.post(
@@ -999,7 +1154,8 @@ def test_worker_proxy_treats_adapter_token_as_downstream_credential(
 def test_legacy_metadata_agent_remains_compatible(env):
     tm, client, delegated = env
     result = client.post(
-        "/a2a", json=_legacy("查询任务", agent="codex"),
+        "/a2a", json=_legacy(
+            "查询任务", agent="codex", access_mode="read"),
         headers={"X-Agent-Token": LEGACY_TOKEN}).json()["result"]
     assert "task" not in result
     assert delegated == [(result["id"], "codex")]

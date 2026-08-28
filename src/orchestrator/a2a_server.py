@@ -182,9 +182,24 @@ def _infer_input_required_kind(conn, row, *, pending: dict | None) -> str:
     return "input-required"
 
 
+def _canonical_internal_status(value: str) -> tuple[str, str | None]:
+    """Expose historical ``completed`` rows as the acceptance gate they are.
+
+    Worker completion used to be persisted as ``completed`` before explicit
+    acceptance was introduced.  Leaking that legacy name makes clients infer
+    terminal success even though the only legal next step is user acceptance.
+    Keep the stored value available for audit, but publish one canonical
+    lifecycle vocabulary to A2A consumers.
+    """
+    if value == TaskStatus.COMPLETED.value:
+        return TaskStatus.AWAITING_ACCEPTANCE.value, value
+    return value, None
+
+
 def _input_required_actions(
         input_required_kind: str | None,
-        pending_interactions: list[dict]) -> tuple[str, str, list[str]]:
+        pending_interactions: list[dict]
+        ) -> tuple[str, str, list[str], str, list[str]]:
     """Describe the next gate without overloading A2A's state enum.
 
     A2A 1.0 has no ``awaiting-acceptance`` TaskState.  Keep the wire state at
@@ -198,12 +213,16 @@ def _input_required_actions(
             "awaiting_delegation_approval",
             "hermes_approval",
             ["tasks/approve", "tasks/reject"],
+            "hermes",
+            [],
         )
     if input_required_kind in {"acceptance", "review"}:
         return (
             "awaiting_acceptance",
             "explicit_user_acceptance",
-            ["tasks/accept", "tasks/request-rework"],
+            [],
+            "user",
+            ["accept", "request-rework"],
         )
     if input_required_kind == "blocked":
         hermes_interaction = any(
@@ -216,23 +235,72 @@ def _input_required_actions(
                 "awaiting_hermes_interaction",
                 "interaction_response",
                 ["interactions/respond"],
+                "hermes",
+                [],
             )
         return (
             "awaiting_user_interaction",
             "user_interaction",
             [],
+            "user",
+            ["approve", "reject"],
         )
-    return (input_required_kind or "input-required", "input", [])
+    return (input_required_kind or "input-required", "input", [],
+            "user", [])
+
+
+def _message_interaction_summary(
+        pending_interactions: list[dict]) -> tuple[list[dict], bool]:
+    """Build a small renderer-safe hint; metadata remains authoritative."""
+    if not pending_interactions:
+        return [], False
+    item = pending_interactions[0]
+    summary = [{
+        "interaction_id": item.get("interaction_id"),
+        "inspectable": item.get("inspectable") is True,
+        "operation": str(item.get("operation") or "")[:128] or None,
+        "risk": item.get("risk"),
+        "policy_route": str(item.get("policy_route") or "")[:32] or None,
+        "policy_reason": str(item.get("policy_reason") or "")[:160],
+        "action_intent_status": str(
+            item.get("action_intent_status") or "")[:64] or None,
+        "awaiting": str(item.get("awaiting") or "")[:64] or None,
+        "command": str(item.get("command") or "")[:160] or None,
+        "args": [str(arg)[:96] for arg in (item.get("args") or [])[:4]],
+        "cwd": str(item.get("cwd") or "")[:160] or None,
+        "workspace": str(item.get("workspace") or "")[:160] or None,
+        "rollback_plan": str(item.get("rollback_plan") or "")[:160]
+        or None,
+        "allowed_responses": [
+            str(value)[:64]
+            for value in (item.get("allowed_responses") or [])[:8]
+        ],
+    }]
+    return summary, len(pending_interactions) > 1
 
 
 def _to_a2a(conn, row, *, context_id: str | None = None) -> dict:
     """内部任务行 → A2A Task；created/queued + 待批准 → input-required。"""
     task_id = row["id"]
+    internal_status, legacy_internal_status = _canonical_internal_status(
+        row["status"])
     pending = _approval_pending(conn, task_id)
     input_required_kind = None
-    pending_interactions: list[dict] = []
-    detail = row["error_message"] or row["result_summary"] or ""
-    if pending:
+    from orchestrator import collaboration_store
+
+    pending_interactions = collaboration_store.pending_interaction_views(
+        conn, task_id)
+    raw_detail = row["error_message"] or row["result_summary"] or ""
+    detail = str(raw_detail)[:1000]
+    detail_truncated = len(str(raw_detail)) > len(detail)
+    if pending_interactions:
+        # Interaction persistence and lifecycle events are intentionally
+        # independent.  Surface the concrete gate immediately even if the
+        # task.input_required event has not moved the task to BLOCKED yet.
+        state = "input-required"
+        message = f"task_id={task_id}; status={state}"
+        input_required_kind = "blocked"
+    elif pending:
         state = "input-required"
         message = (f"task_id={task_id}; 写操作需批准"
                    f"（risk={pending.get('risk')}）："
@@ -245,18 +313,15 @@ def _to_a2a(conn, row, *, context_id: str | None = None) -> dict:
             input_required_kind = _infer_input_required_kind(
                 conn, row, pending=None)
     if state == "input-required":
-        if input_required_kind == "blocked":
-            from orchestrator import collaboration_store
-
-            pending_interactions = collaboration_store.pending_interaction_views(
-                conn, task_id)
-        state_detail, required_action, available_actions = (
+        (state_detail, required_action, available_actions, required_actor,
+         ui_actions) = (
             _input_required_actions(input_required_kind, pending_interactions))
         message += (
             f"; input_required_kind={input_required_kind}"
-            f"; internal_status={row['status']}"
+            f"; internal_status={internal_status}"
             f"; state_detail={state_detail}"
             f"; required_action={required_action}"
+            f"; required_actor={required_actor}"
             f"; available_actions={','.join(available_actions) or 'none'}")
         if input_required_kind == "acceptance":
             message += "；等待用户验收，不是委派审批或运行时审批"
@@ -265,20 +330,27 @@ def _to_a2a(conn, row, *, context_id: str | None = None) -> dict:
         elif input_required_kind == "blocked":
             message += "；等待原生交互处理"
     else:
-        state_detail, required_action, available_actions = (
-            state, "none", [])
+        state_detail, required_action, available_actions = state, "none", []
+        required_actor, ui_actions = "none", []
     if detail:
         message += f"; {detail}"
+        if detail_truncated:
+            message += "; status_detail_truncated=true"
     artifacts = [
         {"name": a["name"], "type": a["type"], "path": a["path"],
          **({"sha256": a["sha256"]} if a["sha256"] else {})}
         for a in state_store.list_artifacts(conn, task_id)
     ]
     metadata = {"assigned_to": row["assigned_to"],
-                "internal_status": row["status"],
+                "internal_status": internal_status,
                 "state_detail": state_detail,
                 "required_action": required_action,
-                "available_actions": available_actions}
+                "required_actor": required_actor,
+                "available_actions": available_actions,
+                "ui_actions": ui_actions,
+                "status_detail_truncated": detail_truncated}
+    if legacy_internal_status is not None:
+        metadata["legacy_internal_status"] = legacy_internal_status
     try:
         plan_context = json.loads(row["plan_context_json"] or "null")
     except (TypeError, ValueError):
@@ -304,44 +376,25 @@ def _to_a2a(conn, row, *, context_id: str | None = None) -> dict:
         # Include a compact, bounded *summary* there while retaining the full
         # structured records above.  Never copy tool payloads/worker output
         # into the wakeup envelope or this summary.
-        summary = [{
-            "interaction_id": item.get("interaction_id"),
-            "inspectable": item.get("inspectable") is True,
-            "operation": item.get("operation"),
-            "risk": item.get("risk"),
-            "policy_route": item.get("policy_route"),
-            "policy_reason": str(item.get("policy_reason") or "")[:240],
-            "action_intent_status": item.get("action_intent_status"),
-            "awaiting": item.get("awaiting"),
-            "command": item.get("command"),
-            "args": [str(arg)[:256]
-                     for arg in (item.get("args") or [])[:16]],
-            "cwd": str(item.get("cwd") or "")[:512] or None,
-            "workspace": str(item.get("workspace") or "")[:512] or None,
-            "rollback_plan": str(item.get("rollback_plan") or "")[:512]
-            or None,
-            "allowed_responses": item.get("allowed_responses") or [],
-        } for item in pending_interactions[:20]]
+        summary, summary_truncated = _message_interaction_summary(
+            pending_interactions)
         compact = json.dumps(summary, ensure_ascii=False,
                              separators=(",", ":"))
-        if len(compact) > 1800:
-            compact = json.dumps([{
-                "interaction_id": item.get("interaction_id"),
-                "inspectable": item.get("inspectable") is True,
-                "command": item.get("command"),
-                "args": [str(arg)[:128]
-                         for arg in (item.get("args") or [])[:8]],
-                "cwd": str(item.get("cwd") or "")[:256] or None,
-                "workspace": str(item.get("workspace") or "")[:256] or None,
-                "rollback_plan": str(item.get("rollback_plan") or "")[:256]
-                or None,
-                "allowed_responses": item.get("allowed_responses") or [],
-                "risk": item.get("risk"),
-                "policy_route": item.get("policy_route"),
-                "action_intent_status": item.get("action_intent_status"),
-            } for item in pending_interactions[:20]], ensure_ascii=False,
-                separators=(",", ":"))
-        message += f"; pending_interactions={compact}"
+        metadata["pending_interactions_summary"] = {
+            "total": len(pending_interactions),
+            "included": len(summary),
+            "truncated": summary_truncated,
+            "authoritative_field": "metadata.pending_interactions",
+            "detail_action": "interactions/get",
+        }
+        message += (
+            f"; pending_interactions_total={len(pending_interactions)}"
+            f"; pending_interactions_truncated="
+            f"{str(summary_truncated).lower()}"
+            f"; pending_interactions={compact}"
+            "; authoritative_details=metadata.pending_interactions"
+            "; detail_action=interactions/get"
+        )
     return {
         "id": task_id,
         "status": {"state": state, "timestamp": row["updated_at"],
@@ -866,9 +919,23 @@ def create_app(tm: TaskManager | None = None,
             _record(
                 "task.access_mode.selected",
                 tid,
-                {"agent_id": agent_id, "access_mode": access_mode},
+                {"agent_id": agent_id, "access_mode": access_mode,
+                 "source": "caller_semantic_declaration",
+                 "authority": "initial_dispatch_only"},
             )
-        decision = policy.decide(tm.conn, text, access_mode=access_mode)
+        decision = policy.decide(
+            tm.conn, text, access_mode=access_mode,
+            require_structured_read=True)
+        _record(
+            "task.intent.classified",
+            tid,
+            {"risk": decision.risk, "decision": decision.action,
+             "reason": decision.reason,
+             "source": ("structured_access_mode"
+                        if access_mode else "legacy_keyword_compatibility"),
+             "runtime_authority": False,
+             "runtime_gate": "structured_action_intent"},
+        )
         if decision.action == "ask":
             _record("task.approval_requested", tid,
                     {"agent_id": agent_id, "endpoint": agent["endpoint"],
@@ -952,51 +1019,14 @@ def create_app(tm: TaskManager | None = None,
                                approve: bool, *, context_id: str | None = None,
                                wrapped: bool = False) -> JSONResponse:
         """验收/返工动作：tasks/accept + tasks/request-rework。"""
-        task_id = params.get("id")
-        if not task_id:
-            return _error(rpc_id, -32602, "params.id 必填（任务 ID）")
-        if identity.get("kind") == "hub":
-            if not isinstance(context_id, str) or not context_id.strip():
-                return _error(rpc_id, -32602,
-                              "tasks/accept 或 tasks/request-rework 必须携带 contextId")
-            from orchestrator import collaboration_store
-            try:
-                collaboration_store.require_a2a_task(
-                    tm.conn, task_id=task_id, peer=identity["peer"],
-                    context_id=context_id)
-            except PermissionError as exc:
-                return _error(rpc_id, -32003, str(exc))
-            except (KeyError, TypeError, ValueError) as exc:
-                return _error(rpc_id, -32602, str(exc))
-        try:
-            if approve:
-                tm.accept_result(
-                    task_id,
-                    notes=(params.get("notes") or "").strip(),
-                    decided_by=identity["peer"],
-                    via="a2a",
-                )
-            else:
-                tm.reject_result(
-                    task_id,
-                    feedback=(params.get("feedback") or ""),
-                    decided_by=identity["peer"],
-                    via="a2a",
-                )
-        except ValueError as exc:
-            return _error(rpc_id, -32602, str(exc))
-        except state_store.IllegalTransition as exc:
-            return _error(rpc_id, -32602, str(exc))
-        except KeyError as exc:
-            return _error(rpc_id, -32602, str(exc))
-        except PermissionError as exc:
-            return _error(rpc_id, -32003, str(exc))
-
-        row = state_store.get_task(tm.conn, task_id)
-        if row is None:
-            return _error(rpc_id, -32602, f"task not found: {task_id}")
-        task = _to_a2a(tm.conn, row, context_id=context_id)
-        return _result(rpc_id, {"task": task} if wrapped else task)
+        # An authenticated Hermes peer proves service identity, not that a
+        # human explicitly accepted this particular result.  Until the
+        # protocol carries a user-signed acceptance receipt, formal acceptance
+        # and rework decisions are WebUI-only.
+        return _error(
+            rpc_id, -32003,
+            "formal acceptance/rework requires explicit user authority in WebUI",
+        )
 
     async def _interaction_response(
             params: dict, rpc_id, identity: dict, *,

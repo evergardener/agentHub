@@ -225,23 +225,30 @@ def test_acceptance_queue_is_separate_and_rework_requires_feedback(client):
     from state.db import connect
 
     conn = connect()
-    for task_id in ("T-accept", "T-rework"):
+    for task_id in ("T-accept", "T-rework", "T-legacy-completed"):
         state_store.create_task(
             conn, task_id=task_id, objective="验收任务",
             created_by="test", status=TaskStatus.QUEUED)
+        final_status = (
+            TaskStatus.COMPLETED if task_id == "T-legacy-completed"
+            else TaskStatus.AWAITING_ACCEPTANCE)
         for status in (
-            TaskStatus.ASSIGNED,
-            TaskStatus.WORKING,
-            TaskStatus.AWAITING_ACCEPTANCE,
+            TaskStatus.ASSIGNED, TaskStatus.WORKING, final_status,
         ):
             state_store.transition_task(conn, task_id, status)
     conn.close()
 
     assert {row["id"] for row in client.get(
-        "/api/acceptance").json()["tasks"]} == {"T-accept", "T-rework"}
+        "/api/acceptance").json()["tasks"]} == {
+            "T-accept", "T-rework", "T-legacy-completed"}
     assert {row["id"] for row in client.get(
         "/api/approvals").json()["tasks"]}.isdisjoint(
-            {"T-accept", "T-rework"})
+            {"T-accept", "T-rework", "T-legacy-completed"})
+
+    legacy_accepted = client.post(
+        "/api/tasks/T-legacy-completed/accept", json={"notes": "历史任务确认"})
+    assert legacy_accepted.status_code == 200
+    assert legacy_accepted.json()["status"] == "accepted"
 
     accepted = client.post(
         "/api/tasks/T-accept/accept", json={"notes": "用户确认"})

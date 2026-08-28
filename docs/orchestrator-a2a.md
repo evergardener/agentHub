@@ -99,6 +99,10 @@ Workspace，再通过 `session.create({workspaceId})` 建立可被 DSH 侧边栏
 共享目录。Workspace 只定义执行与路径校验边界，不等于写权限：原生 Session 仍以
 read-only 启动，每次修改必须产生可检查的 ActionIntent；仅当操作在 Agent Profile
 allowlist、目标位于 workspace 且有可验证的回滚方案时，Hermes 才可批准一次。
+创建阶段的自然语言关键词分类仅用于兼容诊断，不再作为自动委派依据。Hermes 的模型
+可基于完整语义声明结构化 `access_mode=read`，但该声明只允许启动只读执行；已知写入
+模式仍会拒绝，所有实际命令和文件操作继续由结构化 ActionIntent 权威门控。模型输出
+失败、目标混合或语义不确定时不得声明 read，服务端保持 fail closed。
 同一 native session 的 workspace 被固定；路径发生变化时必须创建替代 Session。
 `title` 与 `summary` 分别用于 WebUI 的简洁目标和说明；完整审计指令仍保存在
 `objective`。Hermes 不应把 commit SHA、完整路径或整段证据清单复制进 `title`。
@@ -118,9 +122,12 @@ A2A 1.0 没有独立的待验收 TaskState，因此 `awaiting_acceptance` 在协
 `input_required_kind`、`state_detail`、`required_action` 和
 `available_actions` 分流：待验收会返回
 `input_required_kind=acceptance`、`required_action=explicit_user_acceptance`、
-完整 `artifacts`，且只提供 `tasks/accept` / `tasks/request-rework`；它不是委派
-审批或运行时 ActionIntent 审批。只有用户明确验收后，任务才对外成为
-`completed`。
+完整 `artifacts`、`required_actor=user`、空的 A2A `available_actions`，以及仅供
+界面展示的 `ui_actions=accept/request-rework`；它不是委派审批或运行时
+ActionIntent 审批。只有用户在 WebUI 明确验收后，任务才对外成为 `completed`。
+历史数据库中的内部 `completed` 行也会规范化为
+`metadata.internal_status=awaiting_acceptance`，原值仅保存在
+`metadata.legacy_internal_status=completed` 供审计，调用方不得据此跳过验收。
 对 wrapped `SendMessage`，`contextId` 在 message 上；对直接 JSON-RPC 方法，
 `params.contextId`（兼容 `context_id`）必填。legacy `message/send` 不属于这条
 Hermes control-plane 路径。
@@ -147,6 +154,9 @@ Hermes control-plane 路径。
 ```
 
 原生 Agent 阻塞时，`tasks/get` 在 `metadata.pending_interactions` 返回可审查详情。
+`status.message` 只携带第一条交互的有界摘要，并通过
+`pending_interactions_total` / `pending_interactions_truncated` 明确是否省略；完整
+结构以 `metadata.pending_interactions` 为准，也可按 ID 调用 `interactions/get`。
 只有 `inspectable=true` 且 `action_intent_status=awaiting_hermes` 的请求可由 Hermes
 回复；`awaiting_user` 必须交给 WebUI 用户。Hermes 回复格式：
 受限 Docker 只读发现会结构化为 `command.read` / `risk=read`，并且仍通过
@@ -187,9 +197,10 @@ Plugin 只轮询自己已知的 `watch_id`，服务端仍校验 authenticated pe
 同一 `context_id` 调用 `tasks/get` 获取权威状态，再按上节权限处理，并在完成汇报
 后调用 plugin 的 `agenthub_supervision_ack`。同一 `notification_id` 在 ACK 前
 只创建一个 native async completion，dispatch 失败则保持 outbox 可重试。
-`awaiting_user` 只能通知用户或等待
-WebUI 操作；Hermes 不得据此自批。最终结果必须由用户显式 `tasks/accept`，不得由
-后台 supervisor 自动验收。
+`awaiting_user` 只能通知用户或等待 WebUI 操作；Hermes 不得据此自批。A2A peer
+身份不能证明某次用户决定，因此当前 `tasks/accept` / `tasks/request-rework` 对 A2A
+调用 fail closed；最终结果必须由用户在 WebUI 显式处理，不得由后台 supervisor
+自动验收。
 
 监督控制包供 profile plugin 使用，常规对话不应手写：
 

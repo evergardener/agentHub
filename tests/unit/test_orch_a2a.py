@@ -51,7 +51,9 @@ def _send(text, **metadata):
 
 def test_delegate_auto_approved(env):
     tm, client, delegated = env
-    r = client.post("/a2a", json=_send("查询当前任务列表", agent="codex"))
+    r = client.post(
+        "/a2a", json=_send(
+            "查询当前任务列表", agent="codex", access_mode="read"))
     assert r.status_code == 200
     task = r.json()["result"]
     assert task["status"]["state"] == "submitted"   # assigned → submitted

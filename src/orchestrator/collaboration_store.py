@@ -936,14 +936,13 @@ def upsert_session_interaction(
                 "native_request_id": interaction.get("nativeRequestId"),
             },
         )
-        # Keep the lifecycle wakeup in the same transaction as the durable
-        # interaction record.  This also covers adapters or recovery paths
-        # that persist an interaction without a separate task.input_required
-        # event reaching StateWriter.
-        from orchestrator import supervision_store
-
-        supervision_store.sync_task(conn, task_id, commit=False)
         if commit:
+            # Standalone persistence owns the batch boundary.  StateWriter and
+            # other commit=False callers synchronize once after their whole
+            # interaction batch, avoiding one wakeup per partial digest.
+            from orchestrator import supervision_store
+
+            supervision_store.sync_task(conn, task_id, commit=False)
             conn.commit()
     except Exception:
         conn.rollback()

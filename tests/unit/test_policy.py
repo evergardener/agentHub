@@ -30,6 +30,29 @@ def test_read_auto_approved(policy, conn):
     assert d.action == "auto" and d.risk == "read"
 
 
+def test_strict_dispatch_does_not_use_keyword_classification_as_authority(
+        policy, conn):
+    d = policy.decide(
+        conn, "检查并清理缓存", require_structured_read=True)
+
+    assert d.action == "ask"
+    assert d.risk == "unknown"
+    assert "access_mode=read" in d.reason
+
+
+def test_strict_dispatch_accepts_model_declared_read_capability_but_not_write(
+        policy, conn):
+    read = policy.decide(
+        conn, "核验 TLS 证书有效期", access_mode="read",
+        require_structured_read=True)
+    write = policy.decide(
+        conn, "检查后执行 kubectl apply -f app.yaml", access_mode="read",
+        require_structured_read=True)
+
+    assert read.action == "auto" and read.risk == "read"
+    assert write.action == "ask" and write.risk == "write"
+
+
 def test_english_read_only_objective_is_auto_approved(policy, conn):
     d = policy.decide(
         conn, "Strictly read-only inspection: check Git status and report it; "

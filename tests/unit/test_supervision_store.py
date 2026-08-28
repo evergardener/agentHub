@@ -52,7 +52,24 @@ def test_pull_lease_retries_without_duplicate_outbox_rows(tmp_path):
         "SELECT COUNT(*) FROM supervision_outbox;").fetchone()[0] == 1
 
 
-def test_sync_blocked_task_emits_identifier_only_notification(tmp_path):
+def test_legacy_completed_wakeup_uses_canonical_acceptance_status(tmp_path):
+    conn, watch = _watched_task(tmp_path)
+    for status in (
+        state_store.TaskStatus.ASSIGNED,
+        state_store.TaskStatus.WORKING,
+        state_store.TaskStatus.COMPLETED,
+    ):
+        state_store.transition_task(conn, "T-SUPERVISED", status)
+
+    notifications = supervision_store.pull_notifications(
+        conn, peer="qishuo", watch_ids=[watch["watch_id"]])
+
+    assert len(notifications) == 1
+    assert notifications[0]["event_type"] == "task.awaiting_acceptance"
+    assert notifications[0]["internal_status"] == "awaiting_acceptance"
+
+
+def test_sync_blocked_task_prefers_interaction_notification(tmp_path):
     conn, watch = _watched_task(tmp_path)
     state_store.transition_task(
         conn, "T-SUPERVISED", state_store.TaskStatus.ASSIGNED)
@@ -78,10 +95,25 @@ def test_sync_blocked_task_emits_identifier_only_notification(tmp_path):
 
     notifications = supervision_store.pull_notifications(
         conn, peer="qishuo", watch_ids=[watch["watch_id"]])
-    assert {item["event_type"] for item in notifications} == {
-        "task.blocked", "agent.interaction.requested"}
+    assert [item["event_type"] for item in notifications] == [
+        "agent.interaction.requested"]
     assert all("ignore this worker text" not in str(item)
                for item in notifications)
+
+
+def test_sync_blocked_task_without_interaction_emits_generic_wakeup(tmp_path):
+    conn, watch = _watched_task(tmp_path)
+    state_store.transition_task(
+        conn, "T-SUPERVISED", state_store.TaskStatus.ASSIGNED)
+    state_store.transition_task(
+        conn, "T-SUPERVISED", state_store.TaskStatus.WORKING)
+    state_store.transition_task(
+        conn, "T-SUPERVISED", state_store.TaskStatus.BLOCKED)
+
+    notifications = supervision_store.pull_notifications(
+        conn, peer="qishuo", watch_ids=[watch["watch_id"]])
+
+    assert [item["event_type"] for item in notifications] == ["task.blocked"]
 
 
 def test_interaction_record_emits_wakeup_without_waiting_for_status_event(
@@ -117,6 +149,45 @@ def test_interaction_record_emits_wakeup_without_waiting_for_status_event(
         "notification_id", "watch_id", "task_id", "context_id",
         "event_type", "internal_status", "created_at",
     }
+
+
+def test_commit_false_interaction_batch_emits_one_combined_wakeup(tmp_path):
+    conn, watch = _watched_task(tmp_path)
+    state_store.transition_task(
+        conn, "T-SUPERVISED", state_store.TaskStatus.ASSIGNED)
+    state_store.transition_task(
+        conn, "T-SUPERVISED", state_store.TaskStatus.WORKING)
+    collaboration_id = conn.execute(
+        "SELECT collaboration_id FROM tasks WHERE id = ?;",
+        ("T-SUPERVISED",)).fetchone()["collaboration_id"]
+    binding = collaboration_store.bind_agent_session(
+        conn, collaboration_id=collaboration_id,
+        task_id="T-SUPERVISED", agent_id="codex",
+        adapter_session_id="S-codex", native_session_id="N-codex",
+        resume_capability="native")
+    for index in (1, 2):
+        collaboration_store.upsert_session_interaction(
+            conn, collaboration_id=collaboration_id,
+            task_id="T-SUPERVISED", session_binding_id=binding["id"],
+            agent_id="codex",
+            interaction={
+                "interactionId": f"codex:approval-{index}",
+                "kind": "approval", "nativeRequestId": f"rpc-{index}",
+                "payload": {"toolName": "shell", "reason": "inspect"},
+            },
+            commit=False,
+        )
+    supervision_store.sync_task(conn, "T-SUPERVISED", commit=False)
+    conn.commit()
+
+    notifications = supervision_store.pull_notifications(
+        conn, peer="qishuo", watch_ids=[watch["watch_id"]])
+
+    assert [item["event_type"] for item in notifications] == [
+        "agent.interaction.requested"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM supervision_outbox WHERE task_id = ?;",
+        ("T-SUPERVISED",)).fetchone()[0] == 1
 
 
 def test_state_writer_commits_terminal_state_and_outbox_together(

@@ -477,7 +477,8 @@ class HermesTools:
         if isinstance(context, dict):
             access_mode = context.get("access_mode")
         decision = self.policy.decide(
-            self.tm.conn, row["objective"], access_mode=access_mode)
+            self.tm.conn, row["objective"], access_mode=access_mode,
+            require_structured_read=True)
         if decision.action == "ask":
             return {"status": "needs_approval", "task_id": task_id,
                     "risk": decision.risk, "reason": decision.reason,
