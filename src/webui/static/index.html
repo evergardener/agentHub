@@ -2253,6 +2253,7 @@ function renderMessageList(messages) {
     const avatarHtml = `<span class="message-avatar" aria-hidden="true">${esc(avatar)}</span>`;
     const deliveryLabels = {
       queued: "等待 Hermes 处理",
+      processing: "Hermes 处理中",
       delivered: "Hermes 已响应",
       persisted: "仅保存，尚未投递",
       failed: "投递失败",

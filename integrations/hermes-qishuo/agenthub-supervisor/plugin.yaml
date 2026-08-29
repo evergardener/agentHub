@@ -1,5 +1,5 @@
 name: agenthub-supervisor
-version: 1.6.0
+version: 1.7.0
 description: >
   Supervise agentHub tasks and wake an available originating qishuo delivery
   surface for approvals, failures, and result acceptance. Canonical Gateway
@@ -8,7 +8,8 @@ description: >
   process exits. Remote worker content is never injected; every wakeup requires
   an authoritative read through a fixed, context-scoped recovery path. WebUI
   conversation recovery validates pending delivery ownership before fetching
-  untrusted text and persists the final reply before ACK.
+  untrusted text, follows only verified compression continuations, and persists
+  the final reply before ACK.
 author: evergarden
 hooks:
   - transform_tool_result

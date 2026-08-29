@@ -89,6 +89,11 @@ def test_completed_task_watch_routes_user_message_without_reopening_task(
         item for item in notifications
         if item["event_type"] == "conversation.user_message")
     assert user_wake["message_id"] == message["id"]
+    assert user_wake["delivery_status"] == "processing"
+    assert conn.execute(
+        "SELECT delivery_status FROM conversation_messages WHERE id = ?;",
+        (message["id"],),
+    ).fetchone()["delivery_status"] == "processing"
     assert "请解释结果" not in str(user_wake)
 
     collaboration_store.append_message(
@@ -133,6 +138,34 @@ def test_completed_task_watch_routes_user_message_without_reopening_task(
         "SELECT status FROM supervision_watches WHERE id = ?;",
         (watch["watch_id"],),
     ).fetchone()["status"] == "completed"
+
+
+def test_idempotent_enqueue_does_not_regress_processing_to_queued(tmp_path):
+    conn, watch = _watched_task(tmp_path)
+    message = collaboration_store.append_user_message_to_hermes(
+        conn,
+        collaboration_id=collaboration_store.a2a_context_ids(
+            peer="qishuo", context_id="ctx-supervised")["collaboration_id"],
+        user_id="user",
+        content={"text": "请继续"},
+    )
+    first = supervision_store.enqueue_user_message(
+        conn, collaboration_id=message["collaboration_id"],
+        message_id=message["id"])
+    assert first["delivery_status"] == "queued"
+
+    pulled = supervision_store.pull_notifications(
+        conn, peer="qishuo", watch_ids=[watch["watch_id"]])
+    assert pulled[0]["delivery_status"] == "processing"
+
+    replay = supervision_store.enqueue_user_message(
+        conn, collaboration_id=message["collaboration_id"],
+        message_id=message["id"])
+    assert replay["delivery_status"] == "processing"
+    assert conn.execute(
+        "SELECT delivery_status FROM conversation_messages WHERE id = ?;",
+        (message["id"],),
+    ).fetchone()["delivery_status"] == "processing"
 
 
 def test_conversation_message_uses_stable_first_route(tmp_path):

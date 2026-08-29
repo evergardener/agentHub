@@ -178,6 +178,12 @@ def install(profile: Path, agenthub_env: Path, skill_source: Path,
         entries = plugins.setdefault("entries", {})
         plugin_entry = entries.setdefault("agenthub-supervisor", {})
         plugin_entry["allow_gateway_injection"] = True
+        # The supervisor persists a durable physical session target. Legacy
+        # rotation mode changes that identity during compression and can strand
+        # future AgentHub wakeups on an ended parent. In-place compression keeps
+        # the same durable identity while preserving archived history.
+        compression = config.setdefault("compression", {})
+        compression["in_place"] = True
 
     agent = config.setdefault("agent", {})
     existing_prompt = str(agent.get("system_prompt") or "").rstrip()

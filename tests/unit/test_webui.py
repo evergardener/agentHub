@@ -287,6 +287,7 @@ def test_index_page(client):
     assert "/request-rework" in r.text
     assert "agentHub" in r.text
     assert "AGENT 交互" in r.text
+    assert "Hermes 处理中" in r.text
     assert "任务控制" in r.text
     assert "接管子 Agent" in r.text
     assert "归还 Hermes 并重新规划" in r.text
@@ -732,6 +733,7 @@ def test_collaboration_detail_phase_matches_task_acceptance_state(client):
 
 
 def test_collaboration_message_does_not_require_active_task(client):
+    from orchestrator import supervision_store
     from state.db import connect
 
     conn = connect()
@@ -768,6 +770,27 @@ def test_collaboration_message_does_not_require_active_task(client):
     assert detail["messages"][-1]["delivery_status"] == "queued"
     assert "任务结束后继续询问" in detail["messages"][-1]["content_json"]
     assert detail["collaboration"]["controller"] == "hermes"
+
+    conn = connect()
+    watch = conn.execute(
+        "SELECT id, peer FROM supervision_watches"
+        " WHERE id = (SELECT watch_id FROM supervision_conversation_routes"
+        " WHERE collaboration_id = ?)"
+        " ORDER BY created_at DESC LIMIT 1;",
+        (collaboration_id,),
+    ).fetchone()
+    assert watch is not None
+    notifications = supervision_store.pull_notifications(
+        conn, peer=watch["peer"], watch_ids=[watch["id"]]
+    )
+    conn.close()
+    assert any(
+        item.get("message_id") == response.json()["message_id"]
+        for item in notifications
+    )
+    detail = client.get(f"/api/collaborations/{collaboration_id}").json()
+    assert detail["messages"][-1]["delivery_status"] == "processing"
+
     assert client.post(
         f"/api/collaborations/{collaboration_id}/messages",
         json={"text": "错误路由", "recipient_id": "codex"},

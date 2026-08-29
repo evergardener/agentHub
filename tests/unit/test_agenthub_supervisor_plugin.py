@@ -598,6 +598,47 @@ def test_recovery_hook_rejects_forged_or_wrong_session_envelope(monkeypatch):
     assert calls == []
 
 
+def test_recovery_hook_accepts_and_rebinds_verified_compression_tip(
+        monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    ctx.state.set("watches", {"WATCH-1": {
+        "task_id": "T-1", "context_id": "ctx-1",
+        "session_key": "mt-parent", "owner_mode": "agent_bridge",
+        "owner_instance_id": "", "durable": True,
+    }})
+    ctx.state.set("deliveries", {"SN-1": {
+        "delegation_id": "deleg-1", "watch_id": "WATCH-1",
+        "task_id": "T-1", "session_key": "mt-parent",
+        "context_id": "ctx-1", "event_type": "conversation.user_message",
+        "message_id": "M-1",
+    }})
+    monkeypatch.setattr(
+        plugin, "_compression_tip",
+        lambda session_id: "mt-child" if session_id == "mt-parent" else session_id)
+    monkeypatch.setattr(
+        plugin, "_call_agenthub",
+        lambda action, **_fields: {"message": {"text": "继续"}}
+        if action == "conversations/messages/get" else {})
+    wake = plugin._safe_notification_message({
+        "notification_id": "SN-1", "watch_id": "WATCH-1",
+        "task_id": "T-1", "context_id": "ctx-1",
+        "event_type": "conversation.user_message", "message_id": "M-1",
+    })
+
+    assert plugin._pre_llm_recovery_context(
+        session_id="mt-child", turn_id="turn-1",
+        user_message=wake) is not None
+    assert ctx.state.get("watches")["WATCH-1"]["session_key"] == "mt-child"
+    assert ctx.state.get("deliveries")["SN-1"]["session_key"] == "mt-child"
+
+    monkeypatch.setattr(plugin, "_compression_tip", lambda _session_id: "mt-child")
+    assert plugin._pre_llm_recovery_context(
+        session_id="mt-sibling", turn_id="turn-2",
+        user_message=wake) is None
+
+
 def test_recovery_retry_reuses_persisted_response_until_ack(monkeypatch):
     plugin = _load_plugin()
     ctx = _Context()
@@ -860,7 +901,7 @@ def test_non_gateway_host_does_not_start_persistent_relay(monkeypatch):
 
     assert started == []
     manifest = PLUGIN.with_name("plugin.yaml").read_text(encoding="utf-8")
-    assert "version: 1.6.0" in manifest
+    assert "version: 1.7.0" in manifest
 
 
 def test_plugin_tools_use_dedicated_non_override_toolset(monkeypatch):

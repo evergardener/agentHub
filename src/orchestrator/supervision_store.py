@@ -243,10 +243,12 @@ def enqueue_user_message(conn, *, collaboration_id: str,
     if outbox["status"] not in {"pending", "inflight"}:
         raise ValueError(
             f"message delivery is not retryable: {outbox['status']}")
+    delivery_status = (
+        "processing" if outbox["status"] == "inflight" else "queued")
     conn.execute(
-        "UPDATE conversation_messages SET delivery_status = 'queued'"
+        "UPDATE conversation_messages SET delivery_status = ?"
         " WHERE id = ?;",
-        (message_id,),
+        (delivery_status, message_id),
     )
     conn.commit()
     return {
@@ -255,7 +257,7 @@ def enqueue_user_message(conn, *, collaboration_id: str,
         "task_id": watch["task_id"],
         "peer": peer,
         "context_id": watch["context_id"],
-        "delivery_status": "queued",
+        "delivery_status": delivery_status,
     }
 
 
@@ -383,6 +385,18 @@ def pull_notifications(conn, *, peer: str, watch_ids: Iterable[str],
             (attempts, lease_until, row["id"], current_iso, current_iso))
         if claimed.rowcount != 1:
             continue
+        if row["event_type"] == "conversation.user_message" and \
+                row["message_id"]:
+            # A successful claim is the first authoritative signal that Hermes
+            # has accepted ownership of this delivery. Keep that distinct from
+            # merely queued so the WebUI does not look stalled during a long
+            # recovery/compression turn. Redelivery remains processing until a
+            # persisted Hermes response moves the message to delivered.
+            conn.execute(
+                "UPDATE conversation_messages SET delivery_status = 'processing'"
+                " WHERE id = ? AND delivery_status IN ('queued','processing');",
+                (row["message_id"],),
+            )
         item = {
             "notification_id": row["id"],
             "watch_id": row["watch_id"],
@@ -394,6 +408,7 @@ def pull_notifications(conn, *, peer: str, watch_ids: Iterable[str],
         }
         if row["message_id"]:
             item["message_id"] = row["message_id"]
+            item["delivery_status"] = "processing"
         public.append(item)
     conn.commit()
     return public

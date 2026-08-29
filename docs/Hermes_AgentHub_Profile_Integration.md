@@ -72,7 +72,9 @@ qishuo 原生 `a2a_call` 不提供自定义 `metadata.agent`，因此 agentHub
 
 任务结束后，agentHub WebUI 仍可向原 Hermes 会话发送消息。Plugin 收到
 `conversation.user_message` 时只接收 `message_id`。恢复 turn 的 `pre_llm_call`
-先把 envelope 与 plugin 当前未 ACK delivery、原 watch 和原 session 逐字段核对，
+先把 envelope 与 plugin 当前未 ACK delivery、原 watch 和原 session 逐字段核对；
+若 Hermes 使用旧版 rotation 压缩模式，则只接受 `SessionDB` 认证的 compression
+continuation tip，并把 watch 原子重绑到该 tip，任意 sibling/branch 仍会拒绝。
 再通过固定的 `conversations/messages/get` 动作取回正文，并以明确标记为不受信的
 临时 turn context 提供给 Hermes；正文不会写入 native completion 或持久历史。
 `post_llm_call` 将最终答复幂等回写，成功后才 ACK；回写或 ACK 失败均保留 delivery
@@ -144,7 +146,9 @@ Kimi 停用时，`agents/list` 会标记 `enabled=false`；如用户仍指定 Ki
    密钥内容；
 4. 在临时目录演练恢复并校验 hash 一致；
 5. 只在 Gate 通过后修改 profile；修改后检查 YAML、权限、peer 数量和
-   skill 可见性，再重启 qishuo 运行时。
+   skill 可见性，再重启 qishuo 运行时。安装 supervisor plugin 时会强制
+   `compression.in_place=true`，使 durable watch 在压缩前后保持同一物理 session
+   ID；压缩前历史仍由 Hermes 软归档，可搜索和恢复。
 
 回退时停止 qishuo，用备份恢复三个目标，重新检查 hash/权限并启动。
 只回退 qishuo profile，不改全局 Hermes config。

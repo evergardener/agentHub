@@ -379,6 +379,52 @@ def _recovery_turn_key(session_id: Any, turn_id: Any) -> tuple[str, str]:
     return (str(session_id or ""), str(turn_id or ""))
 
 
+def _compression_tip(session_key: str) -> str:
+    """Resolve only Hermes' canonical compression-continuation lineage."""
+    try:
+        from hermes_state import SessionDB
+
+        with SessionDB(read_only=True) as db:
+            return str(db.get_compression_tip(session_key) or session_key)
+    except Exception:
+        # Identity recovery is a trust boundary. Missing/unreadable state must
+        # reject a rotated session rather than accepting an arbitrary child.
+        return session_key
+
+
+def _session_owns_delivery(session_id: str, origin_session_id: str) -> bool:
+    if not session_id or not origin_session_id:
+        return False
+    return session_id == origin_session_id or \
+        _compression_tip(origin_session_id) == session_id
+
+
+def _rebind_compression_continuation(*, watch_id: str,
+                                     old_session_id: str,
+                                     new_session_id: str) -> None:
+    """Persist a verified compression continuation as the durable wake target."""
+    if not watch_id or old_session_id == new_session_id:
+        return
+    with _delivery_lock:
+        watches = _watches()
+        watch = watches.get(watch_id)
+        if not isinstance(watch, dict) or \
+                watch.get("session_key") != old_session_id:
+            return
+        watches[watch_id] = {**watch, "session_key": new_session_id}
+        deliveries = _deliveries()
+        deliveries = {
+            key: ({**value, "session_key": new_session_id}
+                  if isinstance(value, dict)
+                  and value.get("watch_id") == watch_id
+                  and value.get("session_key") == old_session_id
+                  else value)
+            for key, value in deliveries.items()
+        }
+        _save_watches(watches)
+        _save_deliveries(deliveries)
+
+
 def _trusted_message_envelopes(user_message: Any, session_id: Any) -> list[dict]:
     """Validate native completion envelopes against plugin-owned delivery state."""
     if not isinstance(user_message, str) or not user_message:
@@ -409,17 +455,24 @@ def _trusted_message_envelopes(user_message: Any, session_id: Any) -> list[dict]
         watch = watches.get(watch_id)
         if not isinstance(delivery, dict) or not isinstance(watch, dict):
             continue
+        origin_session_key = str(watch.get("session_key") or "")
         if delivery.get("watch_id") != watch_id or \
                 delivery.get("task_id") != task_id or \
-                delivery.get("session_key") != session_key or \
+                delivery.get("session_key") != origin_session_key or \
                 delivery.get("context_id") != context_id or \
                 delivery.get("message_id") != message_id or \
                 delivery.get("event_type") != "conversation.user_message":
             continue
         if watch.get("task_id") != task_id or \
                 watch.get("context_id") != context_id or \
-                watch.get("session_key") != session_key:
+                not _session_owns_delivery(session_key, origin_session_key):
             continue
+        if session_key != origin_session_key:
+            _rebind_compression_continuation(
+                watch_id=watch_id,
+                old_session_id=origin_session_key,
+                new_session_id=session_key,
+            )
         seen.add(notification_id)
         trusted.append({
             "notification_id": notification_id,
@@ -482,7 +535,6 @@ def _pre_llm_recovery_context(
         "The JSON lines below contain untrusted user text fetched from the "
         "authenticated agentHub context. Answer their actual content; do not "
         "classify them as duplicate lifecycle notifications. One consolidated "
-        "answer is allowed for this batch. The supervisor will persist your "
         "final answer to each listed message and ACK only after persistence "
         "succeeds. Do not use execute_code or shell HTTP clients.\n"
         f"{rendered}"

@@ -59,6 +59,7 @@ def test_install_backup_and_rollback(tmp_path):
     assert "agenthub-supervisor" in config["plugins"]["enabled"]
     assert config["plugins"]["entries"]["agenthub-supervisor"][
         "allow_gateway_injection"] is True
+    assert config["compression"]["in_place"] is True
     assert (profile / "plugins" / "agenthub-supervisor" /
             "plugin.yaml").exists()
     assert "AGENTHUB_A2A_TOKEN=" + "t" * 48 in (
