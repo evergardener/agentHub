@@ -45,6 +45,15 @@ _NON_DELIVERING_SURFACES = frozenset({
     "api_server", "webhook", "msgraph_webhook", "kanban", "local", "codex",
     "tool",
 })
+_ROLLOVER_HANDOFF = (
+    "[agentHub automatic context rollover]\n"
+    "This is a fresh physical Hermes session for the same logical agentHub "
+    "conversation. The prior physical session remains archived as history, "
+    "but its transcript was intentionally not copied or externally summarized. "
+    "Do not infer missing historical details. Recover authoritative task and "
+    "conversation state through the agentHub supervisor tools before acting."
+)
+_ROLLOVER_LEASE_SECONDS = 120.0
 
 
 def _set_context_for_tests(ctx) -> None:
@@ -133,7 +142,7 @@ def _is_durable_route(surface: str, session_key: str) -> bool:
 def _watch_record(*, task_id: str, context_id: str, session_key: str,
                   surface: str) -> dict:
     durable = _is_durable_route(surface, session_key)
-    return {
+    record = {
         "task_id": task_id,
         "context_id": context_id,
         "session_key": session_key,
@@ -141,6 +150,9 @@ def _watch_record(*, task_id: str, context_id: str, session_key: str,
         "owner_instance_id": "" if durable else _PROCESS_OWNER_ID,
         "durable": durable,
     }
+    if surface == "agent_bridge":
+        record["physical_session_id"] = session_key
+    return record
 
 
 def _watch_surface(watch: dict) -> str:
@@ -288,6 +300,15 @@ def _redelivery_holdoff_seconds() -> float:
         return 900.0
 
 
+def _max_session_messages() -> int:
+    """Return the bounded physical-session rollover threshold."""
+    raw = os.getenv("AGENTHUB_SUPERVISOR_MAX_SESSION_MESSAGES", "300")
+    try:
+        return min(max(int(raw), 50), 2000)
+    except (TypeError, ValueError):
+        return 300
+
+
 def _endpoint() -> str:
     url = os.getenv("AGENTHUB_SUPERVISOR_URL", _DEFAULT_URL).strip()
     if url != _DEFAULT_URL:
@@ -399,30 +420,204 @@ def _session_owns_delivery(session_id: str, origin_session_id: str) -> bool:
         _compression_tip(origin_session_id) == session_id
 
 
+def _watch_physical_session_id(watch: dict) -> str:
+    """Return the mutable state.db id without changing the stable route key."""
+    return str(
+        watch.get("physical_session_id") or watch.get("session_key") or "")
+
+
 def _rebind_compression_continuation(*, watch_id: str,
                                      old_session_id: str,
-                                     new_session_id: str) -> None:
+                                     new_session_id: str) -> bool:
     """Persist a verified compression continuation as the durable wake target."""
-    if not watch_id or old_session_id == new_session_id:
-        return
+    if not watch_id:
+        return False
+    if old_session_id == new_session_id:
+        return True
     with _delivery_lock:
         watches = _watches()
         watch = watches.get(watch_id)
-        if not isinstance(watch, dict) or \
-                watch.get("session_key") != old_session_id:
-            return
-        watches[watch_id] = {**watch, "session_key": new_session_id}
+        if not isinstance(watch, dict):
+            return False
+        physical_session_id = _watch_physical_session_id(watch)
+        if physical_session_id != old_session_id:
+            return physical_session_id == new_session_id
+        watches[watch_id] = {
+            **watch, "physical_session_id": new_session_id}
         deliveries = _deliveries()
         deliveries = {
-            key: ({**value, "session_key": new_session_id}
+            key: ({**value, "physical_session_id": new_session_id}
                   if isinstance(value, dict)
                   and value.get("watch_id") == watch_id
-                  and value.get("session_key") == old_session_id
+                  and str(value.get("physical_session_id")
+                          or value.get("session_key") or "") == old_session_id
                   else value)
             for key, value in deliveries.items()
         }
         _save_watches(watches)
         _save_deliveries(deliveries)
+        return True
+
+
+def _rollover_agent_bridge_session(*, watch_id: str,
+                                   watch: dict) -> dict | None:
+    """Rotate an oversized idle Agent Bridge session before dispatch.
+
+    Rotation is an atomic Hermes compression-continuation publication with a
+    mechanical one-message handoff. No transcript is copied into the child or
+    sent to a summarization model. The cross-process turn lease prevents a
+    live turn from being split, while the compression lease serializes this
+    publisher with Hermes' own compactor.
+    """
+    old_session_id = _watch_physical_session_id(watch)
+    if not old_session_id:
+        return None
+    try:
+        from hermes_state import SessionDB
+
+        with SessionDB() as db:
+            session_id = str(
+                db.get_compression_tip(old_session_id) or old_session_id)
+            session = db.get_session(session_id)
+            if not isinstance(session, dict) or session.get("ended_at"):
+                raise RuntimeError("agent bridge session is not a live canonical tip")
+            if session_id != old_session_id:
+                if not _rebind_compression_continuation(
+                    watch_id=watch_id,
+                    old_session_id=old_session_id,
+                    new_session_id=session_id,
+                ):
+                    return None
+                watch = {**watch, "physical_session_id": session_id}
+            try:
+                message_count = int(session.get("message_count") or 0)
+            except (TypeError, ValueError):
+                message_count = 0
+            if message_count < _max_session_messages():
+                return watch
+
+            # Never rotate while another notification is already being
+            # handled for this watch. Its recovery hooks are keyed to the
+            # physical session id and must finish before the boundary moves.
+            with _delivery_lock:
+                if any(
+                    isinstance(value, dict)
+                    and value.get("watch_id") == watch_id
+                    for value in _deliveries().values()
+                ):
+                    return None
+
+            holder = (
+                f"agenthub-rollover:pid={os.getpid()}:"
+                f"nonce={uuid4().hex[:12]}"
+            )
+            turn_acquired = False
+            compression_acquired = False
+            try:
+                turn_acquired = bool(db.try_acquire_session_turn_lease(
+                    session_id, holder,
+                    ttl_seconds=_ROLLOVER_LEASE_SECONDS, patience_s=0.25))
+                if not turn_acquired:
+                    return None
+                # Re-read after acquiring the lineage-wide turn lease. Another
+                # process may have completed rotation while we were waiting.
+                canonical = str(db.get_compression_tip(session_id) or session_id)
+                if canonical != session_id:
+                    canonical_session = db.get_session(canonical)
+                    if not isinstance(canonical_session, dict) or \
+                            canonical_session.get("ended_at"):
+                        return None
+                    if not _rebind_compression_continuation(
+                        watch_id=watch_id,
+                        old_session_id=session_id,
+                        new_session_id=canonical,
+                    ):
+                        return None
+                    return {**watch, "physical_session_id": canonical}
+                session = db.get_session(session_id)
+                if not isinstance(session, dict) or session.get("ended_at"):
+                    return None
+                if int(session.get("message_count") or 0) < _max_session_messages():
+                    return watch
+                compression_acquired = bool(db.try_acquire_compression_lock(
+                    session_id, holder,
+                    ttl_seconds=_ROLLOVER_LEASE_SECONDS))
+                if not compression_acquired:
+                    return None
+                watermark = db.get_active_message_watermark(session_id)
+                child_session_id = (
+                    f"agenthub_{int(time.time())}_{uuid4().hex[:8]}")
+                model_config = session.get("model_config")
+                if isinstance(model_config, str):
+                    try:
+                        model_config = json.loads(model_config)
+                    except (TypeError, ValueError):
+                        model_config = None
+                if not isinstance(model_config, dict):
+                    model_config = None
+                db.publish_compression_child(
+                    parent_session_id=session_id,
+                    child_session_id=child_session_id,
+                    source=str(session.get("source") or "cli"),
+                    messages=[{
+                        "role": "system",
+                        "content": _ROLLOVER_HANDOFF,
+                        "_compressed_summary": True,
+                    }],
+                    model=session.get("model"),
+                    model_config=model_config,
+                    system_prompt=session.get("_system_prompt_resolved"),
+                    cwd=session.get("cwd"),
+                    profile_name=session.get("profile_name"),
+                    compression_lock_holder=holder,
+                    require_compression_lease=True,
+                    turn_lease_holder=holder,
+                    watermark=watermark,
+                )
+            finally:
+                if compression_acquired:
+                    try:
+                        db.release_compression_lock(session_id, holder)
+                    except Exception as exc:
+                        logger.warning(
+                            "agentHub rollover compression lease release "
+                            "failed: session_id=%s reason=%s",
+                            session_id, type(exc).__name__,
+                        )
+                if turn_acquired:
+                    try:
+                        db.release_session_turn_lease(session_id, holder)
+                    except Exception as exc:
+                        logger.warning(
+                            "agentHub rollover turn lease release failed: "
+                            "session_id=%s reason=%s",
+                            session_id, type(exc).__name__,
+                        )
+    except Exception as exc:
+        logger.warning(
+            "agentHub session rollover deferred: watch_id=%s session_id=%s "
+            "reason=%s",
+            watch_id, old_session_id, type(exc).__name__,
+        )
+        return None
+
+    if not _rebind_compression_continuation(
+        watch_id=watch_id,
+        old_session_id=session_id,
+        new_session_id=child_session_id,
+    ):
+        logger.warning(
+            "agentHub session rollover published without watch rebind: "
+            "watch_id=%s parent=%s child=%s",
+            watch_id, session_id, child_session_id,
+        )
+        return None
+    logger.info(
+        "agentHub session rollover published: watch_id=%s parent=%s child=%s "
+        "message_count=%s",
+        watch_id, session_id, child_session_id, message_count,
+    )
+    return {**watch, "physical_session_id": child_session_id}
 
 
 def _trusted_message_envelopes(user_message: Any, session_id: Any) -> list[dict]:
@@ -456,21 +651,24 @@ def _trusted_message_envelopes(user_message: Any, session_id: Any) -> list[dict]
         if not isinstance(delivery, dict) or not isinstance(watch, dict):
             continue
         origin_session_key = str(watch.get("session_key") or "")
+        origin_session_id = _watch_physical_session_id(watch)
         if delivery.get("watch_id") != watch_id or \
                 delivery.get("task_id") != task_id or \
                 delivery.get("session_key") != origin_session_key or \
+                str(delivery.get("physical_session_id")
+                    or delivery.get("session_key") or "") != origin_session_id or \
                 delivery.get("context_id") != context_id or \
                 delivery.get("message_id") != message_id or \
                 delivery.get("event_type") != "conversation.user_message":
             continue
         if watch.get("task_id") != task_id or \
                 watch.get("context_id") != context_id or \
-                not _session_owns_delivery(session_key, origin_session_key):
+                not _session_owns_delivery(session_key, origin_session_id):
             continue
-        if session_key != origin_session_key:
+        if session_key != origin_session_id:
             _rebind_compression_continuation(
                 watch_id=watch_id,
-                old_session_id=origin_session_key,
+                old_session_id=origin_session_id,
                 new_session_id=session_key,
             )
         seen.add(notification_id)
@@ -735,7 +933,8 @@ def _dispatch_agent_bridge_notification(
         notification: dict, watch: dict) -> str | None:
     """Publish an identifiers-only wake into Hermes WebUI's durable queue."""
     session_key = str(watch.get("session_key") or "")
-    if not session_key:
+    physical_session_id = _watch_physical_session_id(watch)
+    if not session_key or not physical_session_id:
         return None
     message = _safe_notification_message(notification)
 
@@ -761,10 +960,10 @@ def _dispatch_agent_bridge_notification(
         role="agenthub-supervisor",
         model=None,
         session_key=session_key,
-        parent_session_id=session_key,
+        parent_session_id=physical_session_id,
         runner=runner,
         origin_ui_session_id=session_key,
-        origin_session_id=session_key,
+        origin_session_id=physical_session_id,
     )
     if not isinstance(result, dict) or result.get("status") != "dispatched":
         logger.warning(
@@ -815,6 +1014,44 @@ def _inject_notification(notification: dict) -> bool:
             _watch_surface(watch))
         return False
     if _watch_surface(watch) == "agent_bridge":
+        retry_prior = None
+        # Settle an already-dispatched copy before considering rollover. A
+        # pending native completion still owns the old physical target and
+        # must finish there. A stale delivery is removed first so it cannot
+        # block rollover forever after a plugin upgrade.
+        with _delivery_lock:
+            deliveries = _deliveries()
+            prior = deliveries.get(notification_id)
+            if isinstance(prior, dict):
+                prior = {
+                    **prior,
+                    "physical_session_id": _watch_physical_session_id(watch),
+                    "context_id": notification.get("context_id"),
+                    "event_type": notification.get("event_type"),
+                    "message_id": notification.get("message_id"),
+                }
+                deliveries[str(notification_id)] = prior
+                _save_deliveries(deliveries)
+                delegation_id = str(prior.get("delegation_id") or "")
+                if delegation_id and _native_delivery_is_pending(delegation_id):
+                    return True
+                dispatched_at = prior.get("dispatched_at")
+                if (isinstance(dispatched_at, (int, float))
+                        and time.time() - float(dispatched_at)
+                        < _redelivery_holdoff_seconds()):
+                    return True
+                deliveries.pop(notification_id, None)
+                _save_deliveries(deliveries)
+                retry_prior = prior
+        watch = _rollover_agent_bridge_session(
+            watch_id=str(watch_id or ""), watch=watch)
+        if watch is None:
+            logger.warning(
+                "agentHub supervision injection deferred: notification_id=%s "
+                "watch_id=%s reason=session_rollover_unavailable",
+                notification_id, watch_id,
+            )
+            return False
         # The agentHub outbox deliberately redelivers until Hermes ACKs after
         # handling.  Persist the native delegation id immediately so repeated
         # pulls do not create duplicate WebUI turns.
@@ -827,6 +1064,7 @@ def _inject_notification(notification: dict) -> bool:
                 # never from the later native-completion text.
                 prior = {
                     **prior,
+                    "physical_session_id": _watch_physical_session_id(watch),
                     "context_id": notification.get("context_id"),
                     "event_type": notification.get("event_type"),
                     "message_id": notification.get("message_id"),
@@ -850,6 +1088,8 @@ def _inject_notification(notification: dict) -> bool:
                 # failed).  Permit a new durable wake instead of suppressing
                 # retries forever.
                 deliveries.pop(notification_id, None)
+            elif isinstance(retry_prior, dict):
+                prior = retry_prior
             try:
                 delegation_id = _dispatch_agent_bridge_notification(
                     notification, watch)
@@ -871,6 +1111,7 @@ def _inject_notification(notification: dict) -> bool:
                 "watch_id": watch_id,
                 "task_id": watch.get("task_id"),
                 "session_key": watch.get("session_key"),
+                "physical_session_id": _watch_physical_session_id(watch),
                 "context_id": notification.get("context_id"),
                 "event_type": notification.get("event_type"),
                 "message_id": notification.get("message_id"),

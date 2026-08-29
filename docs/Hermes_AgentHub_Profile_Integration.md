@@ -146,8 +146,12 @@ Kimi 停用时，`agents/list` 会标记 `enabled=false`；如用户仍指定 Ki
    密钥内容；
 4. 在临时目录演练恢复并校验 hash 一致；
 5. 只在 Gate 通过后修改 profile；修改后检查 YAML、权限、peer 数量和
-   skill 可见性，再重启 qishuo 运行时。安装 supervisor plugin 时会强制
-   `compression.in_place=true`，使 durable watch 在压缩前后保持同一物理 session
+   skill 可见性，再重启 qishuo 运行时。安装 supervisor plugin 时会保留
+   `compression.in_place=true`，避免 Hermes 在模型执行中途改变 durable watch 的
+   物理 session；supervisor 会在通知入队前检查消息数，默认达到 300 条时，先取得
+   turn lease 与 compression lease，再原子创建仅含机械交接说明的新物理 session
+   并重绑 watch。旧记录保留在父 session，不复制、也不发送给外部模型摘要；若会话
+   正忙或状态无法可靠校验，本次通知保持未确认，待下一轮重试
    ID；压缩前历史仍由 Hermes 软归档，可搜索和恢复。
 
 回退时停止 qishuo，用备份恢复三个目标，重新检查 hash/权限并启动。

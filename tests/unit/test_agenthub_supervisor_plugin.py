@@ -13,6 +13,26 @@ PLUGIN = Path(__file__).parents[2] / "integrations" / "hermes-qishuo" / \
     "agenthub-supervisor" / "__init__.py"
 
 
+class _DefaultSessionDB:
+    """Hermes state stub for tests unrelated to physical-session rollover."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def get_compression_tip(self, session_id):
+        return session_id
+
+    def get_session(self, session_id):
+        return {"id": session_id, "message_count": 0, "ended_at": None}
+
+
+sys.modules.setdefault(
+    "hermes_state", types.SimpleNamespace(SessionDB=_DefaultSessionDB))
+
+
 def _load_plugin():
     spec = importlib.util.spec_from_file_location(
         "agenthub_supervisor_plugin", PLUGIN)
@@ -99,6 +119,7 @@ def test_agent_bridge_surface_is_not_misclassified_as_process_only_tui(
         "task_id": "T-WEBUI", "context_id": "ctx-webui",
         "session_key": "mt-webui-1", "owner_mode": "agent_bridge",
         "owner_instance_id": "", "durable": True,
+        "physical_session_id": "mt-webui-1",
     }
     assert plugin._delivery_label(watch) == "agent-bridge-durable"
 
@@ -170,6 +191,183 @@ def test_agent_bridge_notification_uses_native_durable_completion(monkeypatch):
     # Re-pulls before that ACK must not create duplicate WebUI turns.
     assert plugin._inject_notification(notification) is True
     assert len(dispatched) == 1
+
+
+def test_agent_bridge_rollover_publishes_minimal_child_and_rebinds(monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    watch = {
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "session_key": "mt-parent", "owner_mode": "agent_bridge",
+        "owner_instance_id": "", "durable": True,
+    }
+    ctx.state.set("watches", {"WATCH-WEBUI": watch})
+    ctx.state.set("deliveries", {})
+    published = []
+    released = []
+
+    class FakeSessionDB:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get_compression_tip(self, session_id):
+            return session_id
+
+        def get_session(self, session_id):
+            assert session_id == "mt-parent"
+            return {
+                "id": session_id, "message_count": 401, "ended_at": None,
+                "source": "cli", "model": "model-a",
+                "model_config": '{"reasoning_effort":"max"}',
+                "_system_prompt_resolved": "system", "cwd": "/workspace",
+                "profile_name": "qishuo",
+            }
+
+        def try_acquire_session_turn_lease(self, *_args, **_kwargs):
+            return True
+
+        def try_acquire_compression_lock(self, *_args, **_kwargs):
+            return True
+
+        def get_active_message_watermark(self, session_id):
+            assert session_id == "mt-parent"
+            return 1234
+
+        def publish_compression_child(self, **kwargs):
+            published.append(kwargs)
+
+        def release_compression_lock(self, session_id, holder):
+            released.append(("compression", session_id, holder))
+
+        def release_session_turn_lease(self, session_id, holder):
+            released.append(("turn", session_id, holder))
+
+    monkeypatch.setitem(
+        sys.modules, "hermes_state",
+        types.SimpleNamespace(SessionDB=FakeSessionDB))
+    monkeypatch.setenv("AGENTHUB_SUPERVISOR_MAX_SESSION_MESSAGES", "300")
+
+    result = plugin._rollover_agent_bridge_session(
+        watch_id="WATCH-WEBUI", watch=watch)
+
+    assert result is not None
+    child = result["physical_session_id"]
+    assert child.startswith("agenthub_")
+    rebound = ctx.state.get("watches")["WATCH-WEBUI"]
+    assert rebound["session_key"] == "mt-parent"
+    assert rebound["physical_session_id"] == child
+    assert len(published) == 1
+    call = published[0]
+    assert call["parent_session_id"] == "mt-parent"
+    assert call["child_session_id"] == child
+    assert call["watermark"] == 1234
+    assert call["turn_lease_holder"] == call["compression_lock_holder"]
+    assert call["model_config"] == {"reasoning_effort": "max"}
+    assert call["messages"] == [{
+        "role": "system", "content": plugin._ROLLOVER_HANDOFF,
+        "_compressed_summary": True,
+    }]
+    assert "transcript was intentionally not copied" in \
+        call["messages"][0]["content"]
+    assert [item[0] for item in released] == ["compression", "turn"]
+
+
+def test_agent_bridge_rollover_defers_when_turn_is_busy(monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    watch = {
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "session_key": "mt-busy", "owner_mode": "agent_bridge",
+        "owner_instance_id": "", "durable": True,
+    }
+    ctx.state.set("watches", {"WATCH-WEBUI": watch})
+    published = []
+
+    class BusySessionDB(_DefaultSessionDB):
+        def get_session(self, session_id):
+            return {"id": session_id, "message_count": 999, "ended_at": None}
+
+        def try_acquire_session_turn_lease(self, *_args, **_kwargs):
+            return False
+
+        def publish_compression_child(self, **kwargs):
+            published.append(kwargs)
+
+    monkeypatch.setitem(
+        sys.modules, "hermes_state",
+        types.SimpleNamespace(SessionDB=BusySessionDB))
+
+    assert plugin._rollover_agent_bridge_session(
+        watch_id="WATCH-WEBUI", watch=watch) is None
+    assert published == []
+    assert ctx.state.get("watches")["WATCH-WEBUI"]["session_key"] == "mt-busy"
+
+
+def test_agent_bridge_rollover_adopts_existing_canonical_tip(monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    watch = {
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "session_key": "mt-parent", "owner_mode": "agent_bridge",
+        "owner_instance_id": "", "durable": True,
+    }
+    ctx.state.set("watches", {"WATCH-WEBUI": watch})
+
+    class ContinuedSessionDB(_DefaultSessionDB):
+        def get_compression_tip(self, _session_id):
+            return "mt-child"
+
+        def get_session(self, session_id):
+            assert session_id == "mt-child"
+            return {"id": session_id, "message_count": 1, "ended_at": None}
+
+    monkeypatch.setitem(
+        sys.modules, "hermes_state",
+        types.SimpleNamespace(SessionDB=ContinuedSessionDB))
+
+    result = plugin._rollover_agent_bridge_session(
+        watch_id="WATCH-WEBUI", watch=watch)
+    assert result is not None
+    assert result["session_key"] == "mt-parent"
+    assert result["physical_session_id"] == "mt-child"
+    rebound = ctx.state.get("watches")["WATCH-WEBUI"]
+    assert rebound["session_key"] == "mt-parent"
+    assert rebound["physical_session_id"] == "mt-child"
+
+
+def test_agent_bridge_rollover_rejects_ended_canonical_tip(monkeypatch):
+    plugin = _load_plugin()
+    ctx = _Context()
+    plugin._set_context_for_tests(ctx)
+    watch = {
+        "task_id": "T-WEBUI", "context_id": "ctx-webui",
+        "session_key": "mt-route", "physical_session_id": "mt-parent",
+        "owner_mode": "agent_bridge", "owner_instance_id": "",
+        "durable": True,
+    }
+    ctx.state.set("watches", {"WATCH-WEBUI": watch})
+
+    class EndedSessionDB(_DefaultSessionDB):
+        def get_compression_tip(self, _session_id):
+            return "mt-ended-child"
+
+        def get_session(self, session_id):
+            assert session_id == "mt-ended-child"
+            return {"id": session_id, "message_count": 1, "ended_at": 1.0}
+
+    monkeypatch.setitem(
+        sys.modules, "hermes_state",
+        types.SimpleNamespace(SessionDB=EndedSessionDB))
+
+    assert plugin._rollover_agent_bridge_session(
+        watch_id="WATCH-WEBUI", watch=watch) is None
+    assert ctx.state.get("watches")["WATCH-WEBUI"] == watch
 
 
 def test_delivered_native_wake_is_retried_until_agenthub_ack(monkeypatch):
@@ -277,14 +475,15 @@ def test_agent_bridge_native_dispatch_is_bound_to_originating_webui_session(
         "task_id": "T-WEBUI", "context_id": "ctx-webui",
         "session_key": "mt-webui-1", "owner_mode": "agent_bridge",
         "owner_instance_id": "", "durable": True,
+        "physical_session_id": "agenthub-child-1",
     }
 
     assert plugin._dispatch_agent_bridge_notification(
         notification, watch) == "deleg-native-1"
     assert captured["session_key"] == "mt-webui-1"
-    assert captured["parent_session_id"] == "mt-webui-1"
+    assert captured["parent_session_id"] == "agenthub-child-1"
     assert captured["origin_ui_session_id"] == "mt-webui-1"
-    assert captured["origin_session_id"] == "mt-webui-1"
+    assert captured["origin_session_id"] == "agenthub-child-1"
     assert captured["toolsets"] == ["agenthub_supervisor"]
     result = captured["runner"]()
     assert result["status"] == "completed"
@@ -630,8 +829,12 @@ def test_recovery_hook_accepts_and_rebinds_verified_compression_tip(
     assert plugin._pre_llm_recovery_context(
         session_id="mt-child", turn_id="turn-1",
         user_message=wake) is not None
-    assert ctx.state.get("watches")["WATCH-1"]["session_key"] == "mt-child"
-    assert ctx.state.get("deliveries")["SN-1"]["session_key"] == "mt-child"
+    rebound = ctx.state.get("watches")["WATCH-1"]
+    assert rebound["session_key"] == "mt-parent"
+    assert rebound["physical_session_id"] == "mt-child"
+    delivery = ctx.state.get("deliveries")["SN-1"]
+    assert delivery["session_key"] == "mt-parent"
+    assert delivery["physical_session_id"] == "mt-child"
 
     monkeypatch.setattr(plugin, "_compression_tip", lambda _session_id: "mt-child")
     assert plugin._pre_llm_recovery_context(
@@ -901,7 +1104,7 @@ def test_non_gateway_host_does_not_start_persistent_relay(monkeypatch):
 
     assert started == []
     manifest = PLUGIN.with_name("plugin.yaml").read_text(encoding="utf-8")
-    assert "version: 1.7.0" in manifest
+    assert "version: 1.8.0" in manifest
 
 
 def test_plugin_tools_use_dedicated_non_override_toolset(monkeypatch):

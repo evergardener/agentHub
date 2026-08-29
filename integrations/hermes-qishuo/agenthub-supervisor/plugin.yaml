@@ -1,5 +1,5 @@
 name: agenthub-supervisor
-version: 1.7.0
+version: 1.8.0
 description: >
   Supervise agentHub tasks and wake an available originating qishuo delivery
   surface for approvals, failures, and result acceptance. Canonical Gateway
@@ -9,7 +9,9 @@ description: >
   an authoritative read through a fixed, context-scoped recovery path. WebUI
   conversation recovery validates pending delivery ownership before fetching
   untrusted text, follows only verified compression continuations, and persists
-  the final reply before ACK.
+  the final reply before ACK. Oversized idle Agent Bridge sessions rotate to a
+  fresh physical continuation before dispatch without copying or externally
+  summarizing their transcript.
 author: evergarden
 hooks:
   - transform_tool_result
@@ -41,4 +43,8 @@ optional_env:
   - name: AGENTHUB_SUPERVISOR_POLL_SECONDS
     description: Background outbox polling interval, clamped to 2-60 seconds.
     prompt: Supervisor polling interval
+    password: false
+  - name: AGENTHUB_SUPERVISOR_MAX_SESSION_MESSAGES
+    description: Physical Agent Bridge session rollover threshold, clamped to 50-2000.
+    prompt: Supervisor session message limit
     password: false

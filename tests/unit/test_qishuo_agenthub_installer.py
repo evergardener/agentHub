@@ -64,6 +64,8 @@ def test_install_backup_and_rollback(tmp_path):
             "plugin.yaml").exists()
     assert "AGENTHUB_A2A_TOKEN=" + "t" * 48 in (
         profile / ".env").read_text()
+    assert "AGENTHUB_SUPERVISOR_MAX_SESSION_MESSAGES=300" in (
+        profile / ".env").read_text()
 
     restored = MODULE.rollback(profile, backup)
     assert restored["restored"] == str(profile)

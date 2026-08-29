@@ -195,7 +195,13 @@ def install(profile: Path, agenthub_env: Path, skill_source: Path,
     os.chmod(config_path, 0o600)
 
     profile_env = profile / ".env"
-    set_values(profile_env, {"AGENTHUB_A2A_TOKEN": token})
+    existing_profile_env = parse_env(profile_env)
+    set_values(profile_env, {
+        "AGENTHUB_A2A_TOKEN": token,
+        "AGENTHUB_SUPERVISOR_MAX_SESSION_MESSAGES":
+            existing_profile_env.get(
+                "AGENTHUB_SUPERVISOR_MAX_SESSION_MESSAGES", "300"),
+    })
     os.chmod(profile_env, 0o600)
 
     skill_target = profile / "skills" / "agenthub-orchestration"
