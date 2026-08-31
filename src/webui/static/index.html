@@ -340,6 +340,16 @@
                       cursor: pointer; font: inherit; font-size: 11px; }
   .chat-transcript { flex: 1; min-height: 0; overflow-y: auto;
                      padding: 20px clamp(18px, 4vw, 54px); }
+  .chat-transcript-wrap { position: relative; flex: 1; min-height: 0;
+                          display: flex; overflow: hidden; }
+  .chat-new-content {
+    position: absolute; z-index: 2; left: 50%; bottom: 12px;
+    transform: translateX(-50%); border: 1px solid rgba(59,99,243,.24);
+    border-radius: 999px; padding: 6px 13px; background: var(--card);
+    color: var(--acc); box-shadow: 0 4px 16px rgba(30,55,110,.16);
+    cursor: pointer; font: inherit; font-size: 11px; font-weight: 650;
+  }
+  .chat-new-content:hover { background: var(--acc-soft); }
   .chat-transcript .message-list { gap: 9px; }
   .chat-transcript .message { width: min(96%, 980px); max-width: none; padding: 12px 14px; }
   .chat-transcript .message.user { margin-left: auto; }
@@ -625,10 +635,13 @@
     flex: 1; height: 100%; min-height: 0; gap: 12px; overflow: hidden;
   }
   .workspace-card > .chat-head { flex: none; }
-  .workspace-card > .chat-transcript {
+  .workspace-card > .chat-transcript,
+  .workspace-card > .chat-transcript-wrap {
     flex: 1; min-height: 0; overflow-y: auto;
     overscroll-behavior: contain; scrollbar-gutter: stable;
   }
+  .workspace-card > .chat-transcript-wrap { overflow: hidden; }
+  .chat-transcript-wrap > .chat-transcript { width: 100%; }
   .workspace-card > .chat-composer { flex: none; }
   .chat-transcript { padding: 20px clamp(16px, 3vw, 40px); }
   .chat-transcript .message {
@@ -771,6 +784,39 @@
   .chat-transcript .message.outbound .message-shell { grid-column: 1; grid-row: 1;
                                                        border-radius: 14px 4px 14px 14px; }
   .message-agent-label { color: var(--mut); }
+  .message-delivery { font-weight: 650; }
+  .message-delivery.processing { color: var(--run); }
+  .message-delivery.processing::before {
+    content: ""; display: inline-block; width: 6px; height: 6px;
+    margin-right: 5px; border-radius: 50%; background: currentColor;
+    animation: delivery-pulse 1.2s ease-in-out infinite;
+  }
+  .message-delivery.delivered { color: var(--ok); }
+  .message-delivery.failed { color: var(--bad); }
+  .response-stream .message-shell {
+    border-color: rgba(9,105,218,.18);
+    background: rgba(232,241,253,.42);
+  }
+  .response-stream.failed .message-shell,
+  .response-stream.interrupted .message-shell,
+  .response-stream.aborted .message-shell,
+  .response-stream.cancelled .message-shell,
+  .response-stream.error .message-shell {
+    border-color: rgba(217,74,74,.25); background: rgba(253,236,236,.46);
+  }
+  .stream-plain-text { white-space: pre-wrap; overflow-wrap: anywhere;
+                       min-height: 1.35em; }
+  .stream-placeholder { color: var(--mut); font-style: italic; }
+  .message-stream-status { font-weight: 650; }
+  .message-stream-status.active,
+  .message-stream-status.incomplete { color: var(--run); }
+  .message-stream-status.completed { color: var(--ok); }
+  .message-stream-status.failed,
+  .message-stream-status.interrupted,
+  .message-stream-status.aborted,
+  .message-stream-status.cancelled,
+  .message-stream-status.error { color: var(--bad); }
+  @keyframes delivery-pulse { 50% { opacity: .3; transform: scale(.72); } }
   .message .mc { font-family: inherit; font-size: 13px; line-height: 1.35; }
   .message .mc, .markdown-body { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
   .markdown-body { line-height: 1.35; color: var(--fg); overflow-x: auto; }
@@ -1083,8 +1129,13 @@
         <span id="chat-badge"></span>
         <select class="conversation-picker" id="conversation-select" aria-label="选择协作会话" hidden></select>
       </div>
-      <div class="chat-transcript" id="chat-transcript">
-        <div class="chat-empty">暂无可显示的持久会话</div>
+      <div class="chat-transcript-wrap">
+        <div class="chat-transcript" id="chat-transcript">
+          <div class="chat-empty">暂无可显示的持久会话</div>
+        </div>
+        <button class="chat-new-content" id="chat-new-content" type="button" hidden>
+          有新内容 ↓
+        </button>
       </div>
       <div class="chat-composer" id="chat-composer">
         <div class="composer-row">
@@ -1272,6 +1323,15 @@ const S = {
   taskDetailScrolls: new Map(),
   collaborationId: null,
   collaborations: [],
+  currentTranscriptEntries: [],
+  responseStreams: new Map(),
+  responseStreamRefreshTimer: null,
+  responseStreamRefreshInFlight: false,
+  responseStreamRefreshQueued: false,
+  conversationRefreshTimer: null,
+  seenEventIds: new Set(),
+  eventSource: null,
+  conversationLoadToken: 0,
   linkedTasks: [],
   currentTaskDetail: null,
   currentSession: null,
@@ -2164,18 +2224,161 @@ function appendDetailEvent(e) {
   fillExecutionTimeline(S.detailId, timeline);
 }
 
+function eventPayload(event) {
+  const payload = taskEventPayload(event);
+  return payload && typeof payload === "object" ? payload : {};
+}
+
+function eventCollaborationId(event) {
+  const payload = eventPayload(event);
+  return String(payload.collaboration_id || payload.collaborationId ||
+    payload.stream?.collaboration_id || payload.draft?.collaboration_id ||
+    event.collaboration_id || "");
+}
+
+function inferResponseStreamStatus(eventType, value) {
+  const supplied = String(value || "").toLowerCase();
+  if (RESPONSE_STREAM_VISIBLE_STATUSES.has(supplied)) return supplied;
+  const kind = String(eventType || "").toLowerCase();
+  if (/abort|interrupt|cancel/.test(kind)) return "aborted";
+  if (/fail|error/.test(kind)) return "failed";
+  if (/finish|complete|done|end/.test(kind)) return "finished";
+  return "streaming";
+}
+
+function responseStreamEventValue(event) {
+  const payload = eventPayload(event);
+  const value = payload.stream || payload.response_stream || payload.draft || payload;
+  if (!value || typeof value !== "object") return null;
+  const streamId = value.stream_id || value.streamId || payload.stream_id ||
+    payload.streamId || event.stream_id;
+  const collaborationId = value.collaboration_id || value.collaborationId ||
+    eventCollaborationId(event);
+  if (!streamId || !collaborationId) return null;
+  const seqValue = value.seq ?? value.stream_seq ?? value.last_seq ??
+    payload.seq ?? payload.stream_seq ?? event.stream_seq;
+  const rawSeq = seqValue ?? 0;
+  const text = typeof value.delta === "string" ? value.delta :
+    typeof value.text === "string" ? value.text :
+    typeof value.text_prefix === "string" ? value.text_prefix :
+    typeof payload.delta === "string" ? payload.delta :
+    typeof payload.text === "string" ? payload.text : "";
+  return {
+    collaboration_id: collaborationId,
+    parent_message_id: value.parent_message_id || value.message_id ||
+      payload.parent_message_id || payload.message_id || "",
+    stream_id: streamId,
+    seq: rawSeq,
+    _seqProvided: seqValue != null,
+    text,
+    status: inferResponseStreamStatus(event.event_type, value.status || payload.status),
+    updated_at: value.updated_at || payload.updated_at || event.created_at || "",
+  };
+}
+
+function isResponseStreamEvent(event) {
+  // Backend lifecycle events are conversation.stream.started,
+  // conversation.stream.updated, conversation.stream.finished and
+  // conversation.stream.aborted; their payload carries metadata only, so text is read from the
+  // PostgreSQL-backed read-only draft endpoint below.
+  return /(?:conversation[._])?(?:response[._]stream|stream[._](?:draft|started|updated|finished|aborted)|stream$)/i.test(
+    String(event?.event_type || ""));
+}
+
+function scheduleResponseStreamRefresh(collaborationId) {
+  if (!collaborationId || collaborationId !== S.collaborationId) return;
+  if (S.responseStreamRefreshTimer) return;
+  // Keep this independent of the low-frequency dashboard refresh.  A 150ms
+  // throttle gives durable rows a chance to reconcile without per-token SQL.
+  S.responseStreamRefreshTimer = setTimeout(() => {
+    S.responseStreamRefreshTimer = null;
+    refreshResponseStreams(collaborationId);
+  }, 150);
+}
+
+async function refreshResponseStreams(collaborationId) {
+  if (collaborationId !== S.collaborationId) return;
+  if (S.responseStreamRefreshInFlight) {
+    S.responseStreamRefreshQueued = true;
+    return;
+  }
+  S.responseStreamRefreshInFlight = true;
+  try {
+    const result = await fetchJson(
+      `/api/collaborations/${encodeURIComponent(collaborationId)}/response-streams`);
+    if (!result.error && collaborationId === S.collaborationId) {
+      setResponseStreams(result.response_streams || result.active_response_streams || []);
+      updateResponseStreamElements();
+    }
+  } finally {
+    S.responseStreamRefreshInFlight = false;
+    if (S.responseStreamRefreshQueued) {
+      S.responseStreamRefreshQueued = false;
+      scheduleResponseStreamRefresh(collaborationId);
+    }
+  }
+}
+
+function scheduleConversationRefresh(collaborationId) {
+  if (!collaborationId || collaborationId !== S.collaborationId) return;
+  if (S.conversationRefreshTimer) return;
+  S.conversationRefreshTimer = setTimeout(() => {
+    S.conversationRefreshTimer = null;
+    loadConversationPanel(collaborationId, {preserveScroll: true});
+  }, 120);
+}
+
+function clearStreamsForCreatedMessage(event) {
+  const payload = eventPayload(event);
+  const messageId = String(payload.parent_message_id || payload.parentMessageId || "");
+  const messageType = String(payload.message_type || payload.messageType || "");
+  const senderType = String(payload.sender_type || payload.senderType || "");
+  if (!messageId && !messageType.startsWith("llm.") && senderType !== "hermes") return;
+  for (const [key, stream] of S.responseStreams) {
+    if (stream.collaboration_id !== S.collaborationId) continue;
+    if (messageId && stream.parent_message_id &&
+        stream.parent_message_id !== messageId) continue;
+    S.responseStreams.delete(key);
+  }
+}
+
+function handleResponseStreamEvent(event) {
+  if (!isResponseStreamEvent(event)) return false;
+  const value = responseStreamEventValue(event);
+  if (!value) return true;
+  const stream = upsertResponseStream(value);
+  if (stream && stream.collaboration_id === S.collaborationId) {
+    updateResponseStreamElements();
+    scheduleResponseStreamRefresh(stream.collaboration_id);
+  }
+  return true;
+}
+
 function startStream() {
-  const es = new EventSource("/api/events/stream?after=" + S.lastSeq);
+  if (S.eventSource) S.eventSource.close();
+  const es = new EventSource("/api/events/stream?after=" + encodeURIComponent(S.lastSeq));
+  S.eventSource = es;
   es.onopen = () => setConn(true, "已连接");
   es.onerror = () => setConn(false, "事件流重连中…");
   es.onmessage = (m) => {
     try {
       const e = JSON.parse(m.data);
-      S.lastSeq = Math.max(S.lastSeq, e.seq);
+      const eventId = String(m.lastEventId || e.seq || "");
+      const seq = Number(eventId || e.seq);
+      if (!Number.isFinite(seq) || seq <= S.lastSeq || S.seenEventIds.has(eventId)) return;
+      S.seenEventIds.add(eventId);
+      if (S.seenEventIds.size > 1000)
+        S.seenEventIds.delete(S.seenEventIds.values().next().value);
+      S.lastSeq = seq;
       appendEvent(e);
       appendDetailEvent(e);
-      if (e.event_type === "conversation.message.created" && S.collaborationId)
-        loadConversationPanel(S.collaborationId, {preserveScroll: true});
+      const collaborationId = eventCollaborationId(e);
+      if (handleResponseStreamEvent(e)) return;
+      if (e.event_type === "conversation.message.created" && collaborationId)
+        clearStreamsForCreatedMessage(e);
+      if (["conversation.message.created", "conversation.message.delivery.updated"].includes(e.event_type)
+          && collaborationId === S.collaborationId)
+        scheduleConversationRefresh(collaborationId);
       if (/interaction|input_required|\.blocked$|system\.alert/.test(e.event_type || ""))
         loadAll();
     } catch (_) { /* 跳过坏帧 */ }
@@ -2238,9 +2441,242 @@ function renderMessageBody(message, value) {
   return html || `<div>（空消息）</div>`;
 }
 
-function renderMessageList(messages) {
-  if (!messages?.length) return `<div class="empty">（无持久消息）</div>`;
-  return `<div class="message-list">` + messages.map(m => {
+const RESPONSE_STREAM_VISIBLE_STATUSES = new Set([
+  "streaming", "active", "incomplete", "finished", "completed",
+  "failed", "interrupted", "aborted", "cancelled", "error",
+]);
+const RESPONSE_STREAM_TERMINAL_STATUSES = new Set([
+  "finished", "completed", "failed", "interrupted", "aborted", "cancelled", "error",
+]);
+
+function normalizeResponseStream(row) {
+  const value = row || {};
+  const rawSeq = Number(value.seq ?? value.stream_seq ?? value.last_seq ?? 0);
+  const seq = Number.isFinite(rawSeq) && rawSeq >= 0 ? rawSeq : 0;
+  const status = String(value.status || "streaming").toLowerCase();
+  return {
+    collaboration_id: String(value.collaboration_id || S.collaborationId || ""),
+    parent_message_id: String(value.parent_message_id || value.message_id || ""),
+    stream_id: String(value.stream_id || ""),
+    seq,
+    text: typeof value.text === "string" ? value.text :
+      typeof value.text_prefix === "string" ? value.text_prefix : "",
+    status: RESPONSE_STREAM_VISIBLE_STATUSES.has(status) ? status : "streaming",
+    updated_at: value.updated_at || "",
+  };
+}
+
+function responseStreamKey(stream) {
+  return `${stream.collaboration_id || S.collaborationId || ""}:${stream.stream_id || ""}`;
+}
+
+function responseStreamStatusLabel(status) {
+  if (["streaming", "active", "incomplete"].includes(status))
+    return "Hermes 生成中";
+  if (["finished", "completed"].includes(status))
+    return "Hermes 已生成，正在保存";
+  if (["interrupted", "aborted", "cancelled"].includes(status))
+    return "Hermes 已中断";
+  if (["failed", "error"].includes(status)) return "Hermes 响应失败";
+  return "Hermes 生成中";
+}
+
+function foldResponseStreamRows(rows) {
+  let text = "";
+  for (const row of [...rows].sort((left, right) => left.seq - right.seq)) {
+    const piece = typeof row.text === "string" ? row.text : "";
+    if (!piece) continue;
+    // PostgreSQL migration 017 stores a cumulative prefix.  The fallback
+    // contract stores deltas; this prefix check supports both without ever
+    // rendering the same text twice.
+    if (!text) text = piece;
+    else if (piece.startsWith(text)) text = piece;
+    else if (text.startsWith(piece)) continue;
+    else text += piece;
+  }
+  return text;
+}
+
+function aggregateResponseStreamRows(rows) {
+  const ordered = [...rows].sort((left, right) => left.seq - right.seq);
+  const last = ordered[ordered.length - 1] || {};
+  return {
+    ...last,
+    rows: ordered,
+    text: foldResponseStreamRows(ordered),
+    seq: Number(last.seq || 0),
+  };
+}
+
+function setResponseStreams(rows) {
+  const grouped = new Map();
+  for (const source of Array.isArray(rows) ? rows : []) {
+    const row = normalizeResponseStream(source);
+    if (!row.stream_id || !row.collaboration_id) continue;
+    const key = responseStreamKey(row);
+    const prior = grouped.get(key);
+    const streamRows = prior ? prior.rows.slice() : [];
+    const sameSeq = streamRows.findIndex(item => item.seq === row.seq);
+    if (sameSeq >= 0) streamRows[sameSeq] = row;
+    else streamRows.push(row);
+    grouped.set(key, aggregateResponseStreamRows(streamRows));
+  }
+  S.responseStreams = grouped;
+}
+
+function upsertResponseStream(source) {
+  const row = normalizeResponseStream(source);
+  if (!row.stream_id || !row.collaboration_id) return null;
+  const key = responseStreamKey(row);
+  const prior = S.responseStreams.get(key);
+  const suppliedSeq = source?._seqProvided === true || (source &&
+    ["seq", "stream_seq", "last_seq"].some(field => source[field] != null));
+  if (prior && !suppliedSeq) row.seq = Number(prior.seq || 0);
+  if (prior && row.seq < Number(prior.seq || 0)) return prior;
+  const streamRows = prior ? prior.rows.slice() : [];
+  const sameSeq = streamRows.findIndex(item => item.seq === row.seq);
+  if (sameSeq >= 0) {
+    // Stream lifecycle events intentionally carry metadata only.  Preserve
+    // the latest visible prefix until the 150ms durable-row reconciliation
+    // fetch returns the same sequence with its text.
+    if (!row.text && streamRows[sameSeq].text) row.text = streamRows[sameSeq].text;
+    streamRows[sameSeq] = row;
+  }
+  else streamRows.push(row);
+  const stream = aggregateResponseStreamRows(streamRows);
+  // A status-only terminal event may omit text; retain the latest prefix.
+  if (!stream.text && prior?.text) stream.text = prior.text;
+  S.responseStreams.set(key, stream);
+  return stream;
+}
+
+function activeResponseStreams() {
+  return [...S.responseStreams.values()]
+    .filter(stream => stream.collaboration_id === S.collaborationId &&
+      RESPONSE_STREAM_VISIBLE_STATUSES.has(stream.status))
+    .sort((left, right) => {
+      const time = String(left.updated_at || "").localeCompare(String(right.updated_at || ""));
+      return time || String(left.stream_id).localeCompare(String(right.stream_id));
+    });
+}
+
+function renderResponseStreamElement(element, stream) {
+  const statuses = [...RESPONSE_STREAM_VISIBLE_STATUSES];
+  const status = RESPONSE_STREAM_VISIBLE_STATUSES.has(stream.status)
+    ? stream.status : "streaming";
+  element.classList.remove(...statuses);
+  element.classList.add(status);
+  const body = element.querySelector("[data-stream-body]");
+  if (body) {
+    body.textContent = stream.text || "Hermes 正在生成…";
+    body.classList.toggle("stream-placeholder", !stream.text);
+  }
+  const statusEl = element.querySelector("[data-stream-status]");
+  if (statusEl) {
+    statusEl.className = `message-stream-status ${status}`;
+    statusEl.textContent = responseStreamStatusLabel(status);
+  }
+  const time = element.querySelector("[data-stream-updated]");
+  if (time) time.textContent = formatTime(stream.updated_at);
+}
+
+function responseStreamHtml(stream) {
+  const status = RESPONSE_STREAM_VISIBLE_STATUSES.has(stream.status)
+    ? stream.status : "streaming";
+  const body = stream.text
+    ? esc(stream.text)
+    : `<span class="stream-placeholder">Hermes 正在生成…</span>`;
+  return `<article class="message hermes outbound response-stream ${status}" ` +
+    `data-response-stream-id="${esc(stream.stream_id)}" ` +
+    `data-response-stream-key="${esc(responseStreamKey(stream))}">
+      <span class="message-avatar" aria-hidden="true">H</span>
+      <div class="message-shell">
+        <div class="mh"><strong>Hermes</strong>
+          <span class="message-stream-status ${status}" data-stream-status>` +
+          `${esc(responseStreamStatusLabel(status))}</span>
+          <span>流式草稿</span><span>#${esc(stream.seq)}</span>
+          <span data-stream-updated>${esc(formatTime(stream.updated_at))}</span></div>
+        <div class="mc"><div class="stream-plain-text" data-stream-body>${body}</div></div>
+      </div>
+    </article>`;
+}
+
+function transcriptNearBottom(transcript, margin = 80) {
+  return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < margin;
+}
+
+function showNewTranscriptContent() {
+  const button = $("#chat-new-content");
+  if (button) button.hidden = false;
+}
+
+function clearNewTranscriptContent() {
+  const button = $("#chat-new-content");
+  if (button) button.hidden = true;
+}
+
+function reconcileTranscriptScroll(transcript, previousTop, wasNearBottom) {
+  if (wasNearBottom) {
+    transcript.scrollTop = transcript.scrollHeight;
+    clearNewTranscriptContent();
+  } else {
+    transcript.scrollTop = previousTop;
+    showNewTranscriptContent();
+  }
+}
+
+function updateResponseStreamElements() {
+  const transcript = $("#chat-transcript");
+  if (!transcript || !S.collaborationId) return;
+  const streams = activeResponseStreams();
+  const previousTop = transcript.scrollTop;
+  const wasNearBottom = transcriptNearBottom(transcript);
+  const list = transcript.querySelector(".message-list");
+  const existing = new Map([...transcript.querySelectorAll("[data-response-stream-key]")]
+    .map(element => [element.dataset.responseStreamKey, element]));
+  let rerender = !list && streams.length > 0;
+  if (!rerender) {
+    for (const stream of streams) {
+      const element = existing.get(responseStreamKey(stream));
+      if (!element) { rerender = true; break; }
+      renderResponseStreamElement(element, stream);
+    }
+  }
+  if (rerender) {
+    transcript.innerHTML = renderMessageList(S.currentTranscriptEntries, streams);
+  } else {
+    const wanted = new Set(streams.map(responseStreamKey));
+    for (const [key, element] of existing) {
+      if (!wanted.has(key)) element.remove();
+    }
+  }
+  reconcileTranscriptScroll(transcript, previousTop, wasNearBottom);
+}
+
+function clearResponseStreamsForMessages(messages) {
+  const formal = (Array.isArray(messages) ? messages : []).filter(message =>
+    message.sender_type === "hermes" &&
+    String(message.message_type || "").startsWith("llm."));
+  const parentIds = new Set(formal.map(message => String(message.parent_message_id || "")));
+  let changed = false;
+  for (const [key, stream] of S.responseStreams) {
+    if (stream.collaboration_id !== S.collaborationId) continue;
+    const replaced = stream.parent_message_id && parentIds.has(stream.parent_message_id);
+    const finished = RESPONSE_STREAM_TERMINAL_STATUSES.has(stream.status) && formal.length;
+    if (replaced || finished) {
+      S.responseStreams.delete(key);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function renderMessageList(messages, streams = []) {
+  const persistent = Array.isArray(messages) ? messages : [];
+  const drafts = Array.isArray(streams) ? streams : [];
+  if (!persistent.length && !drafts.length)
+    return `<div class="empty">（无持久消息）</div>`;
+  return `<div class="message-list">` + persistent.map(m => {
     const isTool = m.sender_type === "system" || String(m.message_type || "").startsWith("tool.");
     const isHermes = m.sender_type === "hermes" || String(m.sender_id || "").toLowerCase() === "hermes";
     const outbound = m.sender_type === "user" || isHermes;
@@ -2266,12 +2702,12 @@ function renderMessageList(messages) {
       <div class="message-shell">
         <div class="mh"><strong>${esc(speaker)}${esc(route)}</strong>
           <span>#${esc(m.sequence)}</span><span>${esc(m.message_type)}</span><span>revision ${esc(m.based_on_revision ?? "-")}</span>
-          ${delivery ? `<span>${esc(delivery)}</span>` : ""}
+          ${delivery ? `<span class="message-delivery ${esc(m.delivery_status || "")}">${esc(delivery)}</span>` : ""}
           <span>${esc(formatTime(m.created_at))}</span></div>
         <div class="mc">${renderMessageBody(m, value)}</div>
       </div>
     </article>`;
-  }).join("") + `</div>`;
+  }).join("") + drafts.map(responseStreamHtml).join("") + `</div>`;
 }
 
 /* ── 任务详情：目标 / 交付 / 执行过程 ── */
@@ -2513,6 +2949,9 @@ async function openDetail(id, {syncConversation = true} = {}) {
 }
 
 function renderEmptyConversation() {
+  S.currentTranscriptEntries = [];
+  S.responseStreams.clear();
+  clearNewTranscriptContent();
   $("#chat-title").textContent = "协作会话";
   $("#chat-subtitle").textContent = "Hermes 多轮上下文追踪";
   $("#chat-badge").innerHTML = "";
@@ -2543,6 +2982,7 @@ function renderEmptyTask(message = "选择 Session 后，这里显示它创建�
 
 async function loadConversationPanel(id, {preserveScroll = false} = {}) {
   if (!id) { renderEmptyConversation(); return; }
+  const loadToken = ++S.conversationLoadToken;
   S.collaborationId = id;
   const picker = $("#conversation-select");
   if ([...picker.options].some(option => option.value === id)) picker.value = id;
@@ -2551,6 +2991,7 @@ async function loadConversationPanel(id, {preserveScroll = false} = {}) {
   const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
   $("#chat-refresh-state").textContent = "同步中…";
   const d = await fetchJson("/api/collaborations/" + encodeURIComponent(id));
+  if (loadToken !== S.conversationLoadToken || id !== S.collaborationId) return;
   if (d.error) {
     $("#chat-refresh-state").textContent = "同步失败";
     showToast(d.error, "error");
@@ -2564,11 +3005,14 @@ async function loadConversationPanel(id, {preserveScroll = false} = {}) {
   const agents = [...new Set((d.tasks || []).map(task => task.assigned_to).filter(Boolean))];
   const transcriptEntries = [...(d.messages || []), ...(d.agent_activity || [])]
     .sort((left, right) => String(left.created_at || "").localeCompare(String(right.created_at || "")));
+  S.currentTranscriptEntries = transcriptEntries;
+  setResponseStreams(d.response_streams || d.active_response_streams || []);
+  clearResponseStreamsForMessages(d.messages || []);
   $("#chat-subtitle").innerHTML =
     `<span>${esc(c.id)}</span><span>${esc(transcriptEntries.length)} 条消息/活动</span>` +
     `<span>${esc((d.tasks || []).length)} 个任务</span><span>${esc(nativeSessions)} 个原生 Session</span>` +
     `<span>Agent ${esc(agents.join("、") || "未分配")}</span><span>控制权 ${esc(c.controller)}</span>`;
-  transcript.innerHTML = renderMessageList(transcriptEntries);
+  transcript.innerHTML = renderMessageList(transcriptEntries, activeResponseStreams());
   document.querySelectorAll("[data-session-card]").forEach(card =>
     card.classList.toggle("active", card.dataset.sessionCard === id));
   S.linkedTasks = d.tasks || [];
@@ -2578,10 +3022,19 @@ async function loadConversationPanel(id, {preserveScroll = false} = {}) {
   } else {
     renderEmptyTask("此 Session 尚未创建任务；对话上下文仍会持续保留。");
   }
-  if (!preserveScroll || nearBottom) transcript.scrollTop = transcript.scrollHeight;
-  else transcript.scrollTop = previousScroll;
+  reconcileTranscriptScroll(transcript, previousScroll,
+    !preserveScroll || nearBottom);
   $("#chat-refresh-state").textContent = `已同步 ${formatTime(new Date().toISOString())}`;
 }
+
+$("#chat-new-content").onclick = () => {
+  const transcript = $("#chat-transcript");
+  transcript.scrollTo({top: transcript.scrollHeight, behavior: "smooth"});
+  clearNewTranscriptContent();
+};
+$("#chat-transcript").addEventListener("scroll", () => {
+  if (transcriptNearBottom($("#chat-transcript"))) clearNewTranscriptContent();
+});
 
 function composerRecipients() {
   const task = S.currentTaskDetail?.task;

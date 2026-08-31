@@ -147,6 +147,9 @@ def _hub_command(text: str) -> tuple[dict | None, str | None]:
             "tasks/request-rework", "interactions/respond",
             "interactions/get",
             "conversations/messages/get", "conversations/respond",
+            "conversations/stream", "conversations/stream/start",
+            "conversations/stream/update", "conversations/stream/finish",
+            "conversations/stream/abort", "conversations/stream/get",
             "supervision/register", "supervision/pull",
             "supervision/ack", "supervision/stop"}:
         return None, f"未知 agentHub action: {action}"
@@ -292,6 +295,12 @@ def _to_a2a(conn, row, *, context_id: str | None = None) -> dict:
 
     pending_interactions = collaboration_store.pending_interaction_views(
         conn, task_id)
+    if TaskStatus(row["status"]) in {
+            TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.ACCEPTED}:
+        # Terminal task state is authoritative even if an older writer left a
+        # stale interaction row behind. Current writers close those rows in
+        # the same transaction; this is defense-in-depth for historical data.
+        pending_interactions = []
     raw_detail = row["error_message"] or row["result_summary"] or ""
     detail = str(raw_detail)[:1000]
     detail_truncated = len(str(raw_detail)) > len(detail)
@@ -501,6 +510,107 @@ def create_app(tm: TaskManager | None = None,
             "payload": payload,
         })
 
+    def _conversation_stream(command: dict, rpc_id, identity: dict,
+                             *, context_id: str | None,
+                             wrapped: bool = True) -> JSONResponse:
+        """Handle the durable draft protocol used by the Hermes supervisor.
+
+        Stream bodies are returned to the authenticated caller for live
+        rendering, but only bounded metadata (never the prefix itself) is
+        written to ``events``.  ``conversations/respond`` remains the only
+        action that creates an assistant ``conversation_messages`` row.
+        """
+        if identity.get("kind") != "hub":
+            return _error(rpc_id, -32003,
+                          "conversation streams require a hub identity")
+        if not isinstance(context_id, str) or not context_id.strip():
+            return _error(rpc_id, -32602,
+                          "conversation stream action requires contextId")
+        action = command.get("action")
+        if action == "conversations/stream":
+            operation = command.get("phase") or command.get("op")
+            operation = str(operation or "").strip().lower()
+            operation = {
+                "start": "conversations/stream/start",
+                "started": "conversations/stream/start",
+                "update": "conversations/stream/update",
+                "delta": "conversations/stream/update",
+                "finish": "conversations/stream/finish",
+                "finished": "conversations/stream/finish",
+                "abort": "conversations/stream/abort",
+                "aborted": "conversations/stream/abort",
+                "get": "conversations/stream/get",
+            }.get(operation)
+            if operation is None:
+                return _error(
+                    rpc_id, -32602,
+                    "conversations/stream requires phase=start|update|"
+                    "finish|abort|get")
+            action = operation
+        from orchestrator import collaboration_store
+
+        try:
+            if action == "conversations/stream/start":
+                payload = collaboration_store.start_conversation_stream(
+                    tm.conn,
+                    peer=identity["peer"], context_id=context_id,
+                    message_id=command.get("message_id"),
+                    stream_id=command.get("stream_id"),
+                )
+            elif action == "conversations/stream/get":
+                payload = collaboration_store.get_conversation_stream(
+                    tm.conn,
+                    peer=identity["peer"], context_id=context_id,
+                    stream_id=command.get("stream_id"),
+                    message_id=command.get("message_id"),
+                )
+            elif action == "conversations/stream/update":
+                value = command.get("text")
+                if "text" not in command and "prefix" in command:
+                    value = command.get("prefix")
+                payload = collaboration_store.update_conversation_stream(
+                    tm.conn,
+                    peer=identity["peer"], context_id=context_id,
+                    stream_id=command.get("stream_id"),
+                    message_id=command.get("message_id"),
+                    seq=command.get("seq", command.get("stream_seq")),
+                    text=value,
+                    delta=command.get("delta"),
+                )
+            elif action == "conversations/stream/finish":
+                value = command.get("text")
+                if "text" not in command and "prefix" in command:
+                    value = command.get("prefix")
+                payload = collaboration_store.finish_conversation_stream(
+                    tm.conn,
+                    peer=identity["peer"], context_id=context_id,
+                    stream_id=command.get("stream_id"),
+                    message_id=command.get("message_id"),
+                    seq=command.get("seq", command.get("stream_seq")),
+                    text=value,
+                    delta=command.get("delta"),
+                )
+            elif action == "conversations/stream/abort":
+                payload = collaboration_store.abort_conversation_stream(
+                    tm.conn,
+                    peer=identity["peer"], context_id=context_id,
+                    stream_id=command.get("stream_id"),
+                    message_id=command.get("message_id"),
+                    reason=command.get("reason"),
+                )
+            else:
+                return _error(rpc_id, -32601,
+                              f"method not found: {action}")
+        except PermissionError as exc:
+            return _error(rpc_id, -32003, str(exc))
+        except (KeyError, TypeError, ValueError) as exc:
+            return _error(rpc_id, -32602, str(exc))
+        message = _text_message(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            context_id,
+        )
+        return _result(rpc_id, {"message": message})
+
     @app.get("/.well-known/agent-card.json")
     async def card(request: Request) -> dict:
         base = os.environ.get("LAS_ORCH_PUBLIC_URL", "").rstrip("/") \
@@ -590,6 +700,16 @@ def create_app(tm: TaskManager | None = None,
         if method == "interactions/get":
             return _interaction_get(
                 params, rpc_id, identity,
+                context_id=(params.get("contextId") or
+                            params.get("context_id")), wrapped=False)
+        if method in {
+                "conversations/stream", "conversations/stream/start",
+                "conversations/stream/update", "conversations/stream/finish",
+                "conversations/stream/abort", "conversations/stream/get"}:
+            command = dict(params or {})
+            command["action"] = method
+            return _conversation_stream(
+                command, rpc_id, identity,
                 context_id=(params.get("contextId") or
                             params.get("context_id")), wrapped=False)
         return _error(rpc_id, -32601, f"method not found: {method}")
@@ -730,6 +850,11 @@ def create_app(tm: TaskManager | None = None,
                     context_id=context_id,
                     wrapped=True,
                 )
+            if action == "conversations/stream" or action.startswith(
+                    "conversations/stream/"):
+                return _conversation_stream(
+                    command, rpc_id, identity, context_id=context_id,
+                    wrapped=True)
             if action in {
                     "conversations/messages/get", "conversations/respond"}:
                 from orchestrator import collaboration_store

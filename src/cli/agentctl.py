@@ -1,7 +1,7 @@
 """agentctl — 观察与管理 CLI（设计文档 §Phase 8）。
 
 当前命令：
-  agentctl status                 环境体检（db / WAL / 表）
+  agentctl status                 PostgreSQL 环境体检（db / migrations / 表）
   agentctl agent list             Agent 列表
   agentctl task list [--status]   任务列表
   agentctl task show <id>         任务详情（含 runs / artifacts）
@@ -9,7 +9,7 @@
   agentctl task cancel <id>       取消任务（级联取消后代）
   agentctl task approve <id>      审批通过（blocked → working）
   agentctl task reject <id>       审批拒绝（blocked → cancelled，级联）
-  agentctl events [--follow]      事件流（SQLite 单一事实源，--follow 轮询追加）
+  agentctl events [--follow]      PostgreSQL 事件流（--follow 轮询追加）
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 def _default_db():
-    """--db 缺省：LAS_DATABASE_URL（或派生的 sqlite:/// URL）。"""
+    """--db 缺省：必填的 PostgreSQL LAS_DATABASE_URL。"""
     from common import config as cfg
 
     return cfg.database_url()
@@ -45,9 +45,9 @@ def cmd_status(db_path: Path) -> int:
         print(f"state db not found: {db_path}")
         return 1
     conn = _conn(db_path)
-    journal = conn.execute("PRAGMA journal_mode;").fetchone()[0]
     tables = [r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;")]
+        "SELECT tablename FROM pg_catalog.pg_tables"
+        " WHERE schemaname = 'public' ORDER BY tablename;")]
     versions = [r[0] for r in conn.execute(
         "SELECT version FROM schema_migrations ORDER BY version;")]
     counts = {
@@ -56,7 +56,7 @@ def cmd_status(db_path: Path) -> int:
         if t in tables
     }
     print(f"db: {db_path}")
-    print(f"journal_mode: {journal}")
+    print("backend: postgresql")
     print(f"migrations: {versions}")
     print(f"tables: {', '.join(tables)}")
     print(f"counts: {counts}")

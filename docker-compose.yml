@@ -5,8 +5,7 @@
 #   宿主机：worker adapter（codex/kimi/dsh/pi...，用户自装），心跳注册进 agentHub
 #   宿主机 worker 配置：LAS_NATS_URL=nats://127.0.0.1:4222
 #                      LAS_AGENT_ENDPOINT=http://host.docker.internal:<port>
-# 状态库：默认 compose PostgreSQL；回退 SQLite 在 .env 设
-#   LAS_DATABASE_URL=sqlite:////data/workspace/runtime/agent-state.db
+# 状态库：仅支持 PostgreSQL；LAS_DATABASE_URL 由 compose 固定指向 postgres
 # 用法：
 #   cp .env.example .env  # 填 LAS_LLM_API_KEY / LAS_GATEWAY_API_KEY
 #   docker compose up -d                 # 控制面

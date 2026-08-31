@@ -1,15 +1,17 @@
 """Phase 4 单元测试：registry / janitor / recovery / task_manager 取消级联。"""
 
+from datetime import datetime, timedelta
+
 import pytest
 
 from common.models import TaskStatus
 from orchestrator import state_store
 from orchestrator.recovery import recover
 from orchestrator.registry import Registry
-from state import alert_store
-from state.db import init_db, next_task_id
-from state.janitor import Janitor
 from orchestrator.task_manager import TaskManager
+from state import alert_store
+from state.db import CST, init_db, next_task_id
+from state.janitor import Janitor
 
 pytestmark = pytest.mark.anyio
 
@@ -79,6 +81,57 @@ def test_capacity_check(registry, conn):
 # ---------- janitor ----------
 
 
+def test_janitor_fails_unclaimed_hermes_message_after_timeout(
+        conn, monkeypatch):
+    from orchestrator import collaboration_store, supervision_store
+    from state import janitor as janitor_module
+
+    context = collaboration_store.ensure_a2a_collaboration(
+        conn, peer="qishuo", context_id="ctx-stale-message",
+        objective="stale message")
+    tid = next_task_id(conn)
+    state_store.create_task(
+        conn, task_id=tid, objective="stale message", created_by="qishuo",
+        assigned_to="codex", collaboration_id=context["collaboration_id"])
+    supervision_store.register_watch(
+        conn, peer="qishuo", context_id="ctx-stale-message", task_id=tid)
+    message = collaboration_store.append_user_message_to_hermes(
+        conn, collaboration_id=context["collaboration_id"], user_id="user",
+        content={"text": "不能一直显示排队"})
+    supervision_store.enqueue_user_message(
+        conn, collaboration_id=context["collaboration_id"],
+        message_id=message["id"])
+    old = (datetime.now(CST) - timedelta(minutes=10)).isoformat(
+        timespec="seconds")
+    conn.execute(
+        "UPDATE supervision_outbox SET created_at = ? WHERE message_id = ?;",
+        (old, message["id"]),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        janitor_module, "MESSAGE_DELIVERY_TIMEOUT_SECONDS", 300.0)
+    janitor = Janitor.__new__(Janitor)
+    janitor.conn, janitor.alerts, janitor.artifact_roots = conn, [], ()
+
+    stats = janitor.sweep()
+
+    assert stats["message_delivery_failed"] == 1
+    assert conn.execute(
+        "SELECT delivery_status FROM conversation_messages WHERE id = ?;",
+        (message["id"],),
+    ).fetchone()["delivery_status"] == "failed"
+    assert conn.execute(
+        "SELECT status FROM supervision_outbox WHERE message_id = ?;",
+        (message["id"],),
+    ).fetchone()["status"] == "failed"
+    event = conn.execute(
+        "SELECT payload_json FROM events"
+        " WHERE event_type = 'conversation.message.delivery.updated'"
+        " ORDER BY seq DESC LIMIT 1;"
+    ).fetchone()
+    assert "delivery_not_claimed_before_timeout" in event["payload_json"]
+
+
 def test_janitor_requeues_dead_lease(conn):
     tid = _task(conn, status=TaskStatus.WORKING, assigned_to="codex")
     conn.execute(
@@ -93,6 +146,52 @@ def test_janitor_requeues_dead_lease(conn):
     assert stats["requeued"] == 1
     assert state_store.get_task(conn, tid)["status"] == "queued"
     assert j.alerts
+
+
+def test_janitor_requeues_blocked_dead_worker_and_notifies_supervisor(conn):
+    from orchestrator import collaboration_store, supervision_store
+
+    context = collaboration_store.ensure_a2a_collaboration(
+        conn, peer="qishuo", context_id="ctx-dead-lease",
+        objective="blocked worker")
+    tid = next_task_id(conn)
+    state_store.create_task(
+        conn, task_id=tid, objective="blocked worker", created_by="qishuo",
+        assigned_to="codex", collaboration_id=context["collaboration_id"])
+    state_store.transition_task(conn, tid, TaskStatus.ASSIGNED)
+    state_store.transition_task(conn, tid, TaskStatus.WORKING)
+    state_store.transition_task(conn, tid, TaskStatus.BLOCKED)
+    collaboration_store.bind_agent_session(
+        conn, collaboration_id=context["collaboration_id"], task_id=tid,
+        agent_id="codex", adapter_session_id="S-dead",
+        adapter_instance_id="codex-dead")
+    watch = supervision_store.register_watch(
+        conn, peer="qishuo", context_id="ctx-dead-lease", task_id=tid)
+    conn.execute(
+        "INSERT INTO agents (id, role, status, lease_expires_at,"
+        " created_at, updated_at) VALUES"
+        " ('codex','worker','offline','2000-01-01T00:00:00+08:00','x','x');")
+    conn.commit()
+
+    janitor = Janitor.__new__(Janitor)
+    janitor.conn, janitor.alerts = conn, []
+    stats = janitor.sweep()
+
+    assert stats["requeued"] == 1
+    assert state_store.get_task(conn, tid)["status"] == "queued"
+    binding = collaboration_store.get_current_agent_session(
+        conn, tid, "codex")
+    assert binding["status"] == "interrupted"
+    assert binding["recovery_state"] == "worker_lease_expired"
+    notifications = supervision_store.pull_notifications(
+        conn, peer="qishuo", watch_ids=[watch["watch_id"]])
+    assert "task.failed" in {
+        item["event_type"] for item in notifications}
+    event = conn.execute(
+        "SELECT payload_json FROM events WHERE task_id = ?"
+        " AND event_type = 'task.failed';", (tid,)
+    ).fetchone()
+    assert "worker_lease_expired" in event["payload_json"]
 
 
 def test_janitor_timeout_sweep(conn):

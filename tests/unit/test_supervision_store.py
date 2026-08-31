@@ -166,6 +166,45 @@ def test_idempotent_enqueue_does_not_regress_processing_to_queued(tmp_path):
         "SELECT delivery_status FROM conversation_messages WHERE id = ?;",
         (message["id"],),
     ).fetchone()["delivery_status"] == "processing"
+    status_event = conn.execute(
+        "SELECT event_type, payload_json FROM events"
+        " WHERE event_type = 'conversation.message.delivery.updated'"
+        " ORDER BY seq DESC LIMIT 1;"
+    ).fetchone()
+    assert status_event is not None
+    assert message["id"] in status_event["payload_json"]
+    assert '"delivery_status": "processing"' in status_event["payload_json"]
+
+
+def test_stopping_watch_fails_pending_user_message_and_emits_status(tmp_path):
+    conn, watch = _watched_task(tmp_path)
+    collaboration_id = collaboration_store.a2a_context_ids(
+        peer="qishuo", context_id="ctx-supervised")["collaboration_id"]
+    message = collaboration_store.append_user_message_to_hermes(
+        conn, collaboration_id=collaboration_id, user_id="user",
+        content={"text": "路由消失时不能永远排队"})
+    supervision_store.enqueue_user_message(
+        conn, collaboration_id=collaboration_id, message_id=message["id"])
+
+    stopped = supervision_store.stop_watch(
+        conn, peer="qishuo", task_id="T-SUPERVISED")
+
+    assert stopped["watch_id"] == watch["watch_id"]
+    assert conn.execute(
+        "SELECT delivery_status FROM conversation_messages WHERE id = ?;",
+        (message["id"],),
+    ).fetchone()["delivery_status"] == "failed"
+    assert conn.execute(
+        "SELECT status FROM supervision_outbox WHERE message_id = ?;",
+        (message["id"],),
+    ).fetchone()["status"] == "failed"
+    event = conn.execute(
+        "SELECT payload_json FROM events"
+        " WHERE event_type = 'conversation.message.delivery.updated'"
+        " ORDER BY seq DESC LIMIT 1;"
+    ).fetchone()
+    assert message["id"] in event["payload_json"]
+    assert "delivery_route_stopped" in event["payload_json"]
 
 
 def test_conversation_message_uses_stable_first_route(tmp_path):

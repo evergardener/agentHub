@@ -15,7 +15,7 @@ Hermes 主控的本地多 Agent 协作系统。现行产品与开发基线：
 | Hermes | Brain / Planner / Orchestrator，唯一长期记忆写方 |
 | A2A | Agent 间业务语义通信 |
 | NATS + JetStream | 事件总线 / 可靠消息（非事实源） |
-| PostgreSQL（默认）/ SQLite（回退） | 系统当前状态，**唯一事实源** |
+| PostgreSQL | 系统当前状态，**唯一事实源** |
 | MCP | 工具调用层 |
 | Workspace + Git | 共享工件 / 项目状态 |
 | Memory 接口 + Hindsight | 长期记忆（可替换实现） |
@@ -99,12 +99,14 @@ dsh web --host 127.0.0.1 --port 3080
 
 PostgreSQL 状态库（M3，compose 默认启用）：控制面默认使用
 `LAS_DATABASE_URL=postgresql://agenthub:***@postgres:5432/agenthub`；
-回退 SQLite 在 `.env` 设 `LAS_DATABASE_URL=sqlite:////data/workspace/runtime/agent-state.db`，
+运行时仅支持 PostgreSQL；`LAS_DATABASE_URL` 必须使用 `postgresql://` 或
+`postgres://`。旧 SQLite 代码仅作为离线单元测试夹具保留，不再提供 migration
+或部署兼容承诺。
 外部 PG 直接改 URL 即可。
 
 ## 规范要点
 
 - Task 状态迁移只允许设计文档 §5.3 表中的迁移。
-- Worker / Adapter 永不直接写 SQLite（§22.3 单一写者原则）。
+- Worker / Adapter 永不直接写 PostgreSQL，由 State Writer 和控制面持久化。
 - 架构变更先写 ADR（`docs/adr/`）再实施。
 - 新 Adapter 必须通过 `tests/contract/` 全部契约测试。

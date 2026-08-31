@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 
 from common.models import TaskStatus
@@ -100,6 +101,44 @@ class StateWriter:
         source = event.get("source", "unknown")
         payload = event.get("payload", {})
 
+        # Every new dispatch has a durable generation written before the
+        # adapter is called. Delayed lifecycle events from an older dispatch
+        # must not mutate the replacement task, regardless of NATS delivery
+        # timing. Legacy events without the field remain compatible only while
+        # the authoritative task itself has no generation.
+        generation_scoped = (
+            event_type in _EVENT_TO_STATUS
+            or event_type in {
+                "artifact.created", "agent.interaction.requested"})
+        if generation_scoped and task_id:
+            generation_declared = "execution_generation" in payload
+            incoming_generation = payload.get("execution_generation")
+            current_task = self.conn.execute(
+                "SELECT status, execution_generation FROM tasks WHERE id = ?;",
+                (task_id,),
+            ).fetchone()
+            if (event_type == "agent.interaction.requested"
+                    and current_task is not None
+                    and current_task["status"] in {
+                        "failed", "cancelled", "accepted"}):
+                self._audit(event, "terminal task interaction ignored")
+                return "ignored"
+            current_generation = (
+                current_task["execution_generation"]
+                if current_task is not None else None)
+            valid_incoming = (
+                isinstance(incoming_generation, str)
+                and bool(incoming_generation.strip()))
+            if current_generation and not valid_incoming:
+                self._audit(
+                    event, "missing task execution generation ignored")
+                return "ignored"
+            if generation_declared and not valid_incoming:
+                self._audit(event, "invalid task execution generation ignored")
+                return "ignored"
+            if current_generation and current_generation != incoming_generation:
+                self._audit(event, "stale task execution generation ignored")
+                return "ignored"
         # 1. 去重（§17.6）
         try:
             state_store.record_event(self.conn, event, commit=False)
@@ -132,6 +171,15 @@ class StateWriter:
                     review=payload.get("review"),
                     commit=False,
                 )
+                if event_type in {"task.failed", "task.cancelled"}:
+                    from orchestrator import collaboration_store
+
+                    collaboration_store.close_task_interactions(
+                        self.conn, task_id,
+                        reason=(payload.get("error")
+                                or f"task terminalized by {event_type}"),
+                        commit=False,
+                    )
                 task = state_store.get_task(self.conn, task_id)
                 if task is not None and task["collaboration_id"]:
                     from orchestrator import collaboration_store
@@ -204,11 +252,59 @@ class StateWriter:
                         " lease_expires_at = NULL WHERE id = ?;", (source,))
                     self.conn.commit()
                     return "ignored"
+                adapter_instance_id = payload.get("adapterInstanceId")
+                adapter_started_at = payload.get("adapterStartedAt")
+                generation_declared = (
+                    "adapterInstanceId" in payload
+                    or "adapterStartedAt" in payload
+                )
+                valid_generation = (
+                    self._is_valid_adapter_instance_id(adapter_instance_id)
+                    and self._parse_adapter_started_at(adapter_started_at)
+                    is not None
+                )
+                if generation_declared and not valid_generation:
+                    # A malformed generation must not register, renew, or
+                    # overwrite the authoritative worker generation.  Keep
+                    # the event for audit and wait for a well-formed heartbeat
+                    # so an invalid first heartbeat cannot poison recovery.
+                    self._audit(
+                        event,
+                        "invalid adapter instance generation heartbeat ignored",
+                    )
+                    self.conn.commit()
+                    return "ignored"
+                if valid_generation:
+                    if self._adapter_heartbeat_is_stale(
+                            source, adapter_instance_id, adapter_started_at):
+                        self._audit(
+                            event,
+                            "stale adapter instance heartbeat ignored",
+                        )
+                        self.conn.commit()
+                        return "ignored"
+                    current = self.conn.execute(
+                        "SELECT adapter_instance_id FROM agents WHERE id = ?;",
+                        (source,),
+                    ).fetchone()
+                    if (current is None
+                            or current["adapter_instance_id"]
+                            != adapter_instance_id):
+                        self._fence_replaced_adapter_instance(
+                            agent_id=source,
+                            event_type=event_type,
+                            event_id=event.get("event_id", ""),
+                            adapter_instance_id=adapter_instance_id,
+                        )
                 state_store.update_heartbeat(
                     self.conn, source,
                     lease_ttl_seconds=payload.get("lease_ttl_seconds", 90),
                     endpoint=payload.get("endpoint"),
                     skills=payload.get("skills"),
+                    adapter_instance_id=(
+                        adapter_instance_id if valid_generation else None),
+                    adapter_started_at=(
+                        adapter_started_at if valid_generation else None),
                     commit=False,
                 )
                 from orchestrator import agent_profile_store
@@ -256,6 +352,141 @@ class StateWriter:
             raise
         self.conn.commit()
         return "applied"
+
+    def _adapter_heartbeat_is_stale(
+        self, agent_id: str, adapter_instance_id: str,
+        adapter_started_at: str,
+    ) -> bool:
+        incoming_started = self._parse_adapter_started_at(adapter_started_at)
+        if (not self._is_valid_adapter_instance_id(adapter_instance_id)
+                or incoming_started is None):
+            # The caller validates incoming generations before reaching this
+            # helper. Keep this boundary fail-closed for direct callers.
+            return True
+        current = self.conn.execute(
+            "SELECT adapter_instance_id, adapter_started_at FROM agents"
+            " WHERE id = ?;", (agent_id,),
+        ).fetchone()
+        if current is None or not current["adapter_started_at"]:
+            return False
+        current_instance_id = current["adapter_instance_id"]
+        current_started = self._parse_adapter_started_at(
+            current["adapter_started_at"])
+        if (current_started is None
+                or not self._is_valid_adapter_instance_id(
+                    current_instance_id)):
+            # A canonical value written by an older/buggy writer cannot prove
+            # ordering. Allow a valid heartbeat to repair it.
+            return False
+        incoming = (incoming_started, adapter_instance_id)
+        existing = (current_started, current_instance_id)
+        return incoming < existing
+
+    @staticmethod
+    def _is_valid_adapter_instance_id(value: object) -> bool:
+        return isinstance(value, str) and bool(value) and value == value.strip()
+
+    @staticmethod
+    def _parse_adapter_started_at(value: object) -> datetime | None:
+        """Parse a generation timestamp only when it is timezone-aware."""
+        if not isinstance(value, str) or not value or value != value.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed
+
+    def _fence_replaced_adapter_instance(
+        self, *, agent_id: str, event_type: str, event_id: str,
+        adapter_instance_id: str,
+    ) -> None:
+        """Fail work owned by an adapter instance that has been replaced.
+
+        Durable session bindings already record which process accepted each
+        task.  A heartbeat from any other instance proves that process-local
+        state is gone, even if the old process was killed before it could emit a
+        terminal event.  This requires no mutable profile state or migration.
+        """
+        tasks = self.conn.execute(
+            "SELECT t.*, b.id AS binding_id,"
+            " b.adapter_instance_id AS binding_instance_id"
+            " FROM tasks t JOIN agent_session_bindings b"
+            " ON b.task_id = t.id AND b.agent_id = t.assigned_to"
+            " AND b.is_current = 1"
+            " WHERE t.assigned_to = ?"
+            " AND t.status IN ('assigned','working','blocked')"
+            " AND b.adapter_instance_id IS NOT NULL"
+            " AND b.adapter_instance_id <> ?;",
+            (agent_id, adapter_instance_id),
+        ).fetchall()
+        for task in tasks:
+            error = (
+                "worker adapter instance was replaced while task was active "
+                f"({task['binding_instance_id']} -> {adapter_instance_id})"
+            )
+            try:
+                state_store.transition_task(
+                    self.conn, task["id"], TaskStatus.FAILED,
+                    error_message=error, commit=False)
+            except state_store.IllegalTransition:
+                continue
+
+            failure_event_id = f"{event_id}:fence:{task['id']}"
+            state_store.record_event(self.conn, {
+                "event_id": failure_event_id,
+                "event_type": "task.failed",
+                "task_id": task["id"],
+                "source": "state-writer",
+                "payload": {
+                    "status_from": task["status"],
+                    "status_to": "failed",
+                    "attempt": int(task["retry_count"] or 0) + 1,
+                    "error": error,
+                    "reason": "adapter_instance_replaced",
+                    "adapter_instance_id": adapter_instance_id,
+                },
+            }, commit=False)
+            state_store.add_task_run(
+                self.conn, task_id=task["id"], agent_id=agent_id,
+                attempt=int(task["retry_count"] or 0) + 1,
+                status="failed", error_message=error, commit=False)
+            from orchestrator import collaboration_store, supervision_store
+            from state import alert_store
+
+            collaboration_store.close_task_interactions(
+                self.conn, task["id"], reason=error, commit=False)
+            collaboration_store.update_agent_session_status(
+                self.conn, task["binding_id"], status="interrupted",
+                recovery_state="adapter_instance_replaced", error=error,
+                commit=False)
+            if task["collaboration_id"]:
+                collaboration_store.sync_phase_from_tasks(
+                    self.conn, task["collaboration_id"], commit=False)
+            self._persist_task_outcome(
+                task_id=task["id"], agent_id=agent_id,
+                event_id=failure_event_id,
+                event_type="task.failed",
+                payload={"error": error, "attempt": task["retry_count"] + 1},
+                status=TaskStatus.FAILED,
+            )
+            alert_store.upsert_alert(
+                self.conn, kind="adapter_instance_replaced",
+                severity="critical", source="state-writer",
+                task_id=task["id"], detail=error, commit=False)
+            supervision_store.sync_task(
+                self.conn, task["id"], commit=False)
+            self._audit(
+                {
+                    "event_id": event_id,
+                    "event_type": event_type,
+                    "task_id": task["id"],
+                    "source": agent_id,
+                },
+                "active task fenced after adapter instance replacement",
+            )
 
     def _persist_task_outcome(
         self,
@@ -499,7 +730,7 @@ async def main() -> None:
 
     tracing.init_tracing("state-writer")
     nats_url = cfg.nats_url()
-    db_path = cfg.database_url()  # LAS_DATABASE_URL（pg/sqlite 双后端）
+    db_path = cfg.database_url()  # LAS_DATABASE_URL（仅 PostgreSQL）
     writer = StateWriter(db_path)
     await ensure_stream(nats_url)
 

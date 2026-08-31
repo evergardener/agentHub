@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
-from adapters.codex.runner import CodexFailed
+from adapters.codex.runner import CodexFailed, CodexTimeout
 from adapters.codex.session import CodexSessionAdapter
 from adapters.common import A2aTask
 from adapters.session import (
@@ -33,6 +34,319 @@ def _seed_adapter() -> CodexSessionAdapter:
     adapter._interaction_events["S-codex"] = asyncio.Event()
     adapter._event_queues["S-codex"] = asyncio.Queue()
     return adapter
+
+
+async def test_native_health_probe_checks_app_server_response(monkeypatch):
+    adapter = CodexSessionAdapter(
+        timeout_seconds=1, health_rpc_timeout_seconds=0.1)
+    reader = asyncio.create_task(asyncio.sleep(10))
+    adapter._reader_task = reader
+
+    async def connected():
+        return None
+
+    async def rpc(method, params):
+        assert method == "model/list"
+        assert params == {"includeHidden": False}
+        return {"data": []}
+
+    monkeypatch.setattr(adapter, "_ensure_connected", connected)
+    monkeypatch.setattr(adapter, "_rpc", rpc)
+    try:
+        assert await adapter.health() == {
+            "runtime": "codex-app-server",
+            "ready": True,
+            "pendingRpcCount": 0,
+        }
+    finally:
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+
+
+async def test_failed_health_probe_recycles_native_process(monkeypatch):
+    adapter = CodexSessionAdapter(
+        timeout_seconds=1, health_rpc_timeout_seconds=0.01)
+    reader = asyncio.create_task(asyncio.sleep(10))
+    adapter._reader_task = reader
+    recycled = []
+
+    async def connected():
+        return None
+
+    async def rpc(method, params):
+        await asyncio.Event().wait()
+
+    async def close(error):
+        recycled.append(str(error))
+
+    monkeypatch.setattr(adapter, "_ensure_connected", connected)
+    monkeypatch.setattr(adapter, "_rpc", rpc)
+    monkeypatch.setattr(adapter, "_close_process_unlocked", close)
+    try:
+        with pytest.raises(CodexTimeout, match="model/list exceeded"):
+            await adapter.health()
+        assert recycled and "failed health probe" in recycled[0]
+    finally:
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+
+
+async def test_health_fails_closed_for_stalled_thread_start(monkeypatch):
+    adapter = CodexSessionAdapter(
+        timeout_seconds=10, health_rpc_timeout_seconds=0.01)
+    reader = asyncio.create_task(asyncio.sleep(10))
+    adapter._reader_task = reader
+    adapter._critical_rpc_started["thread/start"] = time.monotonic() - 1
+    rpc_calls = []
+    recycled = []
+
+    async def connected():
+        return None
+
+    async def rpc(method, params):
+        rpc_calls.append(method)
+        return {"data": []}
+
+    async def close(error):
+        recycled.append(str(error))
+
+    monkeypatch.setattr(adapter, "_ensure_connected", connected)
+    monkeypatch.setattr(adapter, "_rpc", rpc)
+    monkeypatch.setattr(adapter, "_close_process_unlocked", close)
+    try:
+        with pytest.raises(CodexTimeout, match="thread/start is unresponsive"):
+            await adapter.health()
+        assert rpc_calls == []
+        assert recycled and "thread/start is unresponsive" in recycled[0]
+    finally:
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+
+
+async def test_health_probe_does_not_recycle_active_turn(monkeypatch):
+    adapter = CodexSessionAdapter(
+        timeout_seconds=10, health_rpc_timeout_seconds=0.01)
+    reader = asyncio.create_task(asyncio.sleep(10))
+    adapter._reader_task = reader
+    adapter._active_turn_ids["S-codex"] = "turn-active"
+    recycled = []
+
+    async def connected():
+        return None
+
+    async def rpc(method, params):
+        await asyncio.Event().wait()
+
+    async def close(error):
+        recycled.append(str(error))
+
+    monkeypatch.setattr(adapter, "_ensure_connected", connected)
+    monkeypatch.setattr(adapter, "_rpc", rpc)
+    monkeypatch.setattr(adapter, "_close_process_unlocked", close)
+    try:
+        with pytest.raises(CodexTimeout, match="model/list exceeded"):
+            await adapter.health()
+        assert recycled == []
+    finally:
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+
+
+async def test_repeated_health_failures_terminate_active_turn_and_recycle(
+        monkeypatch):
+    adapter = _seed_adapter()
+    adapter.timeout_seconds = 10
+    adapter.health_rpc_timeout_seconds = 0.01
+    adapter.active_turn_health_failure_limit = 3
+    reader = asyncio.create_task(asyncio.sleep(10))
+    adapter._reader_task = reader
+    adapter._active_turn_ids["S-codex"] = "turn-active"
+    turn = asyncio.get_running_loop().create_future()
+    adapter._turn_futures["turn-active"] = turn
+    waiter = asyncio.create_task(
+        adapter._await_turn_or_interaction("S-codex"))
+    recycled = []
+
+    async def connected():
+        return None
+
+    async def rpc(method, params):
+        await asyncio.Event().wait()
+
+    async def close(error):
+        recycled.append(str(error))
+
+    monkeypatch.setattr(adapter, "_ensure_connected", connected)
+    monkeypatch.setattr(adapter, "_rpc", rpc)
+    monkeypatch.setattr(adapter, "_close_process_unlocked", close)
+    try:
+        await asyncio.sleep(0)
+        for _ in range(2):
+            with pytest.raises(CodexTimeout, match="model/list exceeded"):
+                await adapter.health()
+            assert adapter._active_turn_ids == {"S-codex": "turn-active"}
+            assert not turn.done()
+            assert recycled == []
+
+        with pytest.raises(CodexTimeout, match="model/list exceeded"):
+            await adapter.health()
+        assert recycled and "failed health probe" in recycled[0]
+        assert adapter._active_turn_ids == {}
+        assert adapter._turn_futures == {}
+        assert turn.done()
+        with pytest.raises(CodexFailed, match="active turn terminated"):
+            await asyncio.wait_for(waiter, timeout=1)
+    finally:
+        if not waiter.done():
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+
+
+async def test_successful_health_probe_resets_active_failure_count(monkeypatch):
+    adapter = CodexSessionAdapter(
+        timeout_seconds=1, health_rpc_timeout_seconds=0.01,
+        active_turn_health_failure_limit=2)
+    reader = asyncio.create_task(asyncio.sleep(10))
+    adapter._reader_task = reader
+    adapter._active_turn_ids["S-codex"] = "turn-active"
+    recycled = []
+    probe_count = 0
+
+    async def connected():
+        return None
+
+    async def rpc(method, params):
+        nonlocal probe_count
+        probe_count += 1
+        if probe_count == 2:
+            return {"data": []}
+        await asyncio.Event().wait()
+
+    async def close(error):
+        recycled.append(str(error))
+
+    monkeypatch.setattr(adapter, "_ensure_connected", connected)
+    monkeypatch.setattr(adapter, "_rpc", rpc)
+    monkeypatch.setattr(adapter, "_close_process_unlocked", close)
+    try:
+        with pytest.raises(CodexTimeout):
+            await adapter.health()
+        assert adapter._health_failure_count == 1
+        assert await adapter.health() == {
+            "runtime": "codex-app-server",
+            "ready": True,
+            "pendingRpcCount": 0,
+        }
+        assert adapter._health_failure_count == 0
+        with pytest.raises(CodexTimeout):
+            await adapter.health()
+        assert adapter._health_failure_count == 1
+        assert recycled == []
+        assert adapter._active_turn_ids == {"S-codex": "turn-active"}
+    finally:
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+
+
+async def test_input_required_health_recovery_fails_task_and_queues_event():
+    adapter = _seed_adapter()
+    task = adapter._tasks["S-codex"]
+    task.status_state = "input-required"
+    await adapter._handle_approval_request(_command_request())
+    interaction = adapter.list_pending_interactions("S-codex")[0]
+    adapter._active_turn_ids["S-codex"] = "turn-active"
+    turn = asyncio.get_running_loop().create_future()
+    adapter._turn_futures["turn-active"] = turn
+
+    adapter._fail_active_turns(
+        CodexFailed("native Codex health checks failed repeatedly"))
+
+    assert task.status_state == "failed"
+    assert task.error == "native Codex health checks failed repeatedly"
+    assert task.pending_interactions == []
+    assert adapter.list_pending_interactions("S-codex") == []
+    events = adapter.drain_recovery_events()
+    assert len(events) == 1
+    assert events[0].event_type == "task.failed"
+    assert events[0].task_id == "T-codex"
+    assert events[0].session_id == "S-codex"
+    assert events[0].payload["reason"] == "native_runtime_unavailable"
+    assert events[0].payload["status_from"] == "blocked"
+    assert events[0].payload["interaction_ids"] == [
+        interaction.interaction_id]
+    with pytest.raises(CodexFailed):
+        turn.result()
+
+
+async def test_cancelled_rpc_does_not_leak_pending_request(monkeypatch):
+    adapter = CodexSessionAdapter(timeout_seconds=10)
+
+    async def connected():
+        return None
+
+    async def sent(message):
+        return None
+
+    monkeypatch.setattr(adapter, "_ensure_process_stream", connected)
+    monkeypatch.setattr(adapter, "_send_message", sent)
+    pending = asyncio.create_task(adapter._rpc("thread/start", {}))
+    while not adapter._pending_rpc:
+        await asyncio.sleep(0)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert adapter._pending_rpc == {}
+
+
+async def test_rpc_send_failure_does_not_leak_pending_request(monkeypatch):
+    adapter = CodexSessionAdapter(timeout_seconds=10)
+
+    async def connected():
+        return None
+
+    async def broken_send(message):
+        raise BrokenPipeError("native stdin closed")
+
+    monkeypatch.setattr(adapter, "_ensure_process_stream", connected)
+    monkeypatch.setattr(adapter, "_send_message", broken_send)
+    with pytest.raises(BrokenPipeError, match="native stdin closed"):
+        await adapter._rpc("thread/start", {})
+    assert adapter._pending_rpc == {}
+
+
+async def test_session_start_timeout_recycles_app_server(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path / "agenthub"))
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    adapter = CodexSessionAdapter(
+        timeout_seconds=10, startup_rpc_timeout_seconds=0.01)
+    recycled = []
+
+    async def connected():
+        return None
+
+    async def rpc(method, params):
+        assert method == "thread/start"
+        await asyncio.Event().wait()
+
+    async def close(error):
+        recycled.append(str(error))
+
+    monkeypatch.setattr(adapter, "_ensure_connected", connected)
+    monkeypatch.setattr(adapter, "_rpc", rpc)
+    monkeypatch.setattr(adapter, "_close_process_unlocked", close)
+    task = A2aTask(
+        id="T-timeout", status_state="working", objective="validate",
+        session_id="S-timeout", context_revision=1)
+    with pytest.raises(CodexTimeout, match="thread/start exceeded"):
+        await adapter.start_session(
+            task, session_id="S-timeout",
+            metadata={"executionWorkspace": str(execution_workspace)})
+    assert recycled == [
+        "Codex App Server recycled after session startup timeout"]
 
 
 def _command_request(rpc_id: int = 41) -> dict:
@@ -115,6 +429,26 @@ async def test_command_rejection_declines_same_native_rpc(monkeypatch):
         "result": {"decision": "decline"},
     }
     assert not adapter.list_pending_interactions("S-codex")
+
+
+async def test_failed_native_approval_delivery_remains_retryable(monkeypatch):
+    adapter = _seed_adapter()
+
+    async def broken_send(message):
+        raise BrokenPipeError("native approval channel closed")
+
+    monkeypatch.setattr(adapter, "_send_message", broken_send)
+    await adapter._handle_approval_request(_command_request())
+    interaction = adapter.list_pending_interactions("S-codex")[0]
+    with pytest.raises(BrokenPipeError, match="approval channel closed"):
+        await adapter.respond_interaction(
+            "S-codex", interaction.interaction_id,
+            {"outcome": "rejected"}, responded_by="hermes")
+
+    assert interaction.status == "pending"
+    assert interaction.interaction_id in adapter._approval_methods
+    assert interaction.interaction_id in adapter._approval_params
+    assert interaction.interaction_id in adapter._approval_rpc_ids
 
 
 async def test_command_allow_once_requires_bound_receipt(monkeypatch):

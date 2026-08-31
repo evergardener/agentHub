@@ -126,6 +126,10 @@ class SessionAdapter(ABC):
         if False:  # pragma: no cover - makes this an async generator contract
             yield SessionEvent("unused", session_id, "")
 
+    def drain_recovery_events(self) -> list[SessionEvent]:
+        """Return terminal recovery events that need control-plane delivery."""
+        return []
+
     async def resume_session(self, session_id: str) -> SessionHandle:
         raise SessionCapabilityError("session resume is not supported")
 

@@ -10,6 +10,7 @@ ALL_KEYS = [
     "LAS_WORKSPACE", "AGENT_WORKSPACE",
     "LAS_ARTIFACT_ROOTS",
     "LAS_STATE_DB", "AGENT_STATE_DB",
+    "LAS_DATABASE_URL",
     "LAS_NATS_URL", "NATS_URL",
     "LAS_GATEWAY_URL", "AGENT_GATEWAY_URL",
     "LAS_GATEWAY_API_KEY", "GATEWAY_API_KEY",
@@ -95,6 +96,20 @@ def test_artifact_roots_are_explicit_deduplicated_boundaries(monkeypatch, tmp_pa
 def test_state_db_explicit(monkeypatch, tmp_path):
     monkeypatch.setenv("LAS_STATE_DB", str(tmp_path / "x.db"))
     assert cfg.state_db() == tmp_path / "x.db"
+
+
+def test_database_url_requires_postgresql(monkeypatch):
+    with pytest.raises(ValueError, match="LAS_DATABASE_URL 必填"):
+        cfg.database_url()
+    monkeypatch.setenv("LAS_DATABASE_URL", "sqlite:////tmp/agenthub.db")
+    with pytest.raises(ValueError, match="仅支持 PostgreSQL"):
+        cfg.database_url()
+    monkeypatch.setenv(
+        "LAS_DATABASE_URL",
+        "postgresql://agenthub:secret@postgres:5432/agenthub",
+    )
+    assert cfg.database_url() == (
+        "postgresql://agenthub:secret@postgres:5432/agenthub")
 
 
 def test_kimi_api_key_never_read(monkeypatch):

@@ -6,9 +6,9 @@
 变量一览（正式名 → 旧别名）：
   LAS_WORKSPACE         → AGENT_WORKSPACE      任务工作区根目录
   LAS_ARTIFACT_ROOTS    （无别名）              Janitor 可检查的产物根目录（逗号分隔）
-  LAS_STATE_DB          → AGENT_STATE_DB       SQLite 状态库路径
+  LAS_STATE_DB          → AGENT_STATE_DB       旧离线测试夹具路径（运行时不支持）
   LAS_NATS_URL          → NATS_URL             NATS 地址
-  LAS_DATABASE_URL      （无别名）              postgresql://… 或 sqlite:///…
+  LAS_DATABASE_URL      （无别名）              必填 PostgreSQL URL
   LAS_GATEWAY_URL       → AGENT_GATEWAY_URL    agentgateway 地址（空=直连）
   LAS_GATEWAY_API_KEY   → GATEWAY_API_KEY      gateway Bearer key
   LAS_GATEWAY_JWT_FILE  （无别名）              可轮换 gateway JWT 文件
@@ -89,12 +89,20 @@ def state_db() -> Path:
 
 
 def database_url() -> str:
-    """统一数据库入口（v3 §4）：LAS_DATABASE_URL 优先；
-    未配置时由 workspace/state_db 派生 sqlite:/// URL。"""
-    url = _env("LAS_DATABASE_URL")
-    if url:
-        return url
-    return f"sqlite:///{state_db()}"
+    """Return the required PostgreSQL runtime database URL.
+
+    SQLite remains usable only when a legacy/unit-test caller passes an
+    explicit path directly to ``state.db.init_db``.  It is no longer a
+    supported deployment backend and must never be selected implicitly.
+    """
+    url = _env("LAS_DATABASE_URL").strip()
+    if not url:
+        raise ValueError("LAS_DATABASE_URL 必填，且必须使用 PostgreSQL")
+    if not url.startswith(("postgresql://", "postgres://")):
+        scheme = url.split(":", 1)[0] if ":" in url else "invalid"
+        raise ValueError(
+            f"LAS_DATABASE_URL 仅支持 PostgreSQL，当前为 {scheme}://…")
+    return url
 
 
 def nats_url() -> str:

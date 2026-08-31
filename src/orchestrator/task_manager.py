@@ -345,9 +345,11 @@ class TaskManager:
             state_store.transition_task(self.conn, task_id, TaskStatus.ASSIGNED)
         from state.db import now_iso
 
+        execution_generation = f"EX-{uuid.uuid4()}"
         self.conn.execute(
-            "UPDATE tasks SET assigned_to = ?, updated_at = ?"
-            " WHERE id = ?;", (agent_id, now_iso(), task_id),
+            "UPDATE tasks SET assigned_to = ?, execution_generation = ?,"
+            " updated_at = ? WHERE id = ?;",
+            (agent_id, execution_generation, now_iso(), task_id),
         )
         self.conn.commit()
         if runtime_config:
@@ -436,6 +438,7 @@ class TaskManager:
                     replace_session=binding is not None,
                     metadata={
                         "recoveryMode": recovery_plan,
+                        "executionGeneration": execution_generation,
                         "taskPlan": plan_context,
                         "attempt": attempt,
                         **({"model": runtime_config["model"]}

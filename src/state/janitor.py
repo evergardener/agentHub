@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from common import config as cfg
@@ -25,6 +25,10 @@ from state import alert_store
 from state.db import CST, init_db
 
 SWEEP_INTERVAL = float(os.environ.get("JANITOR_INTERVAL", "60"))
+MESSAGE_DELIVERY_TIMEOUT_SECONDS = max(
+    60.0,
+    float(os.environ.get("HERMES_MESSAGE_DELIVERY_TIMEOUT_SECONDS", "300")),
+)
 
 
 class Janitor:
@@ -44,20 +48,62 @@ class Janitor:
     def sweep(self) -> dict:
         stats = {"requeued": 0, "failed_timeout": 0,
                  "cascade_cancelled": 0, "artifact_alerts": 0,
-                 "artifact_resolved": 0, "artifact_ignored": 0}
+                 "artifact_resolved": 0, "artifact_ignored": 0,
+                 "message_delivery_failed": 0}
+        self._sweep_queued_messages(stats)
         self._sweep_dead_leases(stats)
         self._sweep_timeouts(stats)
         self._sweep_cascade(stats)
         self._sweep_artifacts(stats)
         return stats
 
+    def _sweep_queued_messages(self, stats: dict) -> None:
+        """Fail Hermes messages that no delivery owner claimed in time."""
+        cutoff = (
+            datetime.now(CST)
+            - timedelta(seconds=MESSAGE_DELIVERY_TIMEOUT_SECONDS)
+        ).isoformat(timespec="seconds")
+        rows = self.conn.execute(
+            "SELECT o.id AS outbox_id, o.message_id"
+            " FROM supervision_outbox o JOIN conversation_messages m"
+            " ON m.id = o.message_id"
+            " WHERE o.event_type = 'conversation.user_message'"
+            " AND o.status = 'pending' AND o.attempts = 0"
+            " AND o.created_at <= ? AND m.delivery_status = 'queued';",
+            (cutoff,),
+        ).fetchall()
+        if not rows:
+            return
+        from orchestrator import collaboration_store
+
+        for row in rows:
+            changed = self.conn.execute(
+                "UPDATE supervision_outbox SET status = 'failed',"
+                " lease_until = NULL WHERE id = ? AND status = 'pending'"
+                " AND attempts = 0;",
+                (row["outbox_id"],),
+            )
+            if changed.rowcount != 1:
+                continue
+            collaboration_store.update_message_delivery_status(
+                self.conn,
+                message_id=row["message_id"],
+                delivery_status="failed",
+                expected_statuses={"queued"},
+                reason="delivery_not_claimed_before_timeout",
+                commit=False,
+            )
+            stats["message_delivery_failed"] += 1
+        self.conn.commit()
+
     # 1. 租约过期
     def _sweep_dead_leases(self, stats: dict) -> None:
         now = datetime.now(CST).isoformat(timespec="seconds")
         rows = self.conn.execute(
-            "SELECT t.id AS task_id, t.assigned_to, a.lease_expires_at"
+            "SELECT t.id AS task_id, t.assigned_to, t.status, t.updated_at,"
+            " t.retry_count, t.collaboration_id, a.lease_expires_at"
             " FROM tasks t LEFT JOIN agents a ON a.id = t.assigned_to"
-            " WHERE t.status = 'working';",
+            " WHERE t.status IN ('assigned','working','blocked');",
         ).fetchall()
         for r in rows:
             lease = r["lease_expires_at"]
@@ -65,20 +111,68 @@ class Janitor:
                 continue  # 租约有效
             policy = "requeue"  # 默认策略（agents.yaml 的 on_lease_expired 由 Hermes 侧使用）
             try:
+                error = "worker lease expired (janitor)"
                 state_store.transition_task(
                     self.conn, r["task_id"], TaskStatus.FAILED,
-                    error_message="worker lease expired (janitor)")
+                    error_message=error, commit=False)
+                failure_event_id = (
+                    f"janitor-lease:{r['task_id']}:{r['updated_at']}")
+                state_store.record_event(self.conn, {
+                    "event_id": failure_event_id,
+                    "event_type": "task.failed",
+                    "task_id": r["task_id"],
+                    "source": "janitor",
+                    "payload": {
+                        "status_from": r["status"],
+                        "status_to": "failed",
+                        "attempt": int(r["retry_count"] or 0) + 1,
+                        "error": error,
+                        "reason": "worker_lease_expired",
+                    },
+                }, commit=False)
+                state_store.add_task_run(
+                    self.conn, task_id=r["task_id"],
+                    agent_id=r["assigned_to"] or "unknown",
+                    attempt=int(r["retry_count"] or 0) + 1,
+                    status="failed", error_message=error, commit=False)
+                from orchestrator import collaboration_store, supervision_store
+
+                collaboration_store.close_task_interactions(
+                    self.conn, r["task_id"], reason=error, commit=False)
+                binding = self.conn.execute(
+                    "SELECT id FROM agent_session_bindings"
+                    " WHERE task_id = ? AND agent_id = ? AND is_current = 1;",
+                    (r["task_id"], r["assigned_to"]),
+                ).fetchone()
+                if binding is not None:
+                    collaboration_store.update_agent_session_status(
+                        self.conn, binding["id"], status="interrupted",
+                        recovery_state="worker_lease_expired", error=error,
+                        commit=False)
+                if r["collaboration_id"]:
+                    collaboration_store.sync_phase_from_tasks(
+                        self.conn, r["collaboration_id"], commit=False)
+                # Queue a terminal wake before any automatic requeue changes
+                # the current task status back to queued.
+                supervision_store.sync_task(
+                    self.conn, r["task_id"], commit=False)
                 if policy == "requeue":
                     state_store.transition_task(
-                        self.conn, r["task_id"], TaskStatus.RETRY_PENDING)
+                        self.conn, r["task_id"], TaskStatus.RETRY_PENDING,
+                        commit=False)
                     state_store.transition_task(
-                        self.conn, r["task_id"], TaskStatus.QUEUED)
+                        self.conn, r["task_id"], TaskStatus.QUEUED,
+                        commit=False)
+                    if r["collaboration_id"]:
+                        collaboration_store.sync_phase_from_tasks(
+                            self.conn, r["collaboration_id"], commit=False)
                     stats["requeued"] += 1
                 else:
                     stats["failed_timeout"] += 1
+                self.conn.commit()
                 self._alert("lease_expired", r["task_id"], r["assigned_to"])
             except state_store.IllegalTransition:
-                pass
+                self.conn.rollback()
 
     # 2. 执行超时
     def _sweep_timeouts(self, stats: dict) -> None:

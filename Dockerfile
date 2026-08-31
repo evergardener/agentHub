@@ -74,7 +74,7 @@ COPY scripts/agentctl-container /usr/local/bin/agentctl
 COPY infra/agentgateway/config.docker.yaml ./infra/agentgateway/config.docker.yaml
 COPY --from=agw /usr/local/bin/agentgateway /usr/local/bin/agentgateway
 
-# /data：SQLite 状态库 + 任务工作区（挂载卷持久化）
+# /data：任务工作区（PostgreSQL 由 compose 独立卷持久化）
 VOLUME /data
 
 # 默认角色：state-writer；其他角色经 docker compose command 指定

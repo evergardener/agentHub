@@ -257,6 +257,33 @@ def _with_rendered_markdown(messages: list[dict]) -> list[dict]:
     return rendered
 
 
+_RESPONSE_STREAM_LIVE_STATUSES = frozenset({
+    # Migration 017 is PostgreSQL-only and stores one cumulative prefix per
+    # stream.  Aborted drafts remain visible so a disconnect does not hide a
+    # partial response; the finished draft is replaced by the formal message.
+    "streaming",
+    "aborted",
+})
+
+
+def _response_stream_rows(conn, collaboration_id: str) -> list[dict]:
+    """Read recoverable Hermes response drafts for one collaboration.
+
+    PostgreSQL migration 017 stores one cumulative row per stream.  Only
+    streaming/aborted drafts are recoverable here; finished drafts are
+    replaced by the authoritative conversation message.  No Markdown
+    rendering or tool/event payload is exposed from this table.
+    """
+    rows = _rows(conn.execute(
+        "SELECT collaboration_id, message_id AS parent_message_id,"
+        " id AS stream_id, last_seq AS seq, text_prefix AS text, status,"
+        " updated_at FROM conversation_stream_drafts"
+        " WHERE collaboration_id = ? AND status IN (?, ?);",
+        (collaboration_id, "streaming", "aborted"),
+    ))
+    return rows
+
+
 def _objective_presentation(objective: str) -> tuple[str, str]:
     """Build concise display copy while retaining the full audit objective."""
     normalized = re.sub(r"\s+", " ", str(objective or "")).strip()
@@ -687,7 +714,7 @@ def create_app() -> FastAPI:
                 (plan_step_row["plan_id"],))) if plan_step_row else [])
             messages = (_rows(conn.execute(
                 "SELECT id, sender_type, sender_id, recipient_type,"
-                " recipient_id, message_type, content_json, sequence,"
+                " recipient_id, message_type, content_json, parent_message_id, sequence,"
                 " based_on_revision, created_at FROM conversation_messages"
                 " WHERE collaboration_id = ? ORDER BY sequence;",
                 (row["collaboration_id"],))) if row["collaboration_id"]
@@ -854,7 +881,7 @@ def create_app() -> FastAPI:
                 "SELECT id, conversation_id, collaboration_id, task_id,"
                 " agent_id, sender_type, sender_id, recipient_type,"
                 " recipient_id, message_type, content_json, sequence,"
-                " based_on_revision, delivery_status, created_at"
+                " parent_message_id, based_on_revision, delivery_status, created_at"
                 " FROM conversation_messages WHERE collaboration_id = ?"
                 " ORDER BY sequence;", (collaboration_id,)))
             tasks = _rows(conn.execute(
@@ -871,10 +898,31 @@ def create_app() -> FastAPI:
             merged_messages = _with_legacy_task_results(messages, tasks)
             agent_activity = _agent_activity_messages(
                 conn, collaboration_id, merged_messages)
+            response_streams = _response_stream_rows(conn, collaboration_id)
             return {"collaboration": collaboration,
                     "messages": _with_rendered_markdown(merged_messages),
                     "agent_activity": _with_rendered_markdown(agent_activity),
+                    "response_streams": response_streams,
                     "tasks": tasks, "sessions": sessions}
+        finally:
+            conn.close()
+
+    @app.get("/api/collaborations/{collaboration_id}/response-streams")
+    def collaboration_response_streams(collaboration_id: str):
+        """Return recoverable Hermes response drafts for one collaboration."""
+        conn = _conn()
+        try:
+            exists = conn.execute(
+                "SELECT 1 FROM collaborations WHERE id = ?;",
+                (collaboration_id,),
+            ).fetchone()
+            if exists is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return {
+                "collaboration_id": collaboration_id,
+                "response_streams": _response_stream_rows(
+                    conn, collaboration_id),
+            }
         finally:
             conn.close()
 
@@ -1022,32 +1070,72 @@ def create_app() -> FastAPI:
 
     @app.get("/api/events/stream")
     async def events_stream(request: Request, after: int = 0):
-        async def gen():
-            last = after
-            while True:
-                session_exp = getattr(request.state, "session_exp", None)
-                if session_exp is not None and time.time() >= session_exp:
-                    break
-                # 客户端断开即退出，避免孤儿生成器每 3s 空转查库
-                if await request.is_disconnected():
-                    break
-                conn = _conn()
-                try:
-                    rows = _rows(conn.execute(
-                        "SELECT seq, event_type, task_id, agent_id,"
-                        " payload_json, created_at FROM events"
-                        " WHERE seq > ? ORDER BY seq LIMIT 200;", (last,)))
-                finally:
-                    conn.close()
-                for r in rows:
-                    last = r["seq"]
-                    yield f"data: {json.dumps(r, ensure_ascii=False)}\n\n"
-                # 无新事件时发注释保活帧，代理/浏览器不断连
-                if not rows:
-                    yield ": keepalive\n\n"
-                await asyncio.sleep(3)
+        # EventSource sends this header automatically when it reconnects.  The
+        # query parameter remains useful for the first connection and for
+        # clients which implement their own SSE transport.
+        header_after = request.headers.get("last-event-id")
+        try:
+            header_cursor = int(header_after) if header_after else 0
+        except (TypeError, ValueError):
+            header_cursor = 0
+        initial_cursor = max(int(after or 0), header_cursor, 0)
 
-        return StreamingResponse(gen(), media_type="text/event-stream")
+        async def gen():
+            last = initial_cursor
+            last_keepalive = time.monotonic()
+            conn = _conn()
+            try:
+                while True:
+                    session_exp = getattr(request.state, "session_exp", None)
+                    if session_exp is not None and time.time() >= session_exp:
+                        break
+                    # 客户端断开即退出，避免孤儿生成器每 200ms 空转查库
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        rows = _rows(conn.execute(
+                            "SELECT seq, event_type, task_id, agent_id,"
+                            " payload_json, created_at FROM events"
+                            " WHERE seq > ? ORDER BY seq LIMIT 200;", (last,)))
+                        # End the read transaction before the next tick.  This
+                        # gives PostgreSQL a fresh READ COMMITTED snapshot and
+                        # avoids leaving an idle-in-transaction connection.
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        raise
+                    for r in rows:
+                        seq = int(r["seq"])
+                        # The database cursor is authoritative, but retain this
+                        # guard for drivers/proxies that may replay a row at the
+                        # cursor boundary.
+                        if seq <= last:
+                            continue
+                        last = seq
+                        yield (
+                            f"id: {seq}\n"
+                            f"data: {json.dumps(r, ensure_ascii=False)}\n\n"
+                        )
+                    # Poll frequently enough for response deltas to reach the
+                    # UI within roughly 100-300ms, while keeping comment
+                    # keepalives sparse so the event pane is not flooded.
+                    if (not rows
+                            and time.monotonic() - last_keepalive >= 15):
+                        yield ": keepalive\n\n"
+                        last_keepalive = time.monotonic()
+                    await asyncio.sleep(0.2)
+            finally:
+                conn.close()
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     # ---------- 审批操作 ----------
 

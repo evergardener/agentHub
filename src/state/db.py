@@ -1,17 +1,17 @@
-"""数据库连接与迁移 — 设计文档 §6 / §17.8；Evolution v3 §4 双后端。
+"""PostgreSQL runtime connection and migration support.
 
 后端由 LAS_DATABASE_URL 决定（common/config.database_url）：
-  postgresql://user:pass@host:5432/db   PostgreSQL（compose 默认/外部）
-  sqlite:////abs/path.db                SQLite（轻量/单机回退）
-connect() 也接受裸路径（向后兼容，按 SQLite 处理）。
+  postgresql://user:pass@host:5432/db   PostgreSQL（唯一受支持运行时）
+
+显式 Path/SQLite target 仅保留给旧离线单元测试夹具；新功能不得新增 SQLite
+migration 或部署路径，也不提供生产兼容承诺。
 
 方言差异集中在本模块与 migrations_pg/：
   - 占位符：调用点统一写 `?`，PG 连接包装器翻译为 `%s`
   - 行访问：PgRow 同时支持 int/str 下标（对齐 sqlite3.Row 行为）
   - counters upsert / approval_grants 自增 id：见 next_task_id 与迁移
 
-迁移机制：src/state/migrations/NNN_name.sql（SQLite）或
-src/state/migrations_pg/NNN_name.sql（PostgreSQL）按版本号顺序应用，
+生产迁移机制：src/state/migrations_pg/NNN_name.sql 按版本号顺序应用，
 已应用版本记录在 schema_migrations 表。
 """
 
@@ -125,8 +125,11 @@ def _connect_sqlite(path: Path) -> sqlite3.Connection:
 
 
 def connect(target=None):
-    """打开数据库。target：None → LAS_DATABASE_URL；Path/裸路径 → SQLite；
-    含 :// 的 str → 按 scheme 分发（sqlite:///、postgresql://）。"""
+    """Open PostgreSQL, or an explicit legacy SQLite test fixture.
+
+    ``target=None`` always resolves through the PostgreSQL-only runtime
+    configuration.  SQLite is never an implicit fallback.
+    """
     from common import config as cfg
 
     if target is None:

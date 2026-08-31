@@ -17,6 +17,7 @@ import os
 import uuid
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -33,6 +34,7 @@ from adapters.session import (
     RunnerSessionAdapter,
     SessionAdapter,
     SessionCapabilityError,
+    SessionEvent,
     SessionMessage,
 )
 from common import config as cfg
@@ -93,13 +95,32 @@ def _card_skills(card_fn: CardFn) -> list[str]:
 
 async def _heartbeat_loop(publisher: EventPublisher, agent_id: str,
                           card_fn: CardFn,
-                          health_check: HealthFn | None = None) -> None:
+                          health_check: HealthFn | None = None,
+                          adapter_instance_id: str | None = None,
+                          adapter_started_at: str | None = None,
+                          session_adapter: SessionAdapter | None = None,
+                          ) -> None:
     # 发现注册（v3 M2）：心跳携带自声明 endpoint 与技能，
     # StateWriter 落库 agents 表，hermes 按租约在线性发现 worker。
     # interval/ttl 每轮动态读 env，便于测试与运维热调。
     endpoint = os.environ.get("LAS_AGENT_ENDPOINT", "").strip()
     skills = _card_skills(card_fn)
+
+    async def drain_recovery_events() -> None:
+        if session_adapter is None:
+            return
+        for event in session_adapter.drain_recovery_events():
+            if not isinstance(event, SessionEvent):
+                continue
+            payload = dict(event.payload)
+            payload.setdefault("session_id", event.session_id)
+            if adapter_instance_id:
+                payload.setdefault("adapter_instance_id", adapter_instance_id)
+            await publisher.publish(event.event_type, event.task_id, payload)
+
     while True:
+        await publisher.replay_pending()
+        await drain_recovery_events()
         ready = True
         if health_check is not None:
             try:
@@ -107,11 +128,19 @@ async def _heartbeat_loop(publisher: EventPublisher, agent_id: str,
                 ready = dependency.get("ready") is not False
             except Exception:  # noqa: BLE001 - dependency readiness boundary
                 ready = False
+        # A health probe may have terminalized an input-required turn while it
+        # was running.  Drain immediately so the task.failed event is durable
+        # before this heartbeat sleeps or publishes another lease.
+        await drain_recovery_events()
         if ready:
             payload: dict = {"lease_ttl_seconds": cfg.lease_ttl(),
                              "skills": skills}
             if endpoint:
                 payload["endpoint"] = endpoint
+            if adapter_instance_id:
+                payload["adapterInstanceId"] = adapter_instance_id
+            if adapter_started_at:
+                payload["adapterStartedAt"] = adapter_started_at
             await publisher.publish(
                 f"agent.{agent_id}.heartbeat", None, payload)
         await asyncio.sleep(cfg.heartbeat_interval())
@@ -134,6 +163,71 @@ def build_app(
     publisher = EventPublisher(source=agent_id)
     executor = FifoExecutor(max_concurrent=max_concurrent)
     adapter_instance_id = f"{agent_id}-{uuid.uuid4()}"
+    adapter_started_at = datetime.now(UTC).isoformat(
+        timespec="microseconds")
+    execution_tasks: set[asyncio.Task] = set()
+    # A task id can be reused by an explicit replaceSession request.  Keep
+    # shutdown's terminal-event guard scoped to the execution generation,
+    # rather than allowing a prior generation to suppress a new one.
+    terminal_events_emitted: set[str] = set()
+
+    async def _fail_interrupted_task(
+        task: A2aTask, *, trace_id: str | None, attempt: int,
+        execution_generation: str,
+    ) -> None:
+        """Terminalize work interrupted by adapter process shutdown."""
+        if store.get(task.id) is not task:
+            await publisher.publish(
+                "session.result_discarded", task.id,
+                {"session_id": task.session_id,
+                 "reason": "execution_generation_replaced"},
+                trace_id=trace_id,
+            )
+            return
+        if task.status_state in {"paused", "canceled"}:
+            await publisher.publish(
+                "session.result_discarded", task.id,
+                {"session_id": task.session_id, "reason": task.status_state},
+                trace_id=trace_id,
+            )
+            return
+        if execution_generation in terminal_events_emitted:
+            return
+        status_from = task.status_state
+        error = "adapter shutdown interrupted active task"
+        store.update_state(task.id, "failed", error=error)
+        await publisher.publish(
+            "task.failed", task.id,
+            {
+                "status_from": status_from,
+                "status_to": "failed",
+                "attempt": attempt,
+                "error": error,
+                "reason": "adapter_shutdown",
+                "adapter_instance_id": adapter_instance_id,
+                "session_id": task.session_id,
+                "execution_generation": execution_generation,
+            },
+            trace_id=trace_id,
+        )
+
+    def _spawn_execution(
+        task: A2aTask, action: Callable[[], Awaitable[None]], *,
+        trace_id: str | None = None, attempt: int = 1,
+        execution_generation: str,
+    ) -> None:
+        async def guarded() -> None:
+            try:
+                await executor.run_factory(action)
+            except asyncio.CancelledError:
+                await _fail_interrupted_task(
+                    task, trace_id=trace_id, attempt=attempt,
+                    execution_generation=execution_generation)
+                raise
+
+        background = asyncio.create_task(guarded())
+        execution_tasks.add(background)
+        background.add_done_callback(execution_tasks.discard)
 
     async def _run_with_event_pump(session_id: str, action):
         """Forward native adapter events while one turn is executing.
@@ -197,13 +291,19 @@ def build_app(
         tracing.init_tracing(f"adapter-{agent_id}")
         await session_adapter.start()
         hb = asyncio.create_task(_heartbeat_loop(
-            publisher, agent_id, card_fn, health_check))
+            publisher, agent_id, card_fn, health_check, adapter_instance_id,
+            adapter_started_at, session_adapter))
         try:
             yield
         finally:
             hb.cancel()
             with suppress(asyncio.CancelledError):
                 await hb
+            pending = tuple(execution_tasks)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
             await session_adapter.close()
 
     app = FastAPI(title=f"{agent_id}-adapter", version="0.1.0", lifespan=lifespan)
@@ -294,6 +394,13 @@ def build_app(
         objective = _extract_objective(params)
         if not objective:
             return _rpc_error(rpc_id, -32602, "message has no text part")
+        requested_generation = metadata.get("executionGeneration")
+        if (requested_generation is not None
+                and (not isinstance(requested_generation, str)
+                     or not requested_generation.strip())):
+            return _rpc_error(
+                rpc_id, -32602,
+                "executionGeneration must be a non-empty string")
 
         requested_task_id = metadata.get("taskId")
         requested_idempotency_key = metadata.get("idempotencyKey")
@@ -341,6 +448,8 @@ def build_app(
             if requested_idempotency_key:
                 store.remember_idempotency_key(
                     requested_idempotency_key, existing.id)
+            if requested_generation is not None:
+                existing.execution_generation = requested_generation
             existing.objective = objective
             existing.context_revision = requested_revision
             _queue_turn(existing, objective, metadata, first=False)
@@ -361,6 +470,10 @@ def build_app(
             context_id=metadata.get("contextId") or task_id,
             session_id=session_id,
             adapter_instance_id=adapter_instance_id,
+            execution_generation=(
+                requested_generation
+                if isinstance(requested_generation, str)
+                else f"EX-{uuid.uuid4()}"),
             native_session_id=metadata.get("nativeSessionId"),
             session_capabilities=session_adapter.capabilities.to_dict(),
             context_revision=context_revision,
@@ -386,6 +499,9 @@ def build_app(
             attempt = max(1, int(metadata.get("attempt", 1)))
         except (TypeError, ValueError):
             attempt = 1
+        execution_generation = (
+            task.execution_generation or f"EX-{uuid.uuid4()}")
+        task.execution_generation = execution_generation
         store.append_history(task.id, {
             "messageId": message_id,
             "role": "user",
@@ -396,13 +512,25 @@ def build_app(
         })
 
         async def execute_turn() -> None:
-            if task.status_state in {"paused", "canceled"}:
+            current = store.get(task.id)
+            if current is not task:
+                await publisher.publish(
+                    "session.result_discarded", task.id,
+                    {"session_id": task.session_id,
+                     "reason": "execution_generation_replaced"},
+                    trace_id=trace_id,
+                )
+                return
+            if task.status_state in {"paused", "canceled", "failed", "rejected"}:
                 return
             store.update_state(task.id, "working")
             await publisher.publish(
                 "task.started", task.id,
                 {"status_from": "submitted", "status_to": "working",
-                 "attempt": attempt},
+                 "attempt": attempt,
+                 "session_id": task.session_id,
+                 "adapter_instance_id": adapter_instance_id,
+                 "execution_generation": execution_generation},
                 trace_id=trace_id,
             )
             try:
@@ -453,13 +581,20 @@ def build_app(
                         trace_id=trace_id,
                     )
                     return
+                # Native health recovery may terminalize the shared task in
+                # the narrow window after send_message returned but before
+                # this coroutine processes its result.  The durable
+                # task.failed recovery event wins over that stale result.
+                if task.status_state == "failed":
+                    return
                 task.artifacts = result.artifacts
                 store.update_state(task.id, result.state)
                 for a in result.artifacts:
                     await publisher.publish(
                         "artifact.created", task.id,
                         {"name": a["name"], "path": a["path"],
-                         "sha256": a["sha256"]},
+                         "sha256": a["sha256"],
+                         "execution_generation": execution_generation},
                         trace_id=trace_id,
                     )
                 if result.state == "completed":
@@ -470,11 +605,15 @@ def build_app(
                         "task.completed", task.id,
                         {"status_from": "working", "status_to": "completed",
                          "attempt": attempt,
+                         "session_id": task.session_id,
+                         "adapter_instance_id": adapter_instance_id,
+                         "execution_generation": execution_generation,
                          "summary": result_summary,
                          "result_text": result_text,
                          "artifacts": [a["name"] for a in result.artifacts]},
                         trace_id=trace_id,
                     )
+                    terminal_events_emitted.add(execution_generation)
                 elif result.state == "input-required":
                     pending = [
                         item.to_dict() for item in
@@ -490,6 +629,7 @@ def build_app(
                          "session_id": task.session_id,
                          "native_session_id": task.native_session_id,
                          "adapter_instance_id": task.adapter_instance_id,
+                         "execution_generation": execution_generation,
                          "capabilities": task.session_capabilities},
                         trace_id=trace_id,
                     )
@@ -502,18 +642,28 @@ def build_app(
                         trace_id=trace_id,
                     )
                     return
+                if task.status_state == "failed" and task.error == str(exc):
+                    # Codex health recovery already updated the shared task
+                    # and queued a terminal event for the heartbeat.
+                    return
                 store.update_state(task.id, "failed", error=str(exc))
                 await publisher.publish(
                     "task.failed", task.id,
                     {"status_from": "working", "status_to": "failed",
-                     "attempt": 1, "error": str(exc)},
+                     "attempt": 1, "error": str(exc),
+                     "session_id": task.session_id,
+                     "adapter_instance_id": adapter_instance_id,
+                     "execution_generation": execution_generation},
                     trace_id=trace_id,
                 )
+                terminal_events_emitted.add(execution_generation)
 
         # A2A 异步化（v3 M1）：send 立即返回，执行在后台。
         # 结果经 NATS 事件 → StateWriter 落库；调用方用 tasks/get 轮询
         # 或订阅事件。长任务不再占用 HTTP 连接（§Evolution v3 §6.3）。
-        asyncio.create_task(executor.run(execute_turn()))
+        _spawn_execution(
+            task, execute_turn, trace_id=trace_id, attempt=attempt,
+            execution_generation=execution_generation)
 
     def _tasks_get(body: dict, rpc_id) -> JSONResponse:
         task_id = body.get("params", {}).get("id")
@@ -578,8 +728,23 @@ def build_app(
         except Exception as exc:  # noqa: BLE001 - adapter protocol boundary
             return _rpc_error(rpc_id, -32004, str(exc))
 
+        execution_generation = (
+            task.execution_generation or f"EX-{uuid.uuid4()}")
+
         async def continue_turn() -> None:
             try:
+                if (store.get(task.id) is not task
+                        or task.status_state in {
+                            "paused", "canceled", "failed", "rejected"}):
+                    await publisher.publish(
+                        "session.result_discarded", task.id,
+                        {"session_id": task.session_id,
+                         "reason": (
+                             "execution_generation_replaced"
+                             if store.get(task.id) is not task
+                             else task.status_state)},
+                    )
+                    return
                 adapter_session_id = task.session_id or task.id
                 result = (
                     await _run_with_event_pump(
@@ -588,6 +753,8 @@ def build_app(
                             adapter_session_id),
                     ) if accepted.state == "working" else accepted
                 )
+                if task.status_state == "failed":
+                    return
                 task.artifacts = result.artifacts
                 store.update_state(task.id, result.state)
                 for artifact in result.artifacts:
@@ -595,7 +762,8 @@ def build_app(
                         "artifact.created", task.id,
                         {"name": artifact["name"],
                          "path": artifact["path"],
-                         "sha256": artifact["sha256"]},
+                         "sha256": artifact["sha256"],
+                         "execution_generation": execution_generation},
                     )
                 event_type = (
                     "task.completed" if result.state == "completed"
@@ -615,6 +783,8 @@ def build_app(
                     event_type, task.id,
                     {"interaction_id": interaction_id,
                      "status_to": result.state,
+                     "adapter_instance_id": adapter_instance_id,
+                     "execution_generation": execution_generation,
                      **completed_payload,
                      "interactions": [
                          item.to_dict() for item in
@@ -623,15 +793,24 @@ def build_app(
                      ] if result.state == "input-required" else [],
                      "session_id": task.session_id,
                      "native_session_id": task.native_session_id,
-                     "adapter_instance_id": task.adapter_instance_id,
                      "capabilities": task.session_capabilities},
                 )
+                if result.state in {"completed", "failed", "rejected"}:
+                    terminal_events_emitted.add(execution_generation)
             except Exception as exc:  # noqa: BLE001
+                if task.status_state == "failed" and task.error == str(exc):
+                    # The adapter's recovery event owns this terminal state;
+                    # avoid publishing a duplicate task.failed from a waiter.
+                    return
                 store.update_state(task.id, "failed", error=str(exc))
                 await publisher.publish(
                     "task.failed", task.id,
-                    {"interaction_id": interaction_id, "error": str(exc)},
+                    {"interaction_id": interaction_id, "error": str(exc),
+                     "session_id": task.session_id,
+                     "adapter_instance_id": adapter_instance_id,
+                     "execution_generation": execution_generation},
                 )
+                terminal_events_emitted.add(execution_generation)
 
         store.update_state(task.id, "working")
         await publisher.publish(
@@ -643,9 +822,13 @@ def build_app(
         await publisher.publish(
             "task.started", task.id,
             {"status_from": "input-required", "status_to": "working",
-             "attempt": 1, "interaction_id": interaction_id},
+             "attempt": 1, "interaction_id": interaction_id,
+             "session_id": task.session_id,
+             "adapter_instance_id": adapter_instance_id,
+             "execution_generation": execution_generation},
         )
-        asyncio.create_task(executor.run(continue_turn()))
+        _spawn_execution(
+            task, continue_turn, execution_generation=execution_generation)
         return _rpc_result(rpc_id, task.to_a2a())
 
     async def _session_control(body: dict, rpc_id,

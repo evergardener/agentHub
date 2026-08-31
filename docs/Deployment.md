@@ -29,7 +29,7 @@
   确认前不得创建计划任务或静默改派。重新启用会先清除旧租约并显示「等待注册」，
   只有收到新心跳后才恢复在线和可委派状态。
 - 密钥只走环境变量 / `.env`（权限 600），不入库、不入仓、不用 Keychain
-- 状态唯一事实源是 PostgreSQL（可选 SQLite）；NATS 只是事件总线
+- 状态唯一事实源是 PostgreSQL；NATS 只是事件总线
 
 ## 2. 前置条件
 
@@ -140,7 +140,7 @@ python3 scripts/rotate-postgres-password.py \
 | `LAS_DSH_ALLOW_UNVERIFIED_RUNTIME` | 旧版开发兼容项；生产必须为 `false`，新 Adapter 不依赖它放行 prompt |
 | `LAS_DSH_PERMISSION_PRESET` | 必须为 `read-only`；Adapter 用 `commands.execute` 应用并核验原生 permission/sandbox/approval 状态 |
 | `LAS_DSH_AGENT_PRESET` | 必须为 `standard`；`minimal` 的 `str_replace_editor` 已实测绕过 read-only |
-| `LAS_DATABASE_URL` | 留空 = compose PG；`sqlite:////path/x.db` = SQLite；外部 PG 直接填 URL |
+| `LAS_DATABASE_URL` | 必填 PostgreSQL URL；compose 已注入，外部部署直接填 PG URL |
 | `LAS_OTEL_ENDPOINT` | compose 内已指向 jaeger；置空关闭 tracing |
 
 填写完成后运行生产预检。它只输出变量名和修复建议，不输出任何密钥值：

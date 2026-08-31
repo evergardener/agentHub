@@ -1,32 +1,44 @@
 name: agenthub-supervisor
-version: 1.8.0
+version: 1.9.0
 description: >
   Supervise agentHub tasks and wake an available originating qishuo delivery
   surface for approvals, failures, and result acceptance. Canonical Gateway
   routes and WebUI agent-bridge async completions are durable; ordinary
   CLI/TUI routes are process-only and cannot be recovered after that Hermes
-  process exits. Remote worker content is never injected; every wakeup requires
+  process exits; the Gateway reclaims dead process owners so queued WebUI
+  messages fail visibly instead of waiting forever. Remote worker content is
+  never injected; every wakeup requires
   an authoritative read through a fixed, context-scoped recovery path. WebUI
   conversation recovery validates pending delivery ownership before fetching
   untrusted text, follows only verified compression continuations, and persists
-  the final reply before ACK. Oversized idle Agent Bridge sessions rotate to a
-  fresh physical continuation before dispatch without copying or externally
-  summarizing their transcript.
+  the final reply before ACK. Stream observer hooks publish bounded cumulative
+  WebUI drafts from a background batcher; reasoning is excluded, and the final
+  post-turn response remains authoritative. Oversized idle Agent Bridge sessions
+  rotate to a fresh physical continuation before dispatch without copying or
+  externally summarizing their transcript.
 author: evergarden
 hooks:
   - transform_tool_result
   - on_session_start
   - pre_llm_call
   - post_llm_call
+  - on_stream_start
+  - on_stream_delta
+  - on_stream_end
 provides_hooks:
   - transform_tool_result
   - on_session_start
   - pre_llm_call
   - post_llm_call
+  - on_stream_start
+  - on_stream_delta
+  - on_stream_end
 provides_tools:
   - agenthub_notification_task_get
   - agenthub_conversation_message_get
   - agenthub_conversation_respond
+  - agenthub_interaction_get
+  - agenthub_interaction_respond
   - agenthub_supervision_ack
   - agenthub_supervision_register
   - agenthub_supervision_status
@@ -41,7 +53,7 @@ optional_env:
     prompt: agentHub supervisor URL
     password: false
   - name: AGENTHUB_SUPERVISOR_POLL_SECONDS
-    description: Background outbox polling interval, clamped to 2-60 seconds.
+    description: Background outbox polling interval (default 10s), clamped to 2-60 seconds.
     prompt: Supervisor polling interval
     password: false
   - name: AGENTHUB_SUPERVISOR_MAX_SESSION_MESSAGES

@@ -10,9 +10,10 @@ AGENT_ID = "codex"
 
 
 def create_app():
+    adapter = CodexSessionAdapter()
     return build_app(
         AGENT_ID, agent_card, max_concurrent=1,
-        session_adapter=CodexSessionAdapter())
+        session_adapter=adapter, health_check=adapter.health)
 
 
 app = create_app()

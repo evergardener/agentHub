@@ -5,11 +5,18 @@ from __future__ import annotations
 from common import healthcheck
 
 
-def test_database_ready(tmp_path, monkeypatch):
-    monkeypatch.setenv("LAS_DATABASE_URL", f"sqlite:///{tmp_path}/health.db")
-    from state.db import init_db
+def test_database_ready(monkeypatch):
+    class ReadyConnection:
+        def execute(self, _sql):
+            return self
 
-    init_db(tmp_path / "health.db").close()
+        def fetchone(self):
+            return (1,)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("state.db.connect", lambda: ReadyConnection())
     assert healthcheck.database_ready() is True
 
 

@@ -350,6 +350,8 @@ def sync_task(conn, task_id: str, *, commit: bool = True) -> None:
 def pull_notifications(conn, *, peer: str, watch_ids: Iterable[str],
                        limit: int = _MAX_PULL,
                        now: datetime | None = None) -> list[dict]:
+    from orchestrator import collaboration_store
+
     watch_ids = _validate_watch_ids(watch_ids)
     limit = min(max(int(limit), 1), _MAX_PULL)
     for watch_id in watch_ids:
@@ -392,10 +394,12 @@ def pull_notifications(conn, *, peer: str, watch_ids: Iterable[str],
             # merely queued so the WebUI does not look stalled during a long
             # recovery/compression turn. Redelivery remains processing until a
             # persisted Hermes response moves the message to delivered.
-            conn.execute(
-                "UPDATE conversation_messages SET delivery_status = 'processing'"
-                " WHERE id = ? AND delivery_status IN ('queued','processing');",
-                (row["message_id"],),
+            collaboration_store.update_message_delivery_status(
+                conn,
+                message_id=row["message_id"],
+                delivery_status="processing",
+                expected_statuses={"queued", "processing"},
+                commit=False,
             )
         item = {
             "notification_id": row["id"],
@@ -470,6 +474,29 @@ def stop_watch(conn, *, peer: str, task_id: str) -> dict:
         (peer, task_id)).fetchone()
     if row is None:
         raise KeyError(f"watch not found for task: {task_id}")
+    pending_messages = conn.execute(
+        "SELECT DISTINCT message_id FROM supervision_outbox"
+        " WHERE watch_id = ? AND event_type = 'conversation.user_message'"
+        " AND message_id IS NOT NULL AND status IN ('pending','inflight');",
+        (row["id"],),
+    ).fetchall()
+    conn.execute(
+        "UPDATE supervision_outbox SET status = 'failed', lease_until = NULL"
+        " WHERE watch_id = ? AND event_type = 'conversation.user_message'"
+        " AND status IN ('pending','inflight');",
+        (row["id"],),
+    )
+    from orchestrator import collaboration_store
+
+    for message in pending_messages:
+        collaboration_store.update_message_delivery_status(
+            conn,
+            message_id=message["message_id"],
+            delivery_status="failed",
+            expected_statuses={"queued", "processing"},
+            reason="delivery_route_stopped",
+            commit=False,
+        )
     conn.execute(
         "UPDATE supervision_watches SET status = 'stopped', updated_at = ?"
         " WHERE id = ?;", (now_iso(), row["id"]))

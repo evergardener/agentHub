@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import hashlib
 import json
 import time
@@ -44,6 +45,7 @@ class A2aTask:
     context_id: str | None = None
     session_id: str | None = None
     adapter_instance_id: str | None = None
+    execution_generation: str | None = None
     native_session_id: str | None = None
     session_capabilities: dict = field(default_factory=dict)
     context_revision: int = 1
@@ -65,6 +67,7 @@ class A2aTask:
                 "agentHub": {
                     "sessionId": self.session_id,
                     "adapterInstanceId": self.adapter_instance_id,
+                    "executionGeneration": self.execution_generation,
                     "nativeSessionId": self.native_session_id,
                     "capabilities": self.session_capabilities,
                     "contextRevision": self.context_revision,
@@ -134,44 +137,97 @@ class EventPublisher:
         self.nats_url = nats_url or cfg.nats_url()
         self.spool = workspace_root() / "logs" / "events-pending.jsonl"
         self._offline_until = 0.0
+        self._io_lock = asyncio.Lock()
 
     async def publish(self, event_type: str, task_id: str | None,
                       payload: dict, trace_id: str | None = None) -> bool:
-        event = Event(
-            event_type=event_type, source=self.source,
-            task_id=task_id, trace_id=trace_id, payload=payload,
-        )
-        is_native_delta = event_type == "agent.session.event"
-        if is_native_delta and time.monotonic() < self._offline_until:
-            self._spool(event)
-            return False
-        try:
-            import nats  # delayed import keeps the adapter dependency optional
-
-            # A new short-lived connection per event avoids carrying a stale
-            # JetStream socket across NATS restarts. The offline backoff below
-            # prevents reconnect storms for high-frequency native deltas.
-            nc = await nats.connect(
-                self.nats_url, connect_timeout=1, max_reconnect_attempts=1,
-                allow_reconnect=False,
+        async with self._io_lock:
+            event = Event(
+                event_type=event_type, source=self.source,
+                task_id=task_id, trace_id=trace_id, payload=payload,
             )
             try:
-                await nc.jetstream().publish(
-                    event_type, json.dumps(event.to_dict()).encode("utf-8"))
-            finally:
-                await nc.close()
-            self._offline_until = 0
-            return True
-        except Exception:
-            if is_native_delta:
-                self._offline_until = time.monotonic() + 5
-            self._spool(event)
-            return False
+                is_native_delta = event_type == "agent.session.event"
+                if (is_native_delta
+                        and time.monotonic() < self._offline_until):
+                    await self._spool(event)
+                    return False
+                import nats  # delayed import keeps the dependency optional
 
-    def _spool(self, event: Event) -> None:
+                # A new short-lived connection per event avoids carrying a
+                # stale JetStream socket across NATS restarts.
+                nc = await nats.connect(
+                    self.nats_url, connect_timeout=1,
+                    max_reconnect_attempts=1, allow_reconnect=False,
+                    reconnect_time_wait=0.05,
+                )
+                try:
+                    await nc.jetstream().publish(
+                        event_type,
+                        json.dumps(event.to_dict()).encode("utf-8"))
+                finally:
+                    await nc.close()
+                self._offline_until = 0
+                return True
+            except asyncio.CancelledError:
+                await self._spool(event)
+                if event_type in {
+                    "task.completed", "task.failed", "task.cancelled",
+                }:
+                    return False
+                raise
+            except Exception:
+                if event_type == "agent.session.event":
+                    self._offline_until = time.monotonic() + 5
+                await self._spool(event)
+                return False
+
+    async def replay_pending(self) -> int:
+        """Replay durable offline events when NATS becomes available again."""
+        async with self._io_lock:
+            lock = await self._acquire_spool_lock()
+            try:
+                if not self.spool.exists():
+                    return 0
+                from orchestrator.nats_client import replay_spool
+
+                return await replay_spool(self.spool, self.nats_url)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return 0
+            finally:
+                self._release_spool_lock(lock)
+
+    async def _acquire_spool_lock(self):
         self.spool.parent.mkdir(parents=True, exist_ok=True)
-        with self.spool.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+        handle = self.spool.with_suffix(".lock").open("a+", encoding="utf-8")
+        try:
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return handle
+                except BlockingIOError:
+                    await asyncio.sleep(0.01)
+        except BaseException:
+            handle.close()
+            raise
+
+    @staticmethod
+    def _release_spool_lock(handle) -> None:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+    async def _spool(self, event: Event) -> None:
+        self.spool.parent.mkdir(parents=True, exist_ok=True)
+        lock = await self._acquire_spool_lock()
+        try:
+            with self.spool.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+        finally:
+            self._release_spool_lock(lock)
 
 
 # ---------- FIFO 执行器（§9.1） ----------
@@ -186,6 +242,15 @@ class FifoExecutor:
     async def run(self, coro):
         async with self._sem:
             return await coro
+
+    async def run_factory(self, factory):
+        """Create the coroutine only after capacity is acquired.
+
+        This avoids leaking an un-awaited coroutine when a queued execution is
+        cancelled during adapter shutdown.
+        """
+        async with self._sem:
+            return await factory()
 
 
 # ---------- Artifact ----------

@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import time
 import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -19,13 +20,17 @@ from typing import Any, AsyncIterator
 from adapters.codex.runner import (
     DEFAULT_TIMEOUT_SECONDS, CodexFailed, CodexNotAvailable, CodexTimeout,
 )
-from adapters.common import A2aTask, save_artifact, workspace_root
+from adapters.common import A2aTask, now_iso, save_artifact, workspace_root
 from adapters.session import (
     PendingInteraction, SessionAdapter, SessionCapabilities,
     SessionCapabilityError, SessionEvent, SessionHandle, SessionMessage,
     SessionTurnResult,
 )
 from common.action_receipt import verify_action_receipt
+
+DEFAULT_STARTUP_RPC_TIMEOUT_SECONDS = 60.0
+DEFAULT_HEALTH_RPC_TIMEOUT_SECONDS = 5.0
+DEFAULT_ACTIVE_TURN_HEALTH_FAILURE_LIMIT = 3
 
 
 def extract_codex_session_id(jsonl: str) -> str | None:
@@ -79,21 +84,39 @@ class CodexSessionAdapter(SessionAdapter):
         "item/permissions/requestApproval",
     }
 
-    def __init__(self, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS):
+    def __init__(
+        self, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS, *,
+        startup_rpc_timeout_seconds: float = DEFAULT_STARTUP_RPC_TIMEOUT_SECONDS,
+        health_rpc_timeout_seconds: float = DEFAULT_HEALTH_RPC_TIMEOUT_SECONDS,
+        active_turn_health_failure_limit: int = (
+            DEFAULT_ACTIVE_TURN_HEALTH_FAILURE_LIMIT),
+    ):
+        if startup_rpc_timeout_seconds <= 0 or health_rpc_timeout_seconds <= 0:
+            raise ValueError("Codex RPC timeouts must be positive")
+        if active_turn_health_failure_limit <= 0:
+            raise ValueError(
+                "active turn health failure limit must be positive")
         self.timeout_seconds = timeout_seconds
+        self.startup_rpc_timeout_seconds = startup_rpc_timeout_seconds
+        self.health_rpc_timeout_seconds = health_rpc_timeout_seconds
+        self.active_turn_health_failure_limit = active_turn_health_failure_limit
         self._handles: dict[str, SessionHandle] = {}
         self._tasks: dict[str, A2aTask] = {}
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
         self._start_lock = asyncio.Lock()
+        self._health_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
         self._rpc_seq = 0
         self._pending_rpc: dict[int, asyncio.Future] = {}
+        self._critical_rpc_started: dict[str, float] = {}
+        self._health_failure_count = 0
         self._loaded_threads: set[str] = set()
         self._turn_futures: dict[str, asyncio.Future] = {}
         self._active_turn_ids: dict[str, str] = {}
         self._early_completions: dict[str, dict] = {}
+        self._recovery_events: list[SessionEvent] = []
         self._interactions: dict[str, dict[str, PendingInteraction]] = {}
         self._interaction_events: dict[str, asyncio.Event] = {}
         self._approval_rpc_ids: dict[str, int | str] = {}
@@ -112,6 +135,11 @@ class CodexSessionAdapter(SessionAdapter):
 
     def get_session(self, session_id: str) -> SessionHandle | None:
         return self._handles.get(session_id)
+
+    def drain_recovery_events(self) -> list[SessionEvent]:
+        events = self._recovery_events
+        self._recovery_events = []
+        return events
 
     def _workspace(self, task_id: str) -> Path:
         ws = workspace_root() / "tasks" / task_id
@@ -152,6 +180,11 @@ class CodexSessionAdapter(SessionAdapter):
         await self._ensure_connected()
 
     async def close(self) -> None:
+        async with self._start_lock:
+            await self._close_process_unlocked(
+                CodexFailed("Codex App Server closed"))
+
+    async def _close_process_unlocked(self, error: Exception) -> None:
         if self._process and self._process.returncode is None:
             self._process.terminate()
             try:
@@ -166,9 +199,68 @@ class CodexSessionAdapter(SessionAdapter):
             *(task for task in (self._reader_task, self._stderr_task) if task),
             return_exceptions=True,
         )
-        self._fail_pending(CodexFailed("Codex App Server closed"))
+        self._fail_pending(error)
         self._process = None
+        self._reader_task = None
+        self._stderr_task = None
         self._loaded_threads.clear()
+
+    async def health(self) -> dict[str, Any]:
+        """Probe the native App Server, not merely the HTTP adapter process."""
+        async with self._health_lock:
+            try:
+                await self._ensure_connected()
+                if self._reader_task is None or self._reader_task.done():
+                    raise CodexFailed("Codex App Server response reader stopped")
+                now = time.monotonic()
+                stalled = next((
+                    method for method, started_at
+                    in self._critical_rpc_started.items()
+                    if now - started_at >= self.health_rpc_timeout_seconds
+                ), None)
+                if stalled is not None:
+                    raise CodexTimeout(
+                        f"Codex App Server {stalled} is unresponsive")
+                result = await self._rpc_bounded(
+                    "model/list", {"includeHidden": False},
+                    self.health_rpc_timeout_seconds)
+                if (not isinstance(result, dict)
+                        or not isinstance(result.get("data"), list)):
+                    raise CodexFailed(
+                        "Codex App Server health probe returned invalid data")
+                self._health_failure_count = 0
+                return {
+                    "runtime": "codex-app-server",
+                    "ready": True,
+                    "pendingRpcCount": len(self._pending_rpc),
+                }
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Do not let an auxiliary health probe destroy a live turn or
+                # suspended approval on its first transient failure.  Once a
+                # bounded number of probes fail, terminate the turn and
+                # recycle the process so its waiter cannot remain active
+                # forever.
+                self._health_failure_count += 1
+                active_turn = bool(self._active_turn_ids)
+                should_recycle = (
+                    not active_turn
+                    or self._health_failure_count
+                    >= self.active_turn_health_failure_limit)
+                if should_recycle:
+                    recycle_error = CodexFailed(
+                        "Codex App Server recycled after failed health probe: "
+                        f"{exc}")
+                    async with self._start_lock:
+                        if active_turn:
+                            self._fail_active_turns(CodexFailed(
+                                "Codex active turn terminated after "
+                                f"{self._health_failure_count} consecutive "
+                                f"health probe failures: {exc}"))
+                        await self._close_process_unlocked(recycle_error)
+                    self._health_failure_count = 0
+                raise
 
     async def _ensure_connected(self) -> None:
         if self._process is not None and self._process.returncode is None:
@@ -188,6 +280,7 @@ class CodexSessionAdapter(SessionAdapter):
                 if key:
                     env["CLIPROXY_API_KEY"] = key
             self._loaded_threads.clear()
+            self._health_failure_count = 0
             self._process = await asyncio.create_subprocess_exec(
                 codex, "app-server", "--stdio",
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -195,13 +288,18 @@ class CodexSessionAdapter(SessionAdapter):
             )
             self._reader_task = asyncio.create_task(self._reader_loop())
             self._stderr_task = asyncio.create_task(self._stderr_loop())
-            initialized = await self._rpc("initialize", {
-                "clientInfo": {
-                    "name": "agenthub", "title": "AgentHub Codex Adapter",
-                    "version": "0.1.0",
-                },
-                "capabilities": {"experimentalApi": True},
-            })
+            try:
+                initialized = await self._rpc_bounded("initialize", {
+                    "clientInfo": {
+                        "name": "agenthub", "title": "AgentHub Codex Adapter",
+                        "version": "0.1.0",
+                    },
+                    "capabilities": {"experimentalApi": True},
+                }, self.startup_rpc_timeout_seconds)
+            except BaseException:
+                await self._close_process_unlocked(CodexFailed(
+                    "Codex App Server initialization failed"))
+                raise
             if not isinstance(initialized, dict):
                 raise CodexFailed(
                     "Codex App Server initialize returned invalid result")
@@ -240,8 +338,83 @@ class CodexSessionAdapter(SessionAdapter):
         ]:
             if not future.done():
                 future.set_exception(error)
+                future.exception()
         self._pending_rpc.clear()
         self._turn_futures.clear()
+
+    def _fail_active_turns(self, error: Exception) -> None:
+        """Fail and detach every turn tied to the process being recycled.
+
+        The native process is shared by all sessions.  A health-triggered
+        recycle therefore invalidates all active turn futures, including a
+        turn currently suspended at an approval boundary.  Keep interaction
+        records for auditability, but make them non-pending so a stale approval
+        cannot be delivered to a replacement process.
+        """
+        for session_id, turn_id in tuple(self._active_turn_ids.items()):
+            task = self._tasks.get(session_id)
+            handle = self._handles.get(session_id)
+            status_from = task.status_state if task is not None else (
+                handle.status if handle is not None else "working")
+            pending_interaction_ids = [
+                interaction_id
+                for interaction_id, interaction in self._interactions.get(
+                    session_id, {}).items()
+                if interaction.status == "pending"
+            ]
+            future = self._turn_futures.pop(turn_id, None)
+            if future is not None and not future.done():
+                future.set_exception(error)
+                # A waiter normally consumes this exception.  Consume it here
+                # too for defensive cases where no waiter was ever attached.
+                future.exception()
+            self._active_turn_ids.pop(session_id, None)
+
+            for interaction_id, interaction in tuple(
+                    self._interactions.get(session_id, {}).items()):
+                if interaction.status != "pending":
+                    continue
+                interaction.status = "failed"
+                interaction.response = {
+                    "error": "Codex native turn became unavailable",
+                }
+                self._approval_methods.pop(interaction_id, None)
+                self._approval_params.pop(interaction_id, None)
+                self._approval_rpc_ids.pop(interaction_id, None)
+            event = self._interaction_events.get(session_id)
+            if event is not None:
+                event.clear()
+            if handle is not None and handle.status not in {"paused", "canceled"}:
+                handle.status = "failed"
+            # Update the shared task object and hand a durable terminal event
+            # to the heartbeat.  This is required after input-required because
+            # its execution coroutine already returned; for a working turn
+            # the server-side waiter suppresses its duplicate failure event.
+            if task is not None and status_from in {
+                    "working", "input-required", "blocked"}:
+                failure = str(error)
+                task.status_state = "failed"
+                task.error = failure
+                task.pending_interactions = []
+                task.updated_at = now_iso()
+                self._recovery_events.append(SessionEvent(
+                    event_type="task.failed",
+                    session_id=session_id,
+                    task_id=task.id,
+                    payload={
+                        "status_from": (
+                            "blocked" if status_from == "input-required"
+                            else status_from),
+                        "status_to": "failed",
+                        "attempt": 1,
+                        "error": failure,
+                        "reason": "native_runtime_unavailable",
+                        "interaction_ids": pending_interaction_ids,
+                        "execution_generation": task.execution_generation,
+                        "native_session_id": (
+                            handle.native_session_id if handle else None),
+                    },
+                ))
 
     async def _handle_message(self, message: dict) -> None:
         method = message.get("method")
@@ -475,17 +648,36 @@ class CodexSessionAdapter(SessionAdapter):
         rpc_id = self._rpc_seq
         future = asyncio.get_running_loop().create_future()
         self._pending_rpc[rpc_id] = future
-        await self._send_message({
-            "jsonrpc": "2.0", "id": rpc_id, "method": method,
-            "params": params,
-        })
         try:
+            await self._send_message({
+                "jsonrpc": "2.0", "id": rpc_id, "method": method,
+                "params": params,
+            })
             return await asyncio.wait_for(future, timeout=self.timeout_seconds)
         except asyncio.TimeoutError as exc:
-            self._pending_rpc.pop(rpc_id, None)
             raise CodexTimeout(
                 f"Codex App Server {method} exceeded "
                 f"{self.timeout_seconds}s") from exc
+        finally:
+            self._pending_rpc.pop(rpc_id, None)
+
+    async def _rpc_bounded(
+        self, method: str, params: dict, timeout_seconds: float,
+    ) -> Any:
+        tracked = method in {"initialize", "thread/start", "thread/resume"}
+        started_at = time.monotonic()
+        if tracked:
+            self._critical_rpc_started[method] = started_at
+        try:
+            return await asyncio.wait_for(
+                self._rpc(method, params), timeout=timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            raise CodexTimeout(
+                f"Codex App Server {method} exceeded "
+                f"{timeout_seconds:g}s") from exc
+        finally:
+            if self._critical_rpc_started.get(method) == started_at:
+                self._critical_rpc_started.pop(method, None)
 
     async def _notify(self, method: str, params: dict) -> None:
         message = {"jsonrpc": "2.0", "method": method}
@@ -614,25 +806,31 @@ class CodexSessionAdapter(SessionAdapter):
         await self._ensure_connected()
         model, reasoning_effort = await self._validated_runtime_config(metadata)
         native = metadata.get("nativeSessionId") or task.native_session_id
-        if native:
-            result = await self._rpc("thread/resume", {
-                "threadId": native,
-                **self._thread_params(
-                    ws, model=model, reasoning_effort=reasoning_effort),
-            })
-            native = self._verify_thread_result(
-                result, expected_workspace=ws,
-                expected_native_id=str(native), expected_model=model,
-                expected_reasoning_effort=reasoning_effort)
-        else:
-            result = await self._rpc("thread/start", {
-                **self._thread_params(
-                    ws, model=model, reasoning_effort=reasoning_effort),
-                "ephemeral": False,
-            })
-            native = self._verify_thread_result(
-                result, expected_workspace=ws, expected_model=model,
-                expected_reasoning_effort=reasoning_effort)
+        try:
+            if native:
+                result = await self._rpc_bounded("thread/resume", {
+                    "threadId": native,
+                    **self._thread_params(
+                        ws, model=model, reasoning_effort=reasoning_effort),
+                }, self.startup_rpc_timeout_seconds)
+                native = self._verify_thread_result(
+                    result, expected_workspace=ws,
+                    expected_native_id=str(native), expected_model=model,
+                    expected_reasoning_effort=reasoning_effort)
+            else:
+                result = await self._rpc_bounded("thread/start", {
+                    **self._thread_params(
+                        ws, model=model, reasoning_effort=reasoning_effort),
+                    "ephemeral": False,
+                }, self.startup_rpc_timeout_seconds)
+                native = self._verify_thread_result(
+                    result, expected_workspace=ws, expected_model=model,
+                    expected_reasoning_effort=reasoning_effort)
+        except CodexTimeout:
+            async with self._start_lock:
+                await self._close_process_unlocked(CodexFailed(
+                    "Codex App Server recycled after session startup timeout"))
+            raise
         self._loaded_threads.add(native)
         handle = SessionHandle(
             session_id=session_id, task_id=task.id,
@@ -694,6 +892,9 @@ class CodexSessionAdapter(SessionAdapter):
         if session_id in self._active_turn_ids:
             raise SessionCapabilityError("session already has an active turn")
         await self._ensure_native_loaded(session_id)
+        # Health failures belong to one native turn.  Do not carry a transient
+        # failure from a completed turn into the next user turn.
+        self._health_failure_count = 0
         control_workspace = self._workspace(task.id)
         (control_workspace / "context.md").write_text(
             f"# Task {task.id}\n\n## Turn\n\n{message.content}\n",
@@ -885,14 +1086,17 @@ class CodexSessionAdapter(SessionAdapter):
                     and "accept" not in offered):
                 raise SessionCapabilityError(
                     "Codex did not offer a one-shot accept decision")
-        method = self._approval_methods.pop(interaction_id)
-        params = self._approval_params.pop(interaction_id)
-        rpc_id = self._approval_rpc_ids.pop(interaction_id)
+        method = self._approval_methods[interaction_id]
+        params = self._approval_params[interaction_id]
+        rpc_id = self._approval_rpc_ids[interaction_id]
         await self._send_message({
             "jsonrpc": "2.0", "id": rpc_id,
             "result": self._approval_result(
                 method, params, outcome == "allowed-once"),
         })
+        self._approval_methods.pop(interaction_id, None)
+        self._approval_params.pop(interaction_id, None)
+        self._approval_rpc_ids.pop(interaction_id, None)
         interaction.status = "responded"
         interaction.responded_by = responded_by
         interaction.response = _bounded(response)

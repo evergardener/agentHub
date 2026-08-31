@@ -85,7 +85,7 @@ def test_migrations_upgrade_existing_database(tmp_path):
         " VALUES ('T-old', 'queued', 'keep me', 'now', 'now');")
     conn.commit()
 
-    assert migrate(conn) == [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    assert migrate(conn) == [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     assert conn.execute(
         "SELECT objective FROM tasks WHERE id = 'T-old';").fetchone()[0] == "keep me"
     assert conn.execute(
@@ -111,8 +111,12 @@ def test_migrations_upgrade_existing_database(tmp_path):
     assert "collaboration_id" in columns
     assert "plan_step_id" in columns
     assert "plan_context_json" in columns
+    assert "execution_generation" in columns
     agent_columns = {r[1] for r in conn.execute("PRAGMA table_info(agents);")}
-    assert {"template_id", "profile_id"} <= agent_columns
+    assert {
+        "template_id", "profile_id", "adapter_instance_id",
+        "adapter_started_at",
+    } <= agent_columns
     profile_columns = {
         r[1] for r in conn.execute("PRAGMA table_info(agent_profiles);")}
     assert {

@@ -55,6 +55,19 @@ _A2A_SECRET_TEXT = re.compile(
     r"[^\s,;]+"
 )
 
+# Response streams keep only the latest cumulative prefix.  The limit is the
+# same one used by the authoritative conversations/respond path; in
+# particular, it prevents an untrusted peer from turning a draft into an
+# unbounded database value.
+_STREAM_MAX_TEXT = 20_000
+_STREAM_MAX_REASON = 512
+_STREAM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_STREAM_STATUSES = frozenset({"streaming", "finished", "aborted"})
+
+
+class StreamConflict(ValueError):
+    """The caller supplied a stale, non-contiguous, or conflicting stream."""
+
 
 def _safe_a2a_text(value: Any, *, limit: int) -> tuple[str | None, bool]:
     """Return one bounded, non-secret string for an external A2A view."""
@@ -603,6 +616,47 @@ def append_message(conn, *, conversation_id: str,
     ).fetchone()
 
 
+def update_message_delivery_status(
+        conn, *, message_id: str, delivery_status: str,
+        expected_statuses: set[str] | None = None,
+        reason: str | None = None, commit: bool = True):
+    """Update one delivery phase and publish an SSE-visible audit edge."""
+    allowed = {"queued", "processing", "delivered", "failed", "persisted"}
+    if delivery_status not in allowed:
+        raise ValueError(f"invalid delivery status: {delivery_status}")
+    row = conn.execute(
+        "SELECT * FROM conversation_messages WHERE id = ?;", (message_id,)
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"message not found: {message_id}")
+    if expected_statuses is not None and row["delivery_status"] not in \
+            expected_statuses:
+        return row
+    if row["delivery_status"] == delivery_status:
+        return row
+    conn.execute(
+        "UPDATE conversation_messages SET delivery_status = ? WHERE id = ?;",
+        (delivery_status, message_id),
+    )
+    payload = {
+        "message_id": message_id,
+        "collaboration_id": row["collaboration_id"],
+        "delivery_status": delivery_status,
+    }
+    if reason:
+        payload["reason"] = reason
+    _audit(
+        conn, "conversation.message.delivery.updated",
+        task_id=row["task_id"], source="agenthub-supervisor",
+        payload=payload,
+    )
+    if commit:
+        conn.commit()
+    return conn.execute(
+        "SELECT * FROM conversation_messages WHERE id = ?;", (message_id,)
+    ).fetchone()
+
+
 def append_user_message_to_hermes(
         conn, *, collaboration_id: str, user_id: str,
         content: dict | list | str,
@@ -764,11 +818,562 @@ def get_a2a_user_message(conn, *, peer: str, context_id: str,
     }
 
 
+def _stream_row_dict(row) -> dict:
+    return {key: row[key] for key in row.keys()}
+
+
+def _validate_stream_id(value: Any, *, required: bool = True) -> str | None:
+    if value is None and not required:
+        return None
+    if (not isinstance(value, str) or not _STREAM_ID_RE.fullmatch(value)):
+        raise ValueError("stream_id must match [A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+    return value
+
+
+def _validate_stream_message_id(value: Any) -> str:
+    if (not isinstance(value, str) or not value.strip()
+            or len(value.strip()) > 128):
+        raise ValueError(
+            "message_id must be a non-empty string of at most 128 characters")
+    return value.strip()
+
+
+def _validate_stream_seq(value: Any) -> int:
+    # bool is an int subclass but is not a valid wire sequence.
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("stream seq must be a positive integer")
+    return value
+
+
+def _validate_stream_reason(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > _STREAM_MAX_REASON:
+        raise ValueError(
+            f"abort reason must be at most {_STREAM_MAX_REASON} characters")
+    return value or None
+
+
+def _stream_prefix(*, current: str, text: Any = None,
+                   delta: Any = None, required: bool = True) -> str:
+    """Normalize a cumulative prefix or an optional append-only delta.
+
+    The wire contract prefers ``text`` as the complete prefix.  ``delta`` is
+    accepted as a convenience for adapters, but is expanded while holding the
+    stream row lock and is never persisted as a separate event/body.
+    """
+    if text is None and delta is None:
+        if required:
+            raise ValueError("stream update requires text or delta")
+        return current
+    if text is not None and not isinstance(text, str):
+        raise ValueError("stream text must be a string")
+    if delta is not None and not isinstance(delta, str):
+        raise ValueError("stream delta must be a string")
+    prefix = text if text is not None else current + delta
+    if text is not None and delta is not None and prefix != current + delta:
+        raise StreamConflict("stream text must equal the current prefix plus delta")
+    if len(prefix) > _STREAM_MAX_TEXT:
+        raise ValueError(
+            f"stream text must be at most {_STREAM_MAX_TEXT} characters")
+    return prefix
+
+
+def _stream_lock_suffix(conn, *, lock: bool) -> str:
+    # Migration 017 is PostgreSQL-only.  The conditional keeps the helper
+    # readable in isolated unit tests that use a manually-created SQLite table
+    # while production always takes the row lock.
+    return " FOR UPDATE" if lock and getattr(conn, "backend", "sqlite") == "pg" else ""
+
+
+def _stream_by_id(conn, *, stream_id: str, peer: str, context_id: str,
+                  message_id: str | None = None, lock: bool = False):
+    mapping = a2a_context_ids(peer=peer, context_id=context_id)
+    suffix = _stream_lock_suffix(conn, lock=lock)
+    row = conn.execute(
+        "SELECT * FROM conversation_stream_drafts WHERE id = ?" + suffix + ";",
+        (stream_id,),
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"stream not found: {stream_id}")
+    if (row["peer"] != mapping["peer"]
+            or row["context_id"] != mapping["context_id"]):
+        raise PermissionError("stream does not belong to authenticated peer/context")
+    if message_id is not None and row["message_id"] != message_id:
+        raise PermissionError("stream is bound to a different message")
+    return row
+
+
+def _stream_message(conn, *, row, peer: str, context_id: str) -> dict:
+    original = get_a2a_user_message(
+        conn, peer=peer, context_id=context_id, message_id=row["message_id"])
+    if (original["conversation_id"] != row["conversation_id"]
+            or original["collaboration_id"] != row["collaboration_id"]):
+        raise PermissionError("stream/message conversation binding is invalid")
+    return original
+
+
+def _stream_public(row) -> dict:
+    text = row["text_prefix"] or ""
+    status = row["status"]
+    result = {
+        "stream_id": row["id"],
+        "message_id": row["message_id"],
+        "conversation_id": row["conversation_id"],
+        "collaboration_id": row["collaboration_id"],
+        "peer": row["peer"],
+        "context_id": row["context_id"],
+        "status": status,
+        "text": text,
+        "prefix": text,
+        "text_length": len(text),
+        "seq": int(row["last_seq"]),
+        "last_seq": int(row["last_seq"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "finalized_at": row["finalized_at"],
+    }
+    if row["abort_reason"]:
+        result["abort_reason"] = row["abort_reason"]
+    if row["response_message_id"]:
+        result["response_message_id"] = row["response_message_id"]
+    return result
+
+
+def start_conversation_stream(conn, *, peer: str, context_id: str,
+                              message_id: str, stream_id: str | None = None,
+                              commit: bool = True) -> dict:
+    """Create or recover the one durable draft for a peer/context/message.
+
+    A start retry is idempotent.  It never creates a conversation message;
+    only the existing user message's delivery phase moves from queued to
+    processing.  The assistant transcript is still created by
+    :func:`record_a2a_hermes_response`.
+    """
+    message_id = _validate_stream_message_id(message_id)
+    mapping = a2a_context_ids(peer=peer, context_id=context_id)
+    supplied_stream_id = stream_id is not None
+    requested_stream_id = (_validate_stream_id(stream_id)
+                           if supplied_stream_id else _id("STR"))
+    # This both authenticates the binding and rejects arbitrary message IDs.
+    original = get_a2a_user_message(
+        conn, peer=mapping["peer"], context_id=mapping["context_id"],
+        message_id=message_id)
+    timestamp = now_iso()
+    try:
+        suffix = _stream_lock_suffix(conn, lock=True)
+        row = conn.execute(
+            "SELECT * FROM conversation_stream_drafts"
+            " WHERE peer = ? AND context_id = ? AND message_id = ?"
+            + suffix + ";",
+            (mapping["peer"], mapping["context_id"], message_id),
+        ).fetchone()
+        created = False
+        if row is None:
+            inserted = conn.execute(
+                "INSERT INTO conversation_stream_drafts"
+                " (id, conversation_id, collaboration_id, message_id, peer,"
+                " context_id, status, text_prefix, last_seq, created_at,"
+                " updated_at) VALUES (?,?,?,?,?,?, 'streaming', '', 0, ?,?)"
+                " ON CONFLICT(peer, context_id, message_id) DO NOTHING"
+                " RETURNING id;",
+                (requested_stream_id, original["conversation_id"],
+                 original["collaboration_id"], message_id, mapping["peer"],
+                 mapping["context_id"], timestamp, timestamp),
+            ).fetchone()
+            if inserted is not None:
+                created = True
+                row = conn.execute(
+                    "SELECT * FROM conversation_stream_drafts WHERE id = ?"
+                    + suffix + ";", (inserted[0],)).fetchone()
+            else:
+                # Another PG writer won the unique key race.  Read its row
+                # under the same transaction and return it as the idempotent
+                # result rather than surfacing a duplicate error.
+                row = conn.execute(
+                    "SELECT * FROM conversation_stream_drafts"
+                    " WHERE peer = ? AND context_id = ? AND message_id = ?"
+                    + suffix + ";",
+                    (mapping["peer"], mapping["context_id"], message_id),
+                ).fetchone()
+        if row is None:
+            raise RuntimeError("stream creation race did not leave a draft")
+        if supplied_stream_id and row["id"] != requested_stream_id:
+            raise StreamConflict("message already has a different stream_id")
+        if (row["conversation_id"] != original["conversation_id"]
+                or row["collaboration_id"] != original["collaboration_id"]):
+            raise PermissionError("stream/message conversation binding is invalid")
+        if row["status"] == "streaming":
+            update_message_delivery_status(
+                conn, message_id=message_id, delivery_status="processing",
+                expected_statuses={"queued", "processing"}, commit=False,
+            )
+        if created:
+            _audit(
+                conn, "conversation.stream.started", task_id=None,
+                source=mapping["peer"],
+                payload={
+                    "stream_id": row["id"],
+                    "message_id": message_id,
+                    "conversation_id": row["conversation_id"],
+                    "collaboration_id": row["collaboration_id"],
+                    "context_id": mapping["context_id"],
+                    "seq": 0,
+                    "text_length": 0,
+                },
+            )
+        if commit:
+            conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return _stream_public(row if not created else conn.execute(
+        "SELECT * FROM conversation_stream_drafts WHERE id = ?;",
+        (row["id"],),
+    ).fetchone())
+
+
+def get_conversation_stream(conn, *, peer: str, context_id: str,
+                            stream_id: str,
+                            message_id: str | None = None) -> dict:
+    """Read the latest bounded draft after enforcing peer/context ownership."""
+    stream_id = _validate_stream_id(stream_id)
+    if message_id is not None:
+        message_id = _validate_stream_message_id(message_id)
+    row = _stream_by_id(
+        conn, stream_id=stream_id, peer=peer, context_id=context_id,
+        message_id=message_id,
+    )
+    _stream_message(conn, row=row, peer=peer, context_id=context_id)
+    return _stream_public(row)
+
+
+def list_conversation_streams(conn, collaboration_id: str, *,
+                              after: str | None = None,
+                              limit: int = 100) -> list[dict]:
+    """Return bounded draft views for one collaboration (WebUI/read-only)."""
+    if (not isinstance(collaboration_id, str) or not collaboration_id.strip()):
+        raise ValueError("collaboration_id is required")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+        raise ValueError("stream limit must be between 1 and 500")
+    params: list[Any] = [collaboration_id.strip()]
+    query = (
+        "SELECT * FROM conversation_stream_drafts"
+        " WHERE collaboration_id = ?"
+    )
+    if after is not None:
+        if not isinstance(after, str) or not after:
+            raise ValueError("stream after must be a non-empty stream_id")
+        query += (
+            " AND created_at > (SELECT created_at FROM "
+            "conversation_stream_drafts WHERE id = ?)"
+        )
+        params.append(after)
+    query += " ORDER BY created_at, id LIMIT ?;"
+    params.append(limit)
+    return [_stream_public(row) for row in conn.execute(query, params).fetchall()]
+
+
+def update_conversation_stream(conn, *, peer: str, context_id: str,
+                               stream_id: str, seq: int,
+                               text: str | None = None,
+                               delta: str | None = None,
+                               message_id: str | None = None,
+                               commit: bool = True) -> dict:
+    """Apply one contiguous, cumulative-prefix stream update idempotently."""
+    stream_id = _validate_stream_id(stream_id)
+    seq = _validate_stream_seq(seq)
+    if message_id is not None:
+        message_id = _validate_stream_message_id(message_id)
+    try:
+        row = _stream_by_id(
+            conn, stream_id=stream_id, peer=peer, context_id=context_id,
+            message_id=message_id, lock=True,
+        )
+        _stream_message(conn, row=row, peer=peer, context_id=context_id)
+        if row["status"] != "streaming":
+            raise StreamConflict(
+                f"stream is finalized ({row['status']}); late delta rejected")
+        current = row["text_prefix"] or ""
+        prefix = _stream_prefix(current=current, text=text, delta=delta)
+        if not prefix.startswith(current):
+            raise StreamConflict(
+                "stream update must retain the cumulative prefix")
+        last_seq = int(row["last_seq"])
+        if seq == last_seq:
+            if prefix != current:
+                raise StreamConflict(
+                    "duplicate stream seq has a different cumulative prefix")
+            return _stream_public(row)
+        if seq < last_seq:
+            raise StreamConflict(
+                f"stream seq is stale: expected {last_seq + 1}, got {seq}")
+        if seq != last_seq + 1:
+            raise StreamConflict(
+                f"stream seq gap: expected {last_seq + 1}, got {seq}")
+        timestamp = now_iso()
+        updated = conn.execute(
+            "UPDATE conversation_stream_drafts SET text_prefix = ?,"
+            " last_seq = ?, updated_at = ? WHERE id = ?"
+            " AND status = 'streaming' AND last_seq = ?;",
+            (prefix, seq, timestamp, stream_id, last_seq),
+        )
+        if updated.rowcount != 1:
+            raise StreamConflict(
+                "stream changed concurrently; retry with the latest seq")
+        _audit(
+            conn, "conversation.stream.updated", task_id=None,
+            source=peer,
+            payload={
+                "stream_id": stream_id,
+                "message_id": row["message_id"],
+                "conversation_id": row["conversation_id"],
+                "collaboration_id": row["collaboration_id"],
+                "context_id": context_id,
+                "seq": seq,
+                "text_length": len(prefix),
+            },
+        )
+        if commit:
+            conn.commit()
+        saved = conn.execute(
+            "SELECT * FROM conversation_stream_drafts WHERE id = ?;",
+            (stream_id,),
+        ).fetchone()
+        return _stream_public(saved)
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def finish_conversation_stream(conn, *, peer: str, context_id: str,
+                               stream_id: str, text: str | None = None,
+                               delta: str | None = None, seq: int | None = None,
+                               message_id: str | None = None,
+                               commit: bool = True) -> dict:
+    """Finalize a draft without creating the authoritative assistant message."""
+    stream_id = _validate_stream_id(stream_id)
+    if message_id is not None:
+        message_id = _validate_stream_message_id(message_id)
+    if seq is not None:
+        seq = _validate_stream_seq(seq)
+    try:
+        row = _stream_by_id(
+            conn, stream_id=stream_id, peer=peer, context_id=context_id,
+            message_id=message_id, lock=True,
+        )
+        _stream_message(conn, row=row, peer=peer, context_id=context_id)
+        current = row["text_prefix"] or ""
+        prefix = _stream_prefix(
+            current=current, text=text, delta=delta, required=False)
+        if row["status"] == "aborted":
+            raise StreamConflict("stream is finalized (aborted); finish rejected")
+        if row["status"] == "finished":
+            if prefix != current:
+                raise StreamConflict(
+                    "finished stream has a different final cumulative prefix")
+            return _stream_public(row)
+        last_seq = int(row["last_seq"])
+        next_seq = last_seq
+        if seq is not None:
+            if seq < last_seq:
+                raise StreamConflict(
+                    f"stream seq is stale: expected {last_seq}, got {seq}")
+            if seq > last_seq + 1:
+                raise StreamConflict(
+                    f"stream seq gap: expected at most {last_seq + 1}, got {seq}")
+            if seq == last_seq and prefix != current:
+                raise StreamConflict(
+                    "finish seq repeats the latest seq with a different prefix")
+            if seq == last_seq + 1:
+                if not prefix.startswith(current):
+                    raise StreamConflict(
+                        "stream final text must retain the cumulative prefix")
+                next_seq = seq
+        elif not prefix.startswith(current):
+            raise StreamConflict(
+                "stream final text must retain the cumulative prefix")
+        timestamp = now_iso()
+        conn.execute(
+            "UPDATE conversation_stream_drafts SET status = 'finished',"
+            " text_prefix = ?, last_seq = ?, updated_at = ?, finalized_at = ?"
+            " WHERE id = ? AND status = 'streaming';",
+            (prefix, next_seq, timestamp, timestamp, stream_id),
+        )
+        _audit(
+            conn, "conversation.stream.finished", task_id=None,
+            source=peer,
+            payload={
+                "stream_id": stream_id,
+                "message_id": row["message_id"],
+                "conversation_id": row["conversation_id"],
+                "collaboration_id": row["collaboration_id"],
+                "context_id": context_id,
+                "seq": next_seq,
+                "text_length": len(prefix),
+            },
+        )
+        if commit:
+            conn.commit()
+        saved = conn.execute(
+            "SELECT * FROM conversation_stream_drafts WHERE id = ?;",
+            (stream_id,),
+        ).fetchone()
+        return _stream_public(saved)
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def abort_conversation_stream(conn, *, peer: str, context_id: str,
+                              stream_id: str, reason: str | None = None,
+                              message_id: str | None = None,
+                              commit: bool = True) -> dict:
+    """Stop a draft and fail its undelivered user message, if still pending."""
+    stream_id = _validate_stream_id(stream_id)
+    if message_id is not None:
+        message_id = _validate_stream_message_id(message_id)
+    reason = _validate_stream_reason(reason)
+    try:
+        row = _stream_by_id(
+            conn, stream_id=stream_id, peer=peer, context_id=context_id,
+            message_id=message_id, lock=True,
+        )
+        _stream_message(conn, row=row, peer=peer, context_id=context_id)
+        if row["status"] == "finished":
+            raise StreamConflict("stream is finalized (finished); abort rejected")
+        if row["status"] == "aborted":
+            if reason is not None and row["abort_reason"] != reason:
+                raise StreamConflict("duplicate abort has a different reason")
+            return _stream_public(row)
+        timestamp = now_iso()
+        conn.execute(
+            "UPDATE conversation_stream_drafts SET status = 'aborted',"
+            " abort_reason = ?, updated_at = ?, finalized_at = ?"
+            " WHERE id = ? AND status = 'streaming';",
+            (reason, timestamp, timestamp, stream_id),
+        )
+        update_message_delivery_status(
+            conn, message_id=row["message_id"], delivery_status="failed",
+            expected_statuses={"queued", "processing"},
+            reason=(f"stream_aborted:{reason}" if reason else "stream_aborted"),
+            commit=False,
+        )
+        _audit(
+            conn, "conversation.stream.aborted", task_id=None,
+            source=peer,
+            payload={
+                "stream_id": stream_id,
+                "message_id": row["message_id"],
+                "conversation_id": row["conversation_id"],
+                "collaboration_id": row["collaboration_id"],
+                "context_id": context_id,
+                "seq": int(row["last_seq"]),
+                "text_length": len(row["text_prefix"] or ""),
+                **({"reason": reason} if reason else {}),
+            },
+        )
+        if commit:
+            conn.commit()
+        saved = conn.execute(
+            "SELECT * FROM conversation_stream_drafts WHERE id = ?;",
+            (stream_id,),
+        ).fetchone()
+        return _stream_public(saved)
+    except Exception:
+        conn.rollback()
+        raise
+
+
+# Explicit aliases keep adapter integrations readable while retaining one
+# implementation and one persistence contract.
+start_response_stream = start_conversation_stream
+get_response_stream = get_conversation_stream
+update_response_stream = update_conversation_stream
+finish_response_stream = finish_conversation_stream
+abort_response_stream = abort_conversation_stream
+
+
+def _finalize_stream_from_response(conn, *, peer: str, context_id: str,
+                                   message_id: str, text: str):
+    """Close an active draft when the authoritative response is persisted.
+
+    Existing explicit SQLite-only unit-test fixtures may predate migration 017.
+    PostgreSQL is the only runtime backend and must surface a missing migration
+    instead of silently persisting a final response without stream state.
+    """
+    mapping = a2a_context_ids(peer=peer, context_id=context_id)
+    try:
+        row = conn.execute(
+            "SELECT * FROM conversation_stream_drafts"
+            " WHERE peer = ? AND context_id = ? AND message_id = ?"
+            + _stream_lock_suffix(conn, lock=True) + ";",
+            (mapping["peer"], mapping["context_id"], message_id),
+        ).fetchone()
+    except Exception as exc:
+        # Old unit fixtures may not include migration 017 yet.  A production
+        # PostgreSQL error is re-raised so a missing migration is visible.
+        detail = str(exc).lower()
+        if (getattr(conn, "backend", "sqlite") != "pg"
+                and "conversation_stream_drafts" in detail
+                and ("no such table" in detail or "does not exist" in detail)):
+            return None, False
+        raise
+    if row is None:
+        return None, False
+    was_aborted = row["status"] == "aborted"
+    if not isinstance(text, str) or len(text) > _STREAM_MAX_TEXT:
+        raise ValueError(
+            f"response text must be at most {_STREAM_MAX_TEXT} characters")
+    current = row["text_prefix"] or ""
+    if row["status"] == "finished" and current != text:
+        raise StreamConflict("authoritative response differs from finished draft")
+    if row["status"] in {"streaming", "aborted"}:
+        timestamp = now_iso()
+        conn.execute(
+            "UPDATE conversation_stream_drafts SET status = 'finished',"
+            " text_prefix = ?, abort_reason = NULL, updated_at = ?,"
+            " finalized_at = ? WHERE id = ? AND status IN ('streaming', 'aborted');",
+            (text, timestamp, timestamp, row["id"]),
+        )
+        _audit(
+            conn, "conversation.stream.finished", task_id=None,
+            source=peer,
+            payload={
+                "stream_id": row["id"],
+                "message_id": message_id,
+                "conversation_id": row["conversation_id"],
+                "collaboration_id": row["collaboration_id"],
+                "context_id": context_id,
+                "seq": int(row["last_seq"]),
+                "text_length": len(text),
+                "via": "conversations/respond",
+                **({"corrected_aborted": True} if was_aborted else {}),
+            },
+        )
+    row = conn.execute(
+        "SELECT * FROM conversation_stream_drafts WHERE id = ?"
+        + _stream_lock_suffix(conn, lock=True) + ";", (row["id"],)
+    ).fetchone()
+    return row, was_aborted
+
+
+def _link_stream_response(conn, *, stream_row, response_message_id: str) -> None:
+    if stream_row is None:
+        return
+    conn.execute(
+        "UPDATE conversation_stream_drafts SET response_message_id = ?,"
+        " updated_at = ? WHERE id = ? AND response_message_id IS NULL;",
+        (response_message_id, now_iso(), stream_row["id"]),
+    )
+
+
 def record_a2a_hermes_response(conn, *, peer: str, context_id: str,
                                message_id: str, text: str):
     """Persist one idempotent Hermes response to a WebUI user message."""
     if not isinstance(text, str) or not text.strip() or len(text) > 20000:
         raise ValueError("response text must contain 1-20000 characters")
+    response_text = text.strip()
     original = get_a2a_user_message(
         conn, peer=peer, context_id=context_id, message_id=message_id)
     existing = conn.execute(
@@ -787,16 +1392,26 @@ def record_a2a_hermes_response(conn, *, peer: str, context_id: str,
             raise ValueError("existing Hermes response is invalid") from exc
         if (not isinstance(existing_payload, dict)
                 or existing_payload.get("role") != "assistant"
-                or existing_payload.get("content") != text.strip()):
+                or existing_payload.get("content") != response_text):
             raise ValueError(
                 "message already has a different Hermes response")
-        conn.execute(
-            "UPDATE conversation_messages SET delivery_status = 'delivered'"
-            " WHERE id = ?;",
-            (message_id,),
+        stream_row, stream_was_aborted = _finalize_stream_from_response(
+            conn, peer=peer, context_id=context_id,
+            message_id=message_id, text=response_text)
+        _link_stream_response(
+            conn, stream_row=stream_row, response_message_id=existing["id"])
+        update_message_delivery_status(
+            conn, message_id=message_id, delivery_status="delivered",
+            expected_statuses=(
+                {"queued", "processing", "failed"}
+                if stream_was_aborted else {"queued", "processing"}
+            ),
         )
         conn.commit()
         return existing
+    stream_row, stream_was_aborted = _finalize_stream_from_response(
+        conn, peer=peer, context_id=context_id,
+        message_id=message_id, text=response_text)
     response = append_message(
         conn,
         conversation_id=original["conversation_id"],
@@ -806,15 +1421,19 @@ def record_a2a_hermes_response(conn, *, peer: str, context_id: str,
         recipient_type="user",
         recipient_id="user",
         message_type="llm.assistant",
-        content={"role": "assistant", "content": text.strip()},
+        content={"role": "assistant", "content": response_text},
         parent_message_id=message_id,
         idempotency_key=f"hermes-response:{message_id}",
         commit=False,
     )
-    conn.execute(
-        "UPDATE conversation_messages SET delivery_status = 'delivered'"
-        " WHERE id = ?;",
-        (message_id,),
+    _link_stream_response(
+        conn, stream_row=stream_row, response_message_id=response["id"])
+    update_message_delivery_status(
+        conn, message_id=message_id, delivery_status="delivered",
+        expected_statuses=(
+            {"queued", "processing", "failed"}
+            if stream_was_aborted else {"queued", "processing"}
+        ),
     )
     conn.commit()
     return response
@@ -1212,6 +1831,49 @@ def pending_interaction_views(conn, task_id: str) -> list[dict]:
         for row in _interaction_view_rows(conn, task_id=task_id,
                                           pending_only=True)
     ]
+
+
+def close_task_interactions(
+    conn, task_id: str, *, reason: str, commit: bool = True,
+) -> list[str]:
+    """Invalidate unresolved native interactions after task terminalization.
+
+    A failed/cancelled native turn can no longer accept an approval or answer.
+    Closing the interaction and any still-undecided ActionIntent in the same
+    transaction prevents A2A and supervision from advertising a stale gate.
+    """
+    rows = conn.execute(
+        "SELECT id, action_intent_id FROM agent_session_interactions"
+        " WHERE task_id = ?"
+        " AND status IN ('pending','responding','failed') ORDER BY id;",
+        (task_id,),
+    ).fetchall()
+    if not rows:
+        return []
+    timestamp = now_iso()
+    interaction_ids = [row["id"] for row in rows]
+    response = _json({"reason": reason})
+    conn.execute(
+        "UPDATE agent_session_interactions SET status = 'cancelled',"
+        " resolved_at = ?, resolved_by = 'system', response_json = ?,"
+        " last_error = ? WHERE task_id = ?"
+        " AND status IN ('pending','responding','failed');",
+        (timestamp, response, reason, task_id),
+    )
+    action_intent_ids = [
+        row["action_intent_id"] for row in rows if row["action_intent_id"]
+    ]
+    for intent_id in action_intent_ids:
+        conn.execute(
+            "UPDATE action_intents SET status = 'cancelled',"
+            " decided_by = 'system', decision_note = ?, decided_at = ?"
+            " WHERE id = ?"
+            " AND status IN ('pending','awaiting_hermes','awaiting_user');",
+            (reason, timestamp, intent_id),
+        )
+    if commit:
+        conn.commit()
+    return interaction_ids
 
 
 def attach_action_intent(conn, interaction_id: str,

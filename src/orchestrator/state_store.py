@@ -251,6 +251,8 @@ def update_heartbeat(conn: sqlite3.Connection, agent_id: str,
                      lease_ttl_seconds: int = 90,
                      endpoint: str | None = None,
                      skills: list[str] | None = None,
+                     adapter_instance_id: str | None = None,
+                     adapter_started_at: str | None = None,
                      commit: bool = True) -> None:
     """更新心跳租约（§17.4）；携带 endpoint/skills 时一并登记（v3 M2 发现注册）。"""
     from datetime import datetime, timedelta as td
@@ -273,5 +275,10 @@ def update_heartbeat(conn: sqlite3.Connection, agent_id: str,
         conn.execute(
             "UPDATE agents SET skills_json = ? WHERE id = ?;",
             (json.dumps(skills, ensure_ascii=False), agent_id))
+    if adapter_instance_id is not None and adapter_started_at is not None:
+        conn.execute(
+            "UPDATE agents SET adapter_instance_id = ?,"
+            " adapter_started_at = ? WHERE id = ?;",
+            (adapter_instance_id, adapter_started_at, agent_id))
     if commit:
         conn.commit()

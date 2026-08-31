@@ -7,8 +7,11 @@ from fastapi.testclient import TestClient
 
 def test_task_detail_keeps_runtime_records_but_marks_them_non_deliverable(
         tmp_path, monkeypatch):
-    monkeypatch.setenv("LAS_DATABASE_URL",
-                       f"sqlite:///{tmp_path / 'webui.db'}")
+    test_db_url = f"sqlite:///{tmp_path / 'webui.db'}"
+    # Runtime configuration is PostgreSQL-only; this is an explicit offline
+    # presentation fixture rather than a supported deployment backend.
+    monkeypatch.setattr(
+        "common.config.database_url", lambda: test_db_url)
     workspace = tmp_path / "ws"
     monkeypatch.setenv("LAS_WORKSPACE", str(workspace))
     for name in ("LAS_WEBUI_TOKENS", "LAS_WEBUI_SESSION_SECRET",

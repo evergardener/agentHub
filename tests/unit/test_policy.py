@@ -167,6 +167,34 @@ def test_chinese_parallel_negation_allows_explicit_any_scope(policy, conn):
     assert d.action == "auto" and d.risk == "read"
 
 
+def test_chinese_mixed_negative_file_constraints_keep_positive_write_risk(
+        policy, conn):
+    objective = (
+        "仅更新 marker.txt 并完成写入验证。"
+        "不得读取、创建、修改、移动或删除其他文件；"
+        "不得提交、推送、部署、删除、重启或安装依赖；"
+        "完成写入后重新读取 marker.txt。"
+    )
+
+    decision = policy.decide(conn, objective)
+
+    assert decision.action == "ask"
+    assert decision.risk == "write"
+
+
+def test_chinese_mixed_negative_file_constraints_do_not_hide_positive_delete(
+        policy, conn):
+    objective = (
+        "不得读取、创建、修改、移动或删除其他文件，"
+        "但必须删除 marker.txt。"
+    )
+
+    decision = policy.decide(conn, objective)
+
+    assert decision.action == "ask"
+    assert decision.risk == "critical"
+
+
 def test_chinese_negation_strips_english_docker_operation_list(
         policy, conn,
 ):

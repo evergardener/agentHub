@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# healthcheck.sh — Phase 0 验收：nats healthy / sqlite writable / workspace initialized
+# healthcheck.sh — Phase 0 验收：nats healthy / PostgreSQL available / workspace initialized
 set -euo pipefail
 
 WORKSPACE="${AGENT_WORKSPACE:-$HOME/AgentWorkspace}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ok=0; fail=0
 
 check() {  # check <name> <command...>
@@ -15,7 +16,8 @@ check() {  # check <name> <command...>
 }
 
 check "workspace initialized"  test -d "$WORKSPACE/runtime"
-check "sqlite writable"        test -w "$WORKSPACE/runtime/agent-state.db"
+check "postgresql available"   env PYTHONPATH="$REPO_ROOT/src" \
+  "$REPO_ROOT/.venv/bin/python" -m common.healthcheck database
 check "nats server healthy"    curl -sf "http://127.0.0.1:8222/healthz"
 check "jetstream enabled"      curl -sf "http://127.0.0.1:8222/jsz"
 

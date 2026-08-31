@@ -15,8 +15,8 @@ source .venv/bin/activate
 pip install --quiet --upgrade pip
 pip install --quiet -e ".[dev]"
 
-echo "==> 初始化 SQLite（WAL）"
-python -c "from state.db import init_db; init_db('$WORKSPACE/runtime/agent-state.db'); print('db ok')"
+echo "==> 初始化 PostgreSQL"
+python -c "from state.db import init_db; c = init_db(); c.close(); print('db ok')"
 
 echo "==> 运行测试"
 pytest -q

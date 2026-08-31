@@ -10,8 +10,11 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setenv("LAS_DATABASE_URL",
-                       f"sqlite:///{tmp_path}/webui.db")
+    test_db_url = f"sqlite:///{tmp_path}/webui.db"
+    # Runtime configuration is PostgreSQL-only.  The legacy SQLite adapter is
+    # retained solely as an explicit offline unit-test fixture.
+    monkeypatch.setattr(
+        "common.config.database_url", lambda: test_db_url)
     monkeypatch.setenv("LAS_WORKSPACE", str(tmp_path / "ws"))
     for name in ("LAS_WEBUI_TOKENS", "LAS_WEBUI_SESSION_SECRET",
                  "LAS_WEBUI_REQUIRE_AUTH", "LAS_WEBUI_COOKIE_SECURE"):
@@ -22,6 +25,16 @@ def client(tmp_path, monkeypatch):
     from state.db import init_db
 
     conn = init_db(tmp_path / "webui.db")
+    # PostgreSQL migration 017 has no SQLite counterpart.  This minimal table
+    # exists only inside the offline WebUI fixture so its read projection can
+    # be exercised without reintroducing a supported SQLite migration path.
+    conn.execute(
+        "CREATE TABLE conversation_stream_drafts ("
+        "id TEXT PRIMARY KEY, collaboration_id TEXT NOT NULL,"
+        "message_id TEXT NOT NULL, last_seq INTEGER NOT NULL DEFAULT 0,"
+        "text_prefix TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,"
+        "updated_at TEXT NOT NULL);"
+    )
     # 一个 blocked 任务（等审批）+ 一个 completed 任务
     state_store.create_task(conn, task_id="T-1", objective="重启 nginx",
                             created_by="test", status=TaskStatus.QUEUED)
@@ -288,6 +301,13 @@ def test_index_page(client):
     assert "agentHub" in r.text
     assert "AGENT 交互" in r.text
     assert "Hermes 处理中" in r.text
+    assert "conversation.message.delivery.updated" in r.text
+    assert 'class="message-delivery ${esc(m.delivery_status || "")}' in r.text
+    assert "chat-new-content" in r.text
+    assert "有新内容" in r.text
+    assert "response-stream" in r.text
+    assert "conversation.stream.started" in r.text
+    assert "conversation.stream.finished" in r.text
     assert "任务控制" in r.text
     assert "接管子 Agent" in r.text
     assert "归还 Hermes 并重新规划" in r.text
@@ -362,6 +382,37 @@ def test_index_page(client):
     assert 'esc(d.dispatched_objective || "（空）")' in r.text
     assert 'esc(t.objective || "（空）")' not in r.text
     assert "esc(plan.plan_objective)" not in r.text
+
+
+def test_response_stream_projection_returns_cumulative_plaintext(client):
+    from state.db import connect
+
+    collaboration_id = client.get(
+        "/api/collaborations").json()["collaborations"][0]["id"]
+    conn = connect()
+    conn.execute(
+        "INSERT INTO conversation_stream_drafts"
+        " (id, collaboration_id, message_id, last_seq, text_prefix, status,"
+        " updated_at) VALUES (?,?,?,?,?,?,?);",
+        ("st-test", collaboration_id, "M-parent", 3,
+         "正在生成 **尚未闭合", "streaming",
+         "2026-08-30T12:00:00+08:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    response = client.get(
+        f"/api/collaborations/{collaboration_id}/response-streams")
+    assert response.status_code == 200
+    assert response.json()["response_streams"] == [{
+        "collaboration_id": collaboration_id,
+        "parent_message_id": "M-parent",
+        "stream_id": "st-test",
+        "seq": 3,
+        "text": "正在生成 **尚未闭合",
+        "status": "streaming",
+        "updated_at": "2026-08-30T12:00:00+08:00",
+    }]
 
 
 def test_task_detail_uses_task_scoped_dispatch_objective(client):

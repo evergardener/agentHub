@@ -100,6 +100,14 @@ _NEGATED_CHINESE_RISK_PHRASES = (
     "是否发生写入", "是否有写入",
 )
 
+# Benign operation words may precede risk-bearing terms in one Chinese
+# negative constraint, for example ``不得读取、创建、修改、移动或删除其他文件``.
+# They participate only in the bounded negation parser; they never make a
+# positive objective read-only and never weaken the later risk checks.
+_CHINESE_NEGATED_CONSTRAINT_OPERATIONS = (
+    "读取", "查看", "移动", "复制", "重命名",
+)
+
 _ACCESS_MODES = frozenset({"read"})
 
 
@@ -224,7 +232,10 @@ def _strip_negated_chinese_operations(
         if any("\u4e00" <= char <= "\u9fff" for char in str(term))
         and str(term) != "生产"
     }
-    terms.update(("创建", "停止", "对外发布"))
+    terms.update((
+        "创建", "停止", "对外发布",
+        *_CHINESE_NEGATED_CONSTRAINT_OPERATIONS,
+    ))
     ordered_terms = sorted(terms, key=len, reverse=True)
     if not ordered_terms:
         return text, False

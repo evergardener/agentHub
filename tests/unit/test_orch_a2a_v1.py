@@ -248,6 +248,35 @@ def test_tasks_create_readonly_docker_status_dispatches_without_approval(
     }
 
 
+def test_tasks_create_mixed_negative_constraints_remain_write_not_critical(
+        env, tmp_path):
+    tm, client, delegated = env
+    execution_workspace = tmp_path / "project"
+    execution_workspace.mkdir()
+    objective = (
+        "仅更新 marker.txt 并完成写入验证。"
+        "不得读取、创建、修改、移动或删除其他文件；"
+        "不得提交、推送、部署、删除、重启或安装依赖；"
+        "完成写入后重新读取 marker.txt。"
+    )
+
+    response = client.post(
+        "/a2a", json=_control(
+            "tasks/create", agent="codex", objective=objective,
+            workspace=str(execution_workspace)),
+        headers=_bearer()).json()
+
+    task = response["result"]["task"]
+    assert task["status"]["state"] == "input-required"
+    assert task["metadata"]["internal_status"] == "queued"
+    assert delegated == []
+    approval = tm.conn.execute(
+        "SELECT payload_json FROM events WHERE task_id = ?"
+        " AND event_type = 'task.approval_requested';", (task["id"],)
+    ).fetchone()
+    assert json.loads(approval["payload_json"])["risk"] == "write"
+
+
 def test_tasks_create_explicit_read_dispatches_without_keyword_inference(
         env, tmp_path):
     tm, client, delegated = env

@@ -30,6 +30,9 @@ async def test_real_codex_app_server_initialize_and_thread_start(
     )
     try:
         await adapter.start()
+        health = await adapter.health()
+        assert health["ready"] is True
+        assert health["runtime"] == "codex-app-server"
         handle = await adapter.start_session(
             task, session_id=task.session_id, metadata={})
         assert handle.native_session_id
